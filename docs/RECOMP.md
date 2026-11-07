@@ -19,7 +19,7 @@ main.dol --(recomp/lift.py)--> generated/*.c  --(gcc/clang)--> build/ttpc
 
 ```
 python -m recomp.lift <disc>/DATA/sys/main.dol <dtk>/config/symbols.txt generated
-make -C recomp -j
+make -C recomp -f build.mk -j
 ./build/ttpc <disc>/DATA/sys/main.dol [timeout-seconds]
 ```
 (`symbols.txt` comes from `dtk dol split` on main.dol; see FINDINGS.md.)
