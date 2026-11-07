@@ -24,12 +24,13 @@ static void dump_trace(void) {
     u32 last = 0; int n = 0;
     for (int k = 0; k < 256; k++) {
         u32 a = g_trace[(g_trace_pos + k) & 255];
-        if (a && a != last && k > 200) { fprintf(stderr, " %08X", a); n++; }
+        if (a && a != last) { fprintf(stderr, " %08X", a); n++; }
         last = a;
     }
     fprintf(stderr, "\n");
 }
-static void on_alarm(int sig) { (void)sig; fprintf(stderr, "TIMEOUT\n"); dump_trace(); report_seen(); _exit(2); }
+void rt_dump_threads(void);
+static void on_alarm(int sig) { (void)sig; fprintf(stderr, "TIMEOUT\n"); dump_trace(); report_seen(); rt_dump_threads(); _exit(2); }
 static jmp_buf g_halt;
 static int g_trace_mmio = 1;
 static unsigned g_mmio_count;
@@ -41,7 +42,9 @@ static void dump(CPU *c) {
         fprintf(stderr, "  r%-2d %08X %08X %08X %08X %08X %08X %08X %08X\n", i, c->r[i], c->r[i + 1],
                 c->r[i + 2], c->r[i + 3], c->r[i + 4], c->r[i + 5], c->r[i + 6], c->r[i + 7]);
 }
-static void halt(const char *why) { fprintf(stderr, "HALT: %s\n", why); dump(&g_cpu); dump_trace(); longjmp(g_halt, 1); }
+static void halt(const char *why) { fprintf(stderr, "HALT: %s\n", why); dump(&g_cpu); dump_trace(); report_seen(); exit(1); }
+void rt_halt(const char *why) { halt(why); }
+CPU *g_cpup = &g_cpu;
 
 void rt_badaddr(u32 a, int write) {
     char b[96]; snprintf(b, sizeof b, "bad %s at %08X", write ? "write" : "read", a); halt(b);
@@ -91,6 +94,7 @@ u32 rt_mfspr(CPU *c, int spr) {
     case 1: return ((u32)c->so << 31) | ((u32)c->ov << 30) | ((u32)c->ca << 29);
     case 8: return c->lr;
     case 9: return c->ctr;
+    case 22: return rt_get_dec();
     case 268: case 269: return rt_mftb(c, spr);
     }
     if (spr >= 912 && spr <= 919) return c->gqr[spr - 912];
@@ -101,6 +105,7 @@ void rt_mtspr(CPU *c, int spr, u32 v) {
     case 1: c->so = v >> 31; c->ov = (v >> 30) & 1; c->ca = (v >> 29) & 1; return;
     case 8: c->lr = v; return;
     case 9: c->ctr = v; return;
+    case 22: rt_set_dec(v); return;
     }
     if (spr >= 912 && spr <= 919) { c->gqr[spr - 912] = v; return; }
     c->spr[spr & 1023] = v;
@@ -157,7 +162,10 @@ void rt_psq_st(CPU *c, u32 ea, int fs, int w, int i) {
 static u32 g_regs[0x20000];  // 0x0C000000-0x0C00FFFF and 0x0D000000-0x0D00FFFF, 4-byte granularity
 static u32 g_poll_reg, g_poll_count;
 static u32 *reg_slot(u32 p) { return &g_regs[((p >> 24) & 1) * 0x4000 + ((p & 0xFFFF) >> 2)]; }
+static u64 host_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (u64)ts.tv_sec * 1000000000ull + ts.tv_nsec; }
 u32 mmio_read(u32 p, int size) {
+    // Audio interface sample counter (AI_SCNT): advances at 48 kHz in real time.
+    if (p == 0x0D006C08) *reg_slot(p) = (u32)(host_ns() * 48000ull / 1000000000ull);
     u32 v = *reg_slot(p);
     if (size == 2) v = (p & 2) ? (v & 0xFFFF) : (v >> 16);
     else if (size == 1) v = (v >> (8 * (3 - (p & 3)))) & 0xFF;
@@ -169,7 +177,30 @@ u32 mmio_read(u32 p, int size) {
     if (g_trace_mmio && g_mmio_count++ < 300) fprintf(stderr, "  mmio R%d %08X -> %08X\n", size * 8, p, v);
     return v;
 }
+// ---------------------------------------------------------------- headless GPU (until the renderer exists)
+// The GX command FIFO is written to 0x0C008000. We only watch for BP register writes (opcode 0x61) that
+// ask the pixel engine to signal: 0x45 = draw done (PE "finish"), 0x48 = draw sync token (PE "token"),
+// and raise the matching interrupt immediately so the game logic keeps running.
+extern u32 g_irq_pending;
+static int g_fifo_bp;
+static void fifo_write(u32 v, int size) {
+    if (size == 1) { g_fifo_bp = (v == 0x61); return; }
+    if (size == 4 && g_fifo_bp) {
+        u32 reg = v >> 24;
+        if (reg == 0x45 && (v & 2)) {           // PE finish: PE_CTRL bit 3, PI cause 0x400
+            *reg_slot(0x0C001008) |= 0x8; *reg_slot(0x0C003000) |= 0x400; g_irq_pending = 1;
+        } else if (reg == 0x48) {               // PE token: token value, PE_CTRL bit 2, PI cause 0x200
+            *reg_slot(0x0C00100C) = (*reg_slot(0x0C00100C) & 0xFFFF0000u) | (v & 0xFFFF);
+            *reg_slot(0x0C001008) |= 0x4; *reg_slot(0x0C003000) |= 0x200; g_irq_pending = 1;
+        }
+    }
+    g_fifo_bp = 0;
+}
+
+u32 mmio_peek(u32 p) { return *reg_slot(p); }
+void mmio_poke(u32 p, u32 v) { *reg_slot(p) = v; }
 void mmio_write(u32 p, u32 v, int size) {
+    if ((p & 0xFFFFFFE0u) == 0x0C008000u) { fifo_write(v, size); return; }   // GX FIFO (write-gather pipe)
     u32 *r = reg_slot(p);
     if (size == 4) *r = v;
     else if (size == 2) *r = (p & 2) ? ((*r & 0xFFFF0000u) | (v & 0xFFFF)) : ((*r & 0xFFFF) | (v << 16));

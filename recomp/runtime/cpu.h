@@ -82,6 +82,10 @@ static inline void WF64(u32 a, double d) { u64 v; memcpy(&v, &d, 8); W32(a, (u32
 
 // ---------------------------------------------------------------- runtime services
 void rt_call(CPU *c, u32 addr);
+extern u32 g_irq_pending;          // set when an interrupt source may need servicing
+void rt_poll(CPU *c);              // deliver pending interrupts (called on loop back-edges)
+void rt_set_dec(u32 v); u32 rt_get_dec(void);
+void orig_8021B5D0(CPU *c); void orig_802222E0(CPU *c);
 void rt_syscall(CPU *c, u32 pc);
 void rt_rfi(CPU *c);
 void rt_trap(CPU *c, u32 pc);

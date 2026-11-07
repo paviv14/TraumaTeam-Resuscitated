@@ -37,6 +37,21 @@ make -C recomp -f build.mk -j
 Fixed along the way: dtk-missed switch tables (any data pointer into a function is a jump target),
 .sdata overlapping the DOL bss range, `sc` (sync-only syscall), `rfi` for RealMode, EXI transfers.
 
+## Status - milestone 2: system services, threads and interrupts
+
+* **IOS stand-in** (`runtime/ios.c`): replaces `__ios_Ipc2`. Answers ES (title ID, data dir), FS/NAND
+  (host folder `nand/`), STM, DI (disc drive, correct 1=success codes), KD. Async replies are queued and
+  delivered as IPC interrupts (the DVD driver arms timeout alarms after issuing requests).
+* **Threads** (`runtime/threads.c`): every guest OSContext runs on a host fiber; SelectThread/
+  OSSaveContext are wrapped (original body kept as `orig_*`), OSLoadContext switches fibers or unwinds.
+* **Interrupts**: polled on every loop back-edge when MSR[EE] is set. VI retrace at 60 Hz, decrementer
+  (OSAlarm), GPU finish/token (headless: detected in the GX FIFO stream), IPC replies.
+* Audio interface sample counter runs at 48 kHz.
+* **699 game functions run natively**; the game creates its own worker thread and enters init.
+* Next blocker: the AX audio library boots its DSP mixing program and waits for the DSP's handshake
+  mail (`fn_80246120`/`fn_80246700` polling `0x0C005004`). Plan: HLE AX (native mixer), as Dolphin's
+  AX HLE does, instead of emulating the DSP.
+
 ## Roadmap to "opening sequence -> main menu in 4K"
 
 | # | Piece | Approach |

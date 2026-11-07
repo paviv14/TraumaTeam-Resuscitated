@@ -55,6 +55,10 @@ def F0(n): return f"c->f[{n}].ps0"
 def F1(n): return f"c->f[{n}].ps1"
 
 
+# Interrupt delivery point, emitted on every backward branch (loops): cheap flag test.
+POLL = "if (g_irq_pending) rt_poll(c); "
+
+
 def cr0(expr):
     return f"SET_CR0((s32)({expr}));"
 
@@ -81,6 +85,14 @@ def bc_cond(BO, BI):
         bit = f"CR_BIT({BI})"
         parts.append(bit if BO & 8 else f"!{bit}")
     return pre, (" && ".join(parts) if parts else "1")
+
+
+# Functions whose original body must stay callable from a native replacement: the body is emitted
+# as orig_XXXXXXXX and recomp/runtime provides f_XXXXXXXX.
+WRAP = {
+    0x802222E0,  # SelectThread   (thread scheduler: fiber switching)
+    0x8021B5D0,  # OSSaveContext  (records which fiber owns a context)
+}
 
 
 class Lifter:
@@ -143,7 +155,8 @@ class Lifter:
             if ins.name in ("b", "bc") and entry <= ins.target < end and not (ins.name == "b" and ins.LK):
                 labels.add(ins.target)
         jt = sorted(t for t in labels if t in self.jt_targets.get(start, set()) and t >= entry)
-        out = [f"WEAK void f_{entry:08X}(CPU *c) {{", f"    u32 ea; (void)ea; TRACE(0x{entry:08X}u);"]
+        head = f"void orig_{entry:08X}(CPU *c)" if entry in WRAP else f"WEAK void f_{entry:08X}(CPU *c)"
+        out = [head + " {", f"    u32 ea; (void)ea; TRACE(0x{entry:08X}u);"]
         for ins in insns:
             if ins.addr in labels:
                 out.append(f"L_{ins.addr:08X}:")
@@ -171,12 +184,17 @@ class Lifter:
         if n == "b":
             if i.LK:
                 return self.call(i.target, nxt)
-            return f"goto L_{i.target:08X};" if inside(i.target) else self.tail(i.target)
+            if inside(i.target):
+                return f"{POLL}goto L_{i.target:08X};" if i.target <= a else f"goto L_{i.target:08X};"
+            return self.tail(i.target)
         if n == "bc":
             pre, cond = bc_cond(i.BO, i.BI)
             if i.LK:
                 return f"{pre}if ({cond}) {{ {self.call(i.target, nxt)} }}"
-            body = f"goto L_{i.target:08X};" if inside(i.target) else self.tail(i.target)
+            if inside(i.target):
+                body = (POLL if i.target <= a else "") + f"goto L_{i.target:08X};"
+            else:
+                body = self.tail(i.target)
             return f"{pre}if ({cond}) {{ {body} }}"
         if n == "bclr":
             pre, cond = bc_cond(i.BO, i.BI)
@@ -400,6 +418,8 @@ def main(dol_path, sym_path, out):
         fh.write("#pragma once\n")
         for e in entries:
             fh.write(f"void f_{e:08X}(CPU *c);\n")
+        for e in sorted(WRAP):
+            fh.write(f"void orig_{e:08X}(CPU *c);\n")
     with open(os.path.join(out, "functable.c"), "w") as fh:
         fh.write('#include "cpu.h"\n#include "funcs.h"\n\nconst FuncEntry g_funcs[] = {\n')
         for e in entries:
