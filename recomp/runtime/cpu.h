@@ -82,6 +82,7 @@ static inline void WF64(u32 a, double d) { u64 v; memcpy(&v, &d, 8); W32(a, (u32
 
 // ---------------------------------------------------------------- runtime services
 void rt_call(CPU *c, u32 addr);
+void rt_logfn(CPU *c, u32 addr);   // debug hook (see RECOMP_LOG in lift.py)
 extern u32 g_irq_pending;          // set when an interrupt source may need servicing
 void rt_poll(CPU *c);              // deliver pending interrupts (called on loop back-edges)
 void rt_set_dec(u32 v); u32 rt_get_dec(void);

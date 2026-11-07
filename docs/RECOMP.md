@@ -70,6 +70,21 @@ Fixed along the way: dtk-missed switch tables (any data pointer into a function 
   the draw-sync token equals last+1; the job queue (`fn_8000C5C0`/`fn_8000C720`) then stalls. Needs
   closer study of how the game paces GPU completion vs. VI retrace.
 
+## Status - milestone 4: frames flow, audio heartbeat, disc reads
+
+* **Frame pipeline runs**: the GPU front end models the GPU read position (stops exactly at armed
+  breakpoints, PE events fire as it passes them) and paces frame completion to the 60 Hz retrace -
+  the game's flip logic requires draw-sync token == last + 1 at each retrace. 650+ frames per 30 s.
+* **AX heartbeat**: every command list is acknowledged like the AX program does (yield 0xDCD10002 +
+  DSP interrupt); the NW4R sound system runs and saves its settings. Mixing still to do.
+* **Disc** (`runtime/disc.c`): fst.bin is loaded to the top of MEM1 and published at 0x80000038 like
+  the apploader does; drive reads (DI 0x71/0x8D/0x70) are served from an extracted disc folder
+  (`TTPC_DISC=<disc>/DATA`). The game loads gffData.bin, font.brfnt and the Home Button menu, and
+  reaches the title-screen task (`TitleCalc`).
+* **1,302 functions run natively.** Next file requested: `sound/eng/sys/00000000/static.brsar`.
+* Debug aids: `RECOMP_LOG=<addrs>` at lift time logs function entries (`rt_logfn` in hle.c);
+  `TTPC_SEEN=<file>` dumps every game function that ran; `TTPC_PEEK` / `TTPC_WATCH` at timeout.
+
 ## Roadmap to "opening sequence -> main menu in 4K"
 
 | # | Piece | Approach |

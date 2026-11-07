@@ -159,7 +159,7 @@ static void deliver(CPU *c, u32 handler, u32 exc) {
     me->in_irq--;
 }
 
-void ios_service(CPU *c); void dsp_tick(void); void gx_tick(void); u32 gx_cause(void);
+void ios_service(CPU *c); void dsp_tick(void); void gx_tick(void); u32 gx_cause(void); void gx_on_retrace(void);
 void rt_poll(CPU *c) {
     if (!(c->msr & 0x8000u) || g_cur->in_irq) return;   // MSR[EE], and never inside a handler
     g_cur->in_irq++;
@@ -187,6 +187,7 @@ void rt_poll(CPU *c) {
     }
     if (t >= g_next_vi) {
         g_next_vi += 16683333;
+        gx_on_retrace();
         if (g_next_vi < t) g_next_vi = t + 16683333;
         // VI display interrupts DI0/DI1 (0x0C002030/34): raise bit 31 on each enabled one (bit 28),
         // and the VI cause bit in the PI interrupt cause register (0x0C003000).

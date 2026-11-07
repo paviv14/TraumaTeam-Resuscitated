@@ -15,6 +15,11 @@ u8 g_seen[0x340000 / 4];
 static void report_seen(void) {
     unsigned n = 0; for (unsigned k = 0; k < sizeof g_seen; k++) n += g_seen[k];
     fprintf(stderr, "distinct functions executed: %u / %u\n", n, g_nfuncs);
+    if (getenv("TTPC_SEEN")) {   // list every game-code function that ran (0x80007360-0x80206000)
+        FILE *f = fopen(getenv("TTPC_SEEN"), "w");
+        for (u32 a = 0x80007360; a < 0x80206000; a += 4) if (g_seen[(a - 0x80004000u) >> 2]) fprintf(f, "%08X\n", a);
+        fclose(f);
+    }
     const char *pk = getenv("TTPC_PEEK");   // e.g. TTPC_PEEK=805842C5,805842C6 : print bytes at timeout
     while (pk && *pk) { u32 a = (u32)strtoul(pk, (char **)&pk, 16); fprintf(stderr, "  [%08X] = %02X %02X %02X %02X\n", a, R8(a), R8(a+1), R8(a+2), R8(a+3)); if (*pk == ',') pk++; else break; }
     const char *w = getenv("TTPC_WATCH");   // e.g. TTPC_WATCH=8022FCC0,8000C500
@@ -251,6 +256,8 @@ int main(int argc, char **argv) {
     if (g_mem == MAP_FAILED) { perror("mmap"); return 1; }
     load_dol(argv[1]);
     setup_lowmem();
+    void disc_init(const char *root);
+    disc_init(getenv("TTPC_DISC") ? getenv("TTPC_DISC") : "disc/DATA");
     CPU *c = &g_cpu;
     signal(SIGALRM, on_alarm); alarm(argc > 2 ? atoi(argv[2]) : 15);
     { static char altstack[1 << 16]; stack_t ss = { .ss_sp = altstack, .ss_size = sizeof altstack };

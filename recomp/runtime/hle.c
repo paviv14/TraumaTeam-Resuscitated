@@ -8,3 +8,13 @@
 // __OSInitAudioSystem: uploads a tiny bootstrap program to the audio DSP and spins on DSP_CSR until
 // the DSP acknowledges. Audio is handled natively on PC, so there is no DSP to wake up.
 HLE(8021A9A0, __OSInitAudioSystem) { (void)c; fprintf(stderr, "[hle] __OSInitAudioSystem skipped\n"); }
+
+// Debug hook for functions listed in RECOMP_LOG at lift time. Prints arguments and the game's
+// frame-pacing state (queue at 0x804860B0, flags in small data) - adjust freely while investigating.
+void rt_logfn(CPU *c, u32 addr) {
+    static int n; if (n++ > 4000) return;
+    u32 r13 = c->r[13];
+    fprintf(stderr, "[fn %08X] r3=%08X r4=%08X | q head %u tail %u | flags %u %u | last tok %u gpu tok %u | fb %08X\n",
+            addr, c->r[3], c->r[4], R16(0x804860EE), R16(0x804860EC), R8(r13 - 0x51FB), R8(r13 - 0x51FA),
+            R16(r13 - 0x51F8), R16(0xCC00100E), R32(r13 - 0x5200));
+}

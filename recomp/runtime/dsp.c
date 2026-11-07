@@ -36,6 +36,19 @@ static void on_mail(u32 m) {
         }
         return;
     }
+    // AX: 0xBABExxxx announces a command list (low 16 bits = size), the next mail is its address.
+    // We acknowledge each list like the AX program does when it has finished a frame: "yield"
+    // (0xDCD10002) + DSP interrupt; the SDK task manager answers 0xCDD1000x (resume/continue).
+    // TODO (audio): execute the command list = mix the voices into the output buffers.
+    static u32 cmdlist_size; static int nframes;
+    if ((m & 0xFFFF0000u) == 0xBABE0000u) { cmdlist_size = m & 0xFFFF; return; }
+    if (cmdlist_size) {
+        cmdlist_size = 0;
+        if (g_log && nframes++ < 3) fprintf(stderr, "[dsp] AX command list at %08X -> frame done\n", m);
+        push(0xDCD10002u); raise_dsp_int();
+        return;
+    }
+    if ((m & 0xFFFF0000u) == 0xCDD10000u) return;   // task manager replies
     if (g_log) fprintf(stderr, "[dsp] mail from CPU %08X (unhandled)\n", m);
 }
 

@@ -56,6 +56,7 @@ static int open_fd(const char *path, int mode) {
 }
 
 // ---------------------------------------------------------------- devices
+int disc_read(u64 off, u32 len, u32 dst);
 // /dev/di (disc drive). The driver reports 1 = success, 2 = drive error.
 static s32 di_ioctl(u32 cmd, u32 in, u32 inl, u32 out, u32 outl) {
     if (outl) zero(out, outl);
@@ -64,9 +65,10 @@ static s32 di_ioctl(u32 cmd, u32 in, u32 inl, u32 out, u32 outl) {
     case 0x88: /* GetCoverStatus */ if (outl >= 4) W32(out, 0x2); return 1;   // disc inserted, cover closed
     case 0x7A: /* GetCoverRegister */ if (outl >= 4) W32(out, 0); return 1;
     case 0xE0: /* RequestError */ if (outl >= 4) W32(out, 0); return 1;
-    case 0x71: case 0x8D: case 0x70:
-        fprintf(stderr, "[di] read cmd 0x%X offset %08X len %08X (not implemented yet)\n", cmd, R32(in + 8), R32(in + 4));
-        return 2;
+    case 0x71: case 0x8D:   /* Read / UnencryptedRead: in+4 length, in+8 offset in 4-byte units */
+        return disc_read((u64)R32(in + 8) << 2, R32(in + 4), out);
+    case 0x70:              /* ReadDiskID: first 0x20 bytes of the disc header */
+        return disc_read(0, outl < 0x20 ? outl : 0x20, out);
     }
     return 1;
 }

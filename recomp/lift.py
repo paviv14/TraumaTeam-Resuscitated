@@ -95,6 +95,10 @@ WRAP = {
 }
 
 
+# Debugging: functions that log every entry (RECOMP_LOG=8000C5C0,8000C500 python -m recomp.lift ...)
+LOG_FUNCS = {int(x, 16) for x in os.environ.get("RECOMP_LOG", "").split(",") if x}
+
+
 class Lifter:
     def __init__(self, dol, funcs, jumptables):
         self.dol = dol
@@ -157,6 +161,8 @@ class Lifter:
         jt = sorted(t for t in labels if t in self.jt_targets.get(start, set()) and t >= entry)
         head = f"void orig_{entry:08X}(CPU *c)" if entry in WRAP else f"WEAK void f_{entry:08X}(CPU *c)"
         out = [head + " {", f"    u32 ea; (void)ea; TRACE(0x{entry:08X}u);"]
+        if entry in LOG_FUNCS:
+            out.append(f"    rt_logfn(c, 0x{entry:08X}u);")
         for ins in insns:
             if ins.addr in labels:
                 out.append(f"L_{ins.addr:08X}:")
