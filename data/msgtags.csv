@@ -1,3 +1,5 @@
-id,name,source
-0x00,wait,test_mes.msg
-0x0B,se_play,explanation_eng.msg
+id,name,confidence,evidence
+0x00,wait,source,test_mes.msg: page break '<wait>' -> FF 0000 0000
+0x09,TELOP,source,explanation_eng.msg '<TELOP -1>' compiles to tag 0x09
+0x0B,se_play,source,explanation_eng.msg '<se_play 0 1 0>' compiles to tag 0x0B
+0x0E,color,inferred,arg type 2 value 4/5/6 precedes words 'red'/'BLUE'/'grEen' in comic 000_000

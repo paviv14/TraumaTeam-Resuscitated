@@ -1,6 +1,7 @@
 """Script command (COMM) database: data/commands.csv.
 
-Columns: id, name, argc, handler, confidence, evidence
+Columns: id, name, argc, msg_args (argument positions holding a message index), handler,
+         confidence, evidence
   confidence: source  = name taken from Atlus's leaked test.scr
               inferred = named by us from handler code / usage; may be refined
               (blank)  = unnamed, prints as CMD_XXX
@@ -26,6 +27,10 @@ class Commands:
     def argc(self, i):
         r = self.rows.get(i)
         return int(r["argc"]) if r else 0
+
+    def msg_args(self, i):
+        r = self.rows.get(i)
+        return [int(x) for x in r["msg_args"].split(";")] if r and r.get("msg_args") else []
 
     def id(self, s):
         if s in self.by_name:

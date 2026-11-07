@@ -1,0 +1,8 @@
+[project]
+name = "ttre"
+version = "0.1.0"
+description = "Trauma Team (Wii) reverse-engineering and modding toolkit"
+requires-python = ">=3.9"
+
+[project.scripts]
+ttre = "ttre.cli:main"
