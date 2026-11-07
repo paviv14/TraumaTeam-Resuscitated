@@ -52,6 +52,24 @@ Fixed along the way: dtk-missed switch tables (any data pointer into a function 
   mail (`fn_80246120`/`fn_80246700` polling `0x0C005004`). Plan: HLE AX (native mixer), as Dolphin's
   AX HLE does, instead of emulating the DSP.
 
+## Status - milestone 3: audio, Bluetooth and GPU front end
+
+* **Audio DSP stand-in** (`runtime/dsp.c`): plays the DSP side of the mailbox protocol (boot ROM
+  greeting 0x8071FEED, 10-mail program boot, task INIT 0xDCD10000 + DSP interrupt). **Audio DMA**
+  "plays" buffers at 48 kHz and raises AI interrupts; AX now sends its per-frame command lists
+  (0xBABE0080 + address) - processing them (mixing) is the AX HLE still to write.
+* **Bluetooth**: an idle HCI controller inside the IOS stand-in answers the stack's 15 setup commands;
+  WPAD initialises with no Wii Remotes. Input for the port will be injected at the WPAD level.
+* **GPU front end** (`runtime/gx.c`): the command stream is written into the game's FIFO memory at the
+  PI write pointer (ready for the renderer). A headless "GPU" honours FIFO breakpoints (holding later
+  events until released), draw-done and draw-sync tokens.
+* Interrupt causes now follow device status (one dispatch services one source), nested delivery is
+  blocked per thread, and a crash handler replaces the old call-depth counter.
+* **1,227 functions run natively, 4 threads, 2 complete frames** through the game's frame pipeline.
+* Next blocker: frame 3. The game's retrace callback (`fn_8000C660`) flips the framebuffer only when
+  the draw-sync token equals last+1; the job queue (`fn_8000C5C0`/`fn_8000C720`) then stalls. Needs
+  closer study of how the game paces GPU completion vs. VI retrace.
+
 ## Roadmap to "opening sequence -> main menu in 4K"
 
 | # | Piece | Approach |

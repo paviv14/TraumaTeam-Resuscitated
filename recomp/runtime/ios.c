@@ -22,6 +22,10 @@
 typedef struct { char path[64]; FILE *fp; int is_file; } Fd;
 static Fd g_fd[32];
 static int g_log = 1;
+static u32 g_cur_req, g_cur_cb;
+typedef struct { u32 req, cb; s32 result; } Pending;
+static Pending g_pend[64]; static int g_npend;   // request being handled (for requests completed later)
+static void complete_later(u32 req, u32 cb, s32 result);
 const char *g_nand_root = "nand";  // host folder standing in for the Wii's internal storage
 
 static void rd_str(u32 a, char *out, int max) {
@@ -96,6 +100,59 @@ static s32 dev_ioctl(Fd *d, u32 cmd, u32 in, u32 inl, u32 out, u32 outl) {
     return 0;
 }
 
+// ---------------------------------------------------------------- Bluetooth module (idle HCI controller)
+// The SDK's Bluetooth stack talks HCI over USB: control messages carry commands, interrupt reads
+// (endpoint 0x81) receive events, bulk transfers carry ACL data. We answer every command like an idle
+// controller with no paired devices, so WPAD initialises and reports no Wii Remotes. Input for the
+// PC port is injected at the WPAD level instead.
+typedef struct { u32 req, cb, buf, len; } BtRead;
+static BtRead g_btr[8]; static int g_nbtr;
+static u8 g_evq[32][64]; static int g_evlen[32], g_nev;
+static void bt_event(const u8 *e, int n) { if (g_nev < 32) { memcpy(g_evq[g_nev], e, n); g_evlen[g_nev++] = n; } }
+static void bt_pump(void) {
+    while (g_nev && g_nbtr) {
+        BtRead r = g_btr[0]; memmove(g_btr, g_btr + 1, --g_nbtr * sizeof *g_btr);
+        int n = g_evlen[0] < (int)r.len ? g_evlen[0] : (int)r.len;
+        wr_buf(r.buf, g_evq[0], n);
+        memmove(g_evq, g_evq + 1, (g_nev - 1) * sizeof g_evq[0]); memmove(g_evlen, g_evlen + 1, (g_nev - 1) * sizeof(int)); g_nev--;
+        W32(r.req + 4, (u32)n);
+        complete_later(r.req, r.cb, n);
+    }
+}
+static void hci_command(u16 op, u32 data, u32 len) {
+    u8 e[64] = { 0x0E, 0, 1, (u8)op, (u8)(op >> 8), 0 };   // Command Complete, 1 packet, opcode, status 0
+    int n = 6;
+    switch (op) {
+    case 0x1009: memcpy(e + n, "\x11\x22\x33\x44\x55\x66", 6); n += 6; break;          // Read_BD_ADDR
+    case 0x1001: { u8 r[] = { 3, 0x40, 0xA7, 3, 0x0F, 0, 0xC3, 0x40 }; memcpy(e + n, r, 8); n += 8; break; } // local version
+    case 0x1003: { u8 r[] = { 0xFF, 0xFF, 0x8D, 0xFE, 0x9B, 0xF9, 0, 0x80 }; memcpy(e + n, r, 8); n += 8; break; } // features
+    case 0x1005: { u8 r[] = { 0x53, 0x01, 0x40, 0x0A, 0x00, 0x00, 0x00 }; memcpy(e + n, r, 7); n += 7; break; }   // buffer size
+    case 0x0C0D: { u8 r[] = { 0xFF, 0x00, 0x00, 0x00 }; memcpy(e + n, r, 4); n += 4; break; }  // stored link keys: none
+    case 0x0C14: memset(e + n, 0, 248); n += 248 > 58 ? 58 : 248; break;                        // local name
+    case 0x0401: case 0x0405: case 0x0406: case 0x0419: case 0x041B: case 0x080D:            // async: Command Status
+        e[0] = 0x0F; e[2] = 0; e[3] = 1; e[4] = (u8)op; e[5] = (u8)(op >> 8); n = 6;
+        if (op == 0x0401) { bt_event(e, n); u8 done[] = { 0x01, 1, 0 }; memcpy(e, done, 3); n = 3; }  // inquiry: none found
+        break;
+    }
+    e[1] = (u8)(n - 2);
+    bt_event(e, n);
+    if (g_log) fprintf(stderr, "[bt] HCI %04X -> answered\n", op);
+}
+static s32 bt_ioctlv(u32 cmd, u32 nin, u32 nio, u32 v[16][2]) {
+    if (cmd == 2 || cmd == 1) {                          // interrupt/bulk read
+        u32 ep = R8(v[0][0]);
+        if (cmd == 2 && ep == 0x81 && g_nbtr < 8) { g_btr[g_nbtr++] = (BtRead){ g_cur_req, g_cur_cb, v[nin][0], v[nin][1] }; bt_pump(); }
+        return IOS_PENDING;                              // completed by bt_pump when an event exists
+    }
+    if (cmd == 0) {                                      // control message = HCI command
+        u32 data = v[6][0], len = v[6][1];
+        if (len >= 3) hci_command((u16)(R8(data) | R8(data + 1) << 8), data + 3, len - 3);
+        bt_pump();
+        return (s32)len;
+    }
+    return 0;
+}
+
 static s32 dev_ioctlv(Fd *d, u32 cmd, u32 nin, u32 nio, u32 vec) {
     u32 v[16][2];
     for (u32 k = 0; k < nin + nio && k < 16; k++) { v[k][0] = R32(vec + 8 * k); v[k][1] = R32(vec + 8 * k + 4); }
@@ -106,6 +163,7 @@ static s32 dev_ioctlv(Fd *d, u32 cmd, u32 nin, u32 nio, u32 vec) {
         }
     }
     if (!strcmp(d->path, "/dev/di")) { fprintf(stderr, "[di] ioctlv 0x%X\n", cmd); return 1; }
+    if (!strncmp(d->path, "/dev/usb/oh1/57e/305", 20)) return bt_ioctlv(cmd, nin, nio, v);
     if (!strcmp(d->path, "/dev/fs") && cmd == 0x0C /* GetUsage */) { W32(v[1][0], 0); W32(v[2][0], 0); return 0; }
     for (u32 k = nin; k < nin + nio && k < 16; k++) if (v[k][1] < 0x10000) zero(v[k][0], v[k][1]);
     return 0;
@@ -135,8 +193,7 @@ static s32 handle(u32 req) {
 
 // Asynchronous replies are queued and delivered later from rt_poll, like the real IPC interrupt:
 // callers often arm a timeout alarm *after* issuing an async request, so replying instantly breaks them.
-typedef struct { u32 req, cb; s32 result; } Pending;
-static Pending g_pend[64]; static int g_npend;
+
 #define SCRATCH_CTX 0x933F0000u   // free guest memory (the real IOS heap area) used as interrupt context
 
 void ios_service(CPU *c) {
@@ -156,10 +213,16 @@ void ios_service(CPU *c) {
     }
 }
 
+static void complete_later(u32 req, u32 cb, s32 result) {
+    if (!cb) return;   // a synchronous caller would be asleep: not used for pending requests here
+    if (g_npend < 64) { g_pend[g_npend++] = (Pending){ req, cb, result }; g_irq_pending = 1; }
+}
+
 // __ios_Ipc2(request, callback): callback == 0 means synchronous (return the result).
 void f_8024D110(CPU *c) {
     u32 req = c->r[3], cb = c->r[4];
     if (!req) { c->r[3] = (u32)-4; return; }
+    g_cur_req = req; g_cur_cb = cb;
     s32 r = handle(req);
     if (r == IOS_PENDING) { c->r[3] = 0; return; }   // left outstanding: the callback never fires
     W32(req + 4, (u32)r);

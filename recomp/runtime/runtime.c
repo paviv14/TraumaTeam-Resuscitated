@@ -15,6 +15,10 @@ u8 g_seen[0x340000 / 4];
 static void report_seen(void) {
     unsigned n = 0; for (unsigned k = 0; k < sizeof g_seen; k++) n += g_seen[k];
     fprintf(stderr, "distinct functions executed: %u / %u\n", n, g_nfuncs);
+    const char *pk = getenv("TTPC_PEEK");   // e.g. TTPC_PEEK=805842C5,805842C6 : print bytes at timeout
+    while (pk && *pk) { u32 a = (u32)strtoul(pk, (char **)&pk, 16); fprintf(stderr, "  [%08X] = %02X %02X %02X %02X\n", a, R8(a), R8(a+1), R8(a+2), R8(a+3)); if (*pk == ',') pk++; else break; }
+    const char *w = getenv("TTPC_WATCH");   // e.g. TTPC_WATCH=8022FCC0,8000C500
+    while (w && *w) { u32 a = (u32)strtoul(w, (char **)&w, 16); fprintf(stderr, "  %08X ran: %s\n", a, g_seen[(a - 0x80004000u) >> 2] ? "yes" : "no"); if (*w == ',') w++; else break; }
 }
 #include <signal.h>
 #include <unistd.h>
@@ -30,6 +34,12 @@ static void dump_trace(void) {
     fprintf(stderr, "\n");
 }
 void rt_dump_threads(void);
+static void dump(CPU *c);
+static void on_segv(int sig) {
+    (void)sig;
+    static const char m[] = "CRASH (host stack overflow or bad pointer)\n"; write(2, m, sizeof m - 1);
+    dump(&g_cpu); dump_trace(); report_seen(); rt_dump_threads(); _exit(3);
+}
 static void on_alarm(int sig) { (void)sig; fprintf(stderr, "TIMEOUT\n"); dump_trace(); report_seen(); rt_dump_threads(); _exit(2); }
 static jmp_buf g_halt;
 static int g_trace_mmio = 1;
@@ -68,7 +78,6 @@ void rt_rfi(CPU *c) {
 }
 
 // ---------------------------------------------------------------- indirect calls
-static int g_depth;
 static int find_func(u32 addr) {
     u32 lo = 0, hi = g_nfuncs;
     while (lo < hi) {
@@ -80,9 +89,7 @@ static int find_func(u32 addr) {
 void rt_call(CPU *c, u32 addr) {
     int lo = find_func(addr);
     if (lo >= 0) {
-        if (++g_depth > 20000) halt("call depth overflow");
-        g_funcs[lo].fn(c);
-        g_depth--;
+        g_funcs[lo].fn(c);   // (no depth counter: fibers/longjmp unwind past returns; see on_segv)
         return;
     }
     char b[64]; snprintf(b, sizeof b, "indirect call to unknown address %08X (lr %08X)", addr, c->lr); halt(b);
@@ -163,7 +170,9 @@ static u32 g_regs[0x20000];  // 0x0C000000-0x0C00FFFF and 0x0D000000-0x0D00FFFF,
 static u32 g_poll_reg, g_poll_count;
 static u32 *reg_slot(u32 p) { return &g_regs[((p >> 24) & 1) * 0x4000 + ((p & 0xFFFF) >> 2)]; }
 static u64 host_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (u64)ts.tv_sec * 1000000000ull + ts.tv_nsec; }
+u32 dsp_read(u32 p, int size); void dsp_write(u32 p, u32 v, int size);
 u32 mmio_read(u32 p, int size) {
+    if ((p & 0xFFFFFFC0u) == 0x0C005000u) return dsp_read(p, size);
     // Audio interface sample counter (AI_SCNT): advances at 48 kHz in real time.
     if (p == 0x0D006C08) *reg_slot(p) = (u32)(host_ns() * 48000ull / 1000000000ull);
     u32 v = *reg_slot(p);
@@ -177,35 +186,23 @@ u32 mmio_read(u32 p, int size) {
     if (g_trace_mmio && g_mmio_count++ < 300) fprintf(stderr, "  mmio R%d %08X -> %08X\n", size * 8, p, v);
     return v;
 }
-// ---------------------------------------------------------------- headless GPU (until the renderer exists)
-// The GX command FIFO is written to 0x0C008000. We only watch for BP register writes (opcode 0x61) that
-// ask the pixel engine to signal: 0x45 = draw done (PE "finish"), 0x48 = draw sync token (PE "token"),
-// and raise the matching interrupt immediately so the game logic keeps running.
-extern u32 g_irq_pending;
-static int g_fifo_bp;
-static void fifo_write(u32 v, int size) {
-    if (size == 1) { g_fifo_bp = (v == 0x61); return; }
-    if (size == 4 && g_fifo_bp) {
-        u32 reg = v >> 24;
-        if (reg == 0x45 && (v & 2)) {           // PE finish: PE_CTRL bit 3, PI cause 0x400
-            *reg_slot(0x0C001008) |= 0x8; *reg_slot(0x0C003000) |= 0x400; g_irq_pending = 1;
-        } else if (reg == 0x48) {               // PE token: token value, PE_CTRL bit 2, PI cause 0x200
-            *reg_slot(0x0C00100C) = (*reg_slot(0x0C00100C) & 0xFFFF0000u) | (v & 0xFFFF);
-            *reg_slot(0x0C001008) |= 0x4; *reg_slot(0x0C003000) |= 0x200; g_irq_pending = 1;
-        }
-    }
-    g_fifo_bp = 0;
-}
+void gx_fifo_write(u32 v, int size); void gx_cp_write(u32 p, u32 v, int size);
 
 u32 mmio_peek(u32 p) { return *reg_slot(p); }
 void mmio_poke(u32 p, u32 v) { *reg_slot(p) = v; }
 void mmio_write(u32 p, u32 v, int size) {
-    if ((p & 0xFFFFFFE0u) == 0x0C008000u) { fifo_write(v, size); return; }   // GX FIFO (write-gather pipe)
+    if ((p & 0xFFFFFFE0u) == 0x0C008000u) { gx_fifo_write(v, size); return; }   
+    if ((p & 0xFFFFFFC0u) == 0x0C005000u) { dsp_write(p, v, size); return; }   // GX FIFO (write-gather pipe)
     u32 *r = reg_slot(p);
+    if (p == 0x0C00100A && size == 2) {   // PE control: status bits 2/3 are write-1-to-clear
+        u32 cur = *r & 0xFFFF; u32 nv = (v & ~0xCu) | (cur & 0xC & ~(v & 0xC));
+        *r = (*r & 0xFFFF0000u) | nv; g_poll_reg = 0; return;
+    }
     if (size == 4) *r = v;
     else if (size == 2) *r = (p & 2) ? ((*r & 0xFFFF0000u) | (v & 0xFFFF)) : ((*r & 0xFFFF) | (v << 16));
     else { int sh = 8 * (3 - (p & 3)); *r = (*r & ~(0xFFu << sh)) | ((v & 0xFF) << sh); }
     g_poll_reg = 0;
+    if ((p & 0xFFFFFF00u) == 0x0C000000u) gx_cp_write(p, v, size);
     // EXI (0x0D006800, 3 channels x 0x14): CPR at +0x00, MAR +0x04, LENGTH +0x08, CR +0x0C, DATA +0x10.
     // Transfers complete immediately: clear TSTART and raise "transfer complete" in the channel status.
     if ((p & 0xFFFFFF00u) == 0x0D006800u && size == 4) {
@@ -256,6 +253,9 @@ int main(int argc, char **argv) {
     setup_lowmem();
     CPU *c = &g_cpu;
     signal(SIGALRM, on_alarm); alarm(argc > 2 ? atoi(argv[2]) : 15);
+    { static char altstack[1 << 16]; stack_t ss = { .ss_sp = altstack, .ss_size = sizeof altstack };
+      sigaltstack(&ss, NULL); struct sigaction sa = { .sa_handler = on_segv, .sa_flags = SA_ONSTACK };
+      sigaction(SIGSEGV, &sa, NULL); sigaction(SIGBUS, &sa, NULL); }
     c->msr = 0x00002032;
     fprintf(stderr, "booting at %08X (%u recompiled entry points)\n", g_entry, g_nfuncs);
     if (!setjmp(g_halt)) {

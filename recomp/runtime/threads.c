@@ -27,6 +27,7 @@ typedef struct Fiber {
     ucontext_t uc;
     Resume *top;             // newest resume point
     int started;
+    int in_irq;              // >0 while this fiber is running an interrupt handler (no nesting)
     struct Fiber *next;
 } Fiber;
 
@@ -148,18 +149,24 @@ static void deliver(CPU *c, u32 handler, u32 exc) {
     u32 ctx = R32(0x800000D4);         // current OSContext (OSGetCurrentContext)
     Resume r; r.regs = *c; r.kind = 1; r.irq_ctx = ctx; r.prev = g_cur->top;
     Fiber *me = g_cur;
-    if (setjmp(r.jb)) { me->top = r.prev; *c = r.regs; return; }
+    if (setjmp(r.jb)) { me->top = r.prev; *c = r.regs; me->in_irq--; return; }
     me->top = &r;
+    me->in_irq++;
     c->msr &= ~0x8000u;                // EE off inside the handler
     c->r[3] = exc; c->r[4] = ctx;
     rt_call(c, handler);
     me->top = r.prev; *c = r.regs;     // handler returned without OSLoadContext: just continue
+    me->in_irq--;
 }
 
-void ios_service(CPU *c);
+void ios_service(CPU *c); void dsp_tick(void); void gx_tick(void); u32 gx_cause(void);
 void rt_poll(CPU *c) {
-    if (!(c->msr & 0x8000u)) return;   // MSR[EE]
+    if (!(c->msr & 0x8000u) || g_cur->in_irq) return;   // MSR[EE], and never inside a handler
+    g_cur->in_irq++;
     ios_service(c);
+    g_cur->in_irq--;
+    dsp_tick();
+    gx_tick();
     u64 t = now_ns();
     if (!g_next_vi) g_next_vi = t + 16683333;
     if (g_dec_armed && t >= g_dec_deadline) {
@@ -167,11 +174,16 @@ void rt_poll(CPU *c) {
         deliver(c, 0x8021A1A0u, 8);    // DecrementerExceptionHandler
         return;
     }
-    // other pending hardware interrupts in the PI cause register (GPU finish/token, ...)
-    u32 cause = mmio_peek(0x0C003000u) & ~0x100u;
-    if (cause) {
+    // GPU interrupt causes follow the device status; deliver until the handlers have acknowledged them
+    // (one dispatch services the highest-priority source only).
+    for (int k = 0; k < 4; k++) {
+        u32 gpu = gx_cause();
+        u32 cause = (mmio_peek(0x0C003000u) & ~0xE00u) | gpu;
+        mmio_poke(0x0C003000u, cause);
+        if (!(cause & ~0x100u)) break;
         deliver(c, 0x8021F9A0u, 4);    // ExternalInterruptHandler
-        mmio_poke(0x0C003000u, mmio_peek(0x0C003000u) & ~cause);
+        mmio_poke(0x0C003000u, (mmio_peek(0x0C003000u) & ~0xE00u) | gx_cause());
+        if ((mmio_peek(0x0C003000u) & ~0x100u) == (cause & ~0x100u)) break;   // nothing acknowledged
     }
     if (t >= g_next_vi) {
         g_next_vi += 16683333;
