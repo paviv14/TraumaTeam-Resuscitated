@@ -12,6 +12,7 @@ Current stage: the game's script and dialogue layer is fully readable **and edit
 | Flowscripts (`.bf`, Atlus FLW0, same family as Persona 3/4) | parse, decompile to pseudo-code, edit as text, rebuild |
 | Messages (`.bm2`, Atlus MSG2) | parse, edit as text, rebuild |
 | Round-trip | all **2,791** `.bf` and **1,345** `.bm2` on the disc rebuild **byte-identical** |
+| In-game | edited opening line (`comic/msg/eng/100_010.bm2`) confirmed on screen in Dolphin 2609a, booting the extracted disc via `DATA/sys/main.dol` |
 | Script commands | 480-slot dispatch table found in `main.dol` (347 implemented); 29 named, covering 75% of all command calls in the game |
 
 ## Quick start (Python 3.9+, no dependencies)
@@ -60,9 +61,9 @@ Arguments are pushed **last-first**. A command that returns a value is followed 
 
 ### Testing a mod
 
-Copy the rebuilt `.bf`/`.bm2` over the original in an extracted copy of the disc
-(Dolphin: right-click the game > Properties > Filesystem > Extract), then load it with a
-Riivolution patch or rebuild the image. Always keep the original files.
+1. Extract the disc in Dolphin (right-click the game > Properties > Filesystem > Extract Entire Disc).
+2. Copy the rebuilt `.bf`/`.bm2` over the original (keep the original as `.orig`).
+3. In Dolphin, File > Open > `<extracted>/DATA/sys/main.dol`. Dolphin boots the folder as a disc.
 
 ## Layout
 
