@@ -1,0 +1,3 @@
+id,name,source
+0x00,wait,test_mes.msg
+0x0B,se_play,explanation_eng.msg
