@@ -1,0 +1,235 @@
+// Runtime for the recompiled game: memory, DOL loading, indirect calls, SPRs, quantized loads,
+// hardware register (MMIO) stubs and boot.
+#include "cpu.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <setjmp.h>
+#include <sys/mman.h>
+#include <time.h>
+
+u8 *g_mem;
+u8 g_lc[0x4000];
+static CPU g_cpu;
+u32 g_trace[256]; u32 g_trace_pos;
+u8 g_seen[0x340000 / 4];
+static void report_seen(void) {
+    unsigned n = 0; for (unsigned k = 0; k < sizeof g_seen; k++) n += g_seen[k];
+    fprintf(stderr, "distinct functions executed: %u / %u\n", n, g_nfuncs);
+}
+#include <signal.h>
+#include <unistd.h>
+static void dump_trace(void) {
+    // print distinct recent functions, newest last
+    fprintf(stderr, "recent functions:");
+    u32 last = 0; int n = 0;
+    for (int k = 0; k < 256; k++) {
+        u32 a = g_trace[(g_trace_pos + k) & 255];
+        if (a && a != last && k > 200) { fprintf(stderr, " %08X", a); n++; }
+        last = a;
+    }
+    fprintf(stderr, "\n");
+}
+static void on_alarm(int sig) { (void)sig; fprintf(stderr, "TIMEOUT\n"); dump_trace(); report_seen(); _exit(2); }
+static jmp_buf g_halt;
+static int g_trace_mmio = 1;
+static unsigned g_mmio_count;
+
+// ---------------------------------------------------------------- errors
+static void dump(CPU *c) {
+    fprintf(stderr, "  lr=%08X ctr=%08X cr=%08X msr=%08X\n", c->lr, c->ctr, c->cr, c->msr);
+    for (int i = 0; i < 32; i += 8)
+        fprintf(stderr, "  r%-2d %08X %08X %08X %08X %08X %08X %08X %08X\n", i, c->r[i], c->r[i + 1],
+                c->r[i + 2], c->r[i + 3], c->r[i + 4], c->r[i + 5], c->r[i + 6], c->r[i + 7]);
+}
+static void halt(const char *why) { fprintf(stderr, "HALT: %s\n", why); dump(&g_cpu); dump_trace(); longjmp(g_halt, 1); }
+
+void rt_badaddr(u32 a, int write) {
+    char b[96]; snprintf(b, sizeof b, "bad %s at %08X", write ? "write" : "read", a); halt(b);
+}
+void rt_unimpl(CPU *c, u32 pc, const char *what) {
+    char b[96]; snprintf(b, sizeof b, "unimplemented %s at %08X", what, pc); (void)c; halt(b);
+}
+void rt_trap(CPU *c, u32 pc) { char b[64]; snprintf(b, sizeof b, "trap at %08X", pc); (void)c; halt(b); }
+// The SDK installs a system-call handler (__OSInitSystemCall) that only toggles HID0 to force a
+// pipeline sync (used by PPCSync). Nothing to do on the host.
+void rt_syscall(CPU *c, u32 pc) { (void)c; (void)pc; }
+static int find_func(u32 addr);
+// rfi jumps to SRR0 with MSR = SRR1. The SDK uses it for RealMode() (run a function with address
+// translation off: entering = target is a function entry; leaving = target is a return address, i.e.
+// unwind) and for thread switches (OSLoadContext, handled by HLE). Translation does not exist on PC.
+void rt_rfi(CPU *c) {
+    u32 t = c->spr[26]; c->msr = c->spr[27];
+    if (t < 0x80000000u) t |= 0x80000000u;
+    if (find_func(t) >= 0) { rt_call(c, t); return; }
+    /* returning to a continuation: unwinding via the C return chain does that */
+}
+
+// ---------------------------------------------------------------- indirect calls
+static int g_depth;
+static int find_func(u32 addr) {
+    u32 lo = 0, hi = g_nfuncs;
+    while (lo < hi) {
+        u32 mid = (lo + hi) / 2;
+        if (g_funcs[mid].addr < addr) lo = mid + 1; else hi = mid;
+    }
+    return (lo < g_nfuncs && g_funcs[lo].addr == addr) ? (int)lo : -1;
+}
+void rt_call(CPU *c, u32 addr) {
+    int lo = find_func(addr);
+    if (lo >= 0) {
+        if (++g_depth > 20000) halt("call depth overflow");
+        g_funcs[lo].fn(c);
+        g_depth--;
+        return;
+    }
+    char b[64]; snprintf(b, sizeof b, "indirect call to unknown address %08X (lr %08X)", addr, c->lr); halt(b);
+}
+
+// ---------------------------------------------------------------- special registers
+u32 rt_mfspr(CPU *c, int spr) {
+    switch (spr) {
+    case 1: return ((u32)c->so << 31) | ((u32)c->ov << 30) | ((u32)c->ca << 29);
+    case 8: return c->lr;
+    case 9: return c->ctr;
+    case 268: case 269: return rt_mftb(c, spr);
+    }
+    if (spr >= 912 && spr <= 919) return c->gqr[spr - 912];
+    return c->spr[spr & 1023];
+}
+void rt_mtspr(CPU *c, int spr, u32 v) {
+    switch (spr) {
+    case 1: c->so = v >> 31; c->ov = (v >> 30) & 1; c->ca = (v >> 29) & 1; return;
+    case 8: c->lr = v; return;
+    case 9: c->ctr = v; return;
+    }
+    if (spr >= 912 && spr <= 919) { c->gqr[spr - 912] = v; return; }
+    c->spr[spr & 1023] = v;
+}
+u32 rt_mftb(CPU *c, int which) {
+    (void)c;
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    u64 tb = (u64)ts.tv_sec * 60750000ull + (u64)ts.tv_nsec * 60750000ull / 1000000000ull;  // bus/4
+    return which == 269 ? (u32)(tb >> 32) : (u32)tb;
+}
+void rt_mtmsr(CPU *c, u32 v) { c->msr = v; }
+void rt_dcbz(CPU *c, u32 ea) { (void)c; ea &= ~31u; for (int k = 0; k < 32; k += 4) W32(ea + k, 0); }
+
+// ---------------------------------------------------------------- paired-single quantization
+static double dequant(u32 raw, int type, int scale) {
+    double v;
+    switch (type) {
+    case 4: v = (u8)raw; break; case 5: v = (u16)raw; break;
+    case 6: v = (s8)raw; break; case 7: v = (s16)raw; break;
+    default: { float f; memcpy(&f, &raw, 4); return f; }
+    }
+    return v / (double)(1 << 0) * ldexp(1.0, -scale);
+}
+void rt_psq_l(CPU *c, u32 ea, int fd, int w, int i) {
+    u32 g = c->gqr[i]; int type = (g >> 16) & 7; int sc = (g >> 24) & 0x3F; if (sc & 0x20) sc -= 64;
+    int sz = type == 4 || type == 6 ? 1 : type == 5 || type == 7 ? 2 : 4;
+    u32 a = sz == 1 ? R8(ea) : sz == 2 ? R16(ea) : R32(ea);
+    c->f[fd].ps0 = dequant(a, type, sc);
+    if (w) { c->f[fd].ps1 = 1.0; return; }
+    u32 b = sz == 1 ? R8(ea + 1) : sz == 2 ? R16(ea + 2) : R32(ea + 4);
+    c->f[fd].ps1 = dequant(b, type, sc);
+}
+static u32 quant(double v, int type, int scale) {
+    if (type == 0 || type > 7 || type < 4) { float f = (float)v; u32 u; memcpy(&u, &f, 4); return u; }
+    v = v * ldexp(1.0, scale);
+    double lo = type == 4 ? 0 : type == 5 ? 0 : type == 6 ? -128 : -32768;
+    double hi = type == 4 ? 255 : type == 5 ? 65535 : type == 6 ? 127 : 32767;
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    return (u32)(s32)v;
+}
+void rt_psq_st(CPU *c, u32 ea, int fs, int w, int i) {
+    u32 g = c->gqr[i]; int type = g & 7; int sc = (g >> 8) & 0x3F; if (sc & 0x20) sc -= 64;
+    int sz = type == 4 || type == 6 ? 1 : type == 5 || type == 7 ? 2 : 4;
+    u32 a = quant(c->f[fs].ps0, type, sc), b = quant(c->f[fs].ps1, type, sc);
+    if (sz == 1) { W8(ea, a); if (!w) W8(ea + 1, b); }
+    else if (sz == 2) { W16(ea, a); if (!w) W16(ea + 2, b); }
+    else { W32(ea, a); if (!w) W32(ea + 4, b); }
+}
+
+// ---------------------------------------------------------------- hardware registers
+// Minimal model: registers read back what was last written. A register polled millions of times
+// without being written means the game is spinning on hardware we do not emulate yet: halt and name it.
+static u32 g_regs[0x20000];  // 0x0C000000-0x0C00FFFF and 0x0D000000-0x0D00FFFF, 4-byte granularity
+static u32 g_poll_reg, g_poll_count;
+static u32 *reg_slot(u32 p) { return &g_regs[((p >> 24) & 1) * 0x4000 + ((p & 0xFFFF) >> 2)]; }
+u32 mmio_read(u32 p, int size) {
+    u32 v = *reg_slot(p);
+    if (size == 2) v = (p & 2) ? (v & 0xFFFF) : (v >> 16);
+    else if (size == 1) v = (v >> (8 * (3 - (p & 3)))) & 0xFF;
+    if (p == g_poll_reg) {
+        if (++g_poll_count == 5000000) {
+            char b[96]; snprintf(b, sizeof b, "spinning on hardware register %08X (value %08X)", p, v); halt(b);
+        }
+    } else { g_poll_reg = p; g_poll_count = 0; }
+    if (g_trace_mmio && g_mmio_count++ < 300) fprintf(stderr, "  mmio R%d %08X -> %08X\n", size * 8, p, v);
+    return v;
+}
+void mmio_write(u32 p, u32 v, int size) {
+    u32 *r = reg_slot(p);
+    if (size == 4) *r = v;
+    else if (size == 2) *r = (p & 2) ? ((*r & 0xFFFF0000u) | (v & 0xFFFF)) : ((*r & 0xFFFF) | (v << 16));
+    else { int sh = 8 * (3 - (p & 3)); *r = (*r & ~(0xFFu << sh)) | ((v & 0xFF) << sh); }
+    g_poll_reg = 0;
+    // EXI (0x0D006800, 3 channels x 0x14): CPR at +0x00, MAR +0x04, LENGTH +0x08, CR +0x0C, DATA +0x10.
+    // Transfers complete immediately: clear TSTART and raise "transfer complete" in the channel status.
+    if ((p & 0xFFFFFF00u) == 0x0D006800u && size == 4) {
+        u32 off = p - 0x0D006800u, ch = off / 0x14, reg = off % 0x14;
+        if (ch < 3 && reg == 0x0C && (v & 1)) {
+            *r = v & ~1u;
+            *reg_slot(0x0D006800u + ch * 0x14) |= 0x8;     // TCINT
+            *reg_slot(0x0D006800u + ch * 0x14 + 0x10) = 0;  // immediate read data: no device answers
+        }
+    }
+    if (g_trace_mmio && g_mmio_count++ < 300) fprintf(stderr, "  mmio W%d %08X = %08X\n", size * 8, p, v);
+}
+
+// ---------------------------------------------------------------- boot
+static void load_dol(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) { perror(path); exit(1); }
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    u8 *d = malloc(n); if (fread(d, 1, n, f) != (size_t)n) { perror("read"); exit(1); } fclose(f);
+#define BE(o) (((u32)d[o] << 24) | ((u32)d[o + 1] << 16) | ((u32)d[o + 2] << 8) | d[o + 3])
+    // The header's bss range spans the .sdata/.sdata2 sections too: clear first, then load sections.
+    u32 bss = BE(0xD8), bsz = BE(0xDC);
+    memset(HOSTPTR(bss, 1), 0, bsz);
+    for (int i = 0; i < 18; i++) {
+        u32 off = BE(i * 4), addr = BE(0x48 + i * 4), sz = BE(0x90 + i * 4);
+        if (sz) memcpy(HOSTPTR(addr, 1), d + off, sz);
+    }
+    free(d);
+}
+
+static void setup_lowmem(void) {
+    // Values the IPL/apploader leave in low memory before jumping to the game (see Dolphin's BS2 emu).
+    W32(0x80000020, 0x0D15EA5E); W32(0x80000024, 1); W32(0x80000028, 0x01800000);
+    W32(0x8000002C, 0x00000023); W32(0x800000F8, 0x0E7BE2C0); W32(0x800000FC, 0x2B73A840);
+    W32(0x80000030, 0); W32(0x80000034, 0x817FEC60);
+    W32(0x80003100, 0x01800000); W32(0x80003104, 0x01800000); W32(0x80003118, 0x04000000);
+    W32(0x8000311C, 0x04000000); W32(0x80003120, 0x93400000); W32(0x80003124, 0x90000800);
+    W32(0x80003128, 0x933E0000); W32(0x80003130, 0x933E0000); W32(0x80003134, 0x93400000);
+    W32(0x80003138, 0x00000011); W32(0x80003140, 0x00240100); W32(0x80003188, 0x00240100);
+    memcpy(HOSTPTR(0x80000000, 1), "SUOE01", 6);  // disc ID
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) { fprintf(stderr, "usage: %s main.dol\n", argv[0]); return 1; }
+    g_mem = mmap(NULL, 0x14000000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (g_mem == MAP_FAILED) { perror("mmap"); return 1; }
+    load_dol(argv[1]);
+    setup_lowmem();
+    CPU *c = &g_cpu;
+    signal(SIGALRM, on_alarm); alarm(argc > 2 ? atoi(argv[2]) : 15);
+    c->msr = 0x00002032;
+    fprintf(stderr, "booting at %08X (%u recompiled entry points)\n", g_entry, g_nfuncs);
+    if (!setjmp(g_halt)) {
+        rt_call(c, g_entry);
+        fprintf(stderr, "entry returned\n");
+    }
+    return 0;
+}

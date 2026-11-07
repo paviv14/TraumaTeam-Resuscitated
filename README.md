@@ -3,7 +3,9 @@
 Reverse-engineering and modding toolkit for **Trauma Team** (Atlus, Wii, 2010, USA `SUOE01`).
 
 Long-term goal: a PC recompilation with 4K rendering and quality-of-life improvements.
-Current stage: the game's script and dialogue layer is fully readable **and editable**.
+Current stage: the game's script and dialogue layer is fully readable **and editable**, and the
+whole game recompiles to a native PC binary that boots through low-level system init
+(see [docs/RECOMP.md](docs/RECOMP.md)).
 
 ## What works
 
@@ -77,6 +79,8 @@ data/commands.csv   id, name, argc, msg_args, handler address in main.dol, confi
 data/msgtags.csv    message control tag names
 data/commtabs.json  raw dispatch table dumped from main.dol
 docs/FINDINGS.md    what is known about main.dol and the disc
+docs/RECOMP.md      native port: how the recompiler works, status, roadmap
+recomp/             PowerPC -> C static recompiler + runtime (C)
 tests/              round-trip and edit tests (need the game files)
 ```
 

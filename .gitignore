@@ -6,3 +6,6 @@ out/
 *.dol
 *.zip
 __pycache__/
+# generated recompiled code is derived from the game binary - never commit it
+build/
+generated/
