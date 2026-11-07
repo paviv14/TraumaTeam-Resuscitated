@@ -87,7 +87,30 @@ void f_8021B5D0(CPU *c) {
 
 // Guest backtrace of the last time each thread went to sleep (printed on timeout).
 static u32 g_bt[8][16]; static u32 g_bt_ctx[8];
+static void bt_from(const CPU *r, u32 *out, int max) {
+    u32 fp = r->r[1]; out[0] = r->lr;
+    for (int i = 1; i < max; i++) {
+        if (!fp || (fp >> 28) < 8 || (fp & 0x0FFFFFFF) > 0x03FFFFF0) { out[i] = 0; return; }   // stay in guest RAM
+        fp = R32(fp);
+        out[i] = (fp >> 28) >= 8 && (fp & 0x0FFFFFFF) <= 0x03FFFFF0 ? R32(fp + 4) : 0;
+        if (!out[i]) return;
+    }
+}
 void rt_dump_threads(void) {
+    for (Fiber *f = g_fibers; f; f = f->next) {
+        u32 bt[16] = {0};
+        if (f == g_cur) {
+            bt_from(g_cpup, bt, 16);
+            fprintf(stderr, "fiber ctx %08X running now (prio %d):", f->ctx, (int)R32(f->ctx + 0x2D0));
+            for (int i = 0; i < 16 && bt[i]; i++) fprintf(stderr, " %08X", bt[i]);
+            fprintf(stderr, "\n"); continue;
+        }
+        if (!f->top) { fprintf(stderr, "fiber ctx %08X: no resume point\n", f->ctx); continue; }
+        bt_from(&f->top->regs, bt, 16);
+        fprintf(stderr, "fiber ctx %08X (prio %d) suspended in %s:", f->ctx, (int)R32(f->ctx + 0x2D0), f->top->kind ? "interrupt" : "SelectThread");
+        for (int i = 0; i < 16 && bt[i]; i++) fprintf(stderr, " %08X", bt[i]);
+        fprintf(stderr, "\n");
+    }
     for (int k = 0; k < 8; k++) if (g_bt_ctx[k]) {
         fprintf(stderr, "thread ctx %08X last slept from:", g_bt_ctx[k]);
         for (int i = 0; i < 16 && g_bt[k][i]; i++) fprintf(stderr, " %08X", g_bt[k][i]);
@@ -95,12 +118,18 @@ void rt_dump_threads(void) {
     }
 }
 static void record_bt(CPU *c) {
+    if (g_cur->in_irq) return;          // a reschedule attempt inside an interrupt says nothing useful
     u32 ctx = g_cur->ctx; int slot = -1;
     for (int k = 0; k < 8; k++) if (g_bt_ctx[k] == ctx || (!g_bt_ctx[k] && slot < 0 && (slot = k, 0))) { slot = k; break; }
     if (slot < 0) return;
     g_bt_ctx[slot] = ctx;
     u32 fp = c->r[1]; g_bt[slot][0] = c->lr;
-    for (int i = 1; i < 16; i++) { if (!fp || (fp & 0x1FFFFFFF) > 0x13FFFFFF) { g_bt[slot][i] = 0; break; } fp = R32(fp); g_bt[slot][i] = fp ? R32(fp + 4) : 0; }
+    for (int i = 1; i < 16; i++) {
+        if (!fp || (fp >> 28) < 8 || (fp & 0x0FFFFFFF) > 0x03FFFFF0) { g_bt[slot][i] = 0; break; }
+        fp = R32(fp);
+        g_bt[slot][i] = (fp >> 28) >= 8 && (fp & 0x0FFFFFFF) <= 0x03FFFFF0 ? R32(fp + 4) : 0;
+        if (!g_bt[slot][i]) break;
+    }
 }
 
 // SelectThread(yield): run the original scheduler under a resume point.
@@ -125,6 +154,12 @@ void f_8021B650(CPU *c) {
     // returning from an interrupt delivered to this fiber (possibly while idling on another context)
     if (me->top && me->top->kind == 1 && me->top->irq_ctx == ctx) longjmp(me->top->jb, 1);
     Fiber *t = fiber_of(ctx);
+    // A thread object reused for a new thread (OSCreateThread on an exited thread): its context then
+    // points at the new entry function instead of the resume point after OSSaveContext in SelectThread.
+    if (t && t != me && t->started && R32(ctx + 0x198) != 0x802223E0u) {
+        t->ctx = 0;                                   // retire the old fiber (its stack is abandoned)
+        t = NULL;
+    }
     if (t == me) { if (!me->top) rt_halt("OSLoadContext(self) with nothing to resume"); longjmp(me->top->jb, 1); }
     if (!t) { t = calloc(1, sizeof *t); t->ctx = ctx; t->next = g_fibers; g_fibers = t; }
     switch_to(t);
@@ -161,7 +196,9 @@ static void deliver(CPU *c, u32 handler, u32 exc) {
 
 void ios_service(CPU *c); void dsp_tick(void); void gx_tick(void); u32 gx_cause(void); void gx_on_retrace(void);
 void rt_poll(CPU *c) {
-    if (!(c->msr & 0x8000u) || g_cur->in_irq) return;   // MSR[EE], and never inside a handler
+    // MSR[EE] alone decides, as on hardware: handlers run with EE off, but code inside them may enable
+    // interrupts on purpose (e.g. SelectThread's idle loop when called from an interrupt).
+    if (!(c->msr & 0x8000u)) return;
     g_cur->in_irq++;
     ios_service(c);
     g_cur->in_irq--;

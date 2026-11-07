@@ -12,6 +12,7 @@
 // when the read position passes the place they were written.
 #include "cpu.h"
 #include <stdio.h>
+#include <stdlib.h>
 
 extern u32 g_irq_pending;
 u32 mmio_peek(u32 p); void mmio_poke(u32 p, u32 v);
@@ -37,6 +38,7 @@ static u32 fifo_wp(void)   { return mmio_peek(0x0C003014) & 0x03FFFFFFu; }
 static void pe_apply(u32 v) {
     u32 reg = v >> 24;
     if (reg == 0x45 && (v & 2)) {              // draw done: PE_CTRL bit 3 -> "finish" interrupt
+        if (getenv("TTPC_GXLOG")) fprintf(stderr, "[gx] draw done raised\n");
         mmio_poke(0x0C001008, mmio_peek(0x0C001008) | 0x8); g_irq_pending = 1;
     } else if (reg == 0x48) {                  // draw sync token -> token register + "token" interrupt
         mmio_poke(0x0C00100C, (mmio_peek(0x0C00100C) & 0xFFFF0000u) | (v & 0xFFFF));
@@ -118,7 +120,10 @@ void gx_cp_write(u32 p, u32 v, int size) {
         if (armed != g_bp_armed || !armed) {
             g_bp_armed = armed;
             if (!armed) { g_bp_hit = 0; w16(0x0C000000, r16(0x0C000000) & ~0x10); }
-            gx_tick();
+            // The GPU advances later, at the next interrupt poll - never synchronously inside a register
+            // write: the GX library read-modify-writes PE_CTRL right after queueing a draw-done, which
+            // would wipe a status bit an instant GPU had already raised.
+            g_irq_pending = 1;
         }
     }
 }
@@ -131,4 +136,12 @@ u32 gx_cause(void) {
     if ((pe & 0x8) && (pe & 0x2)) c |= 0x400;   // finish, if enabled
     if ((sr & 0x10) && (cr & 0x22) == 0x22) c |= 0x800;
     return c;
+}
+
+void gx_dump(void) {
+    fprintf(stderr, "[gx] state: bp armed %d hit %d | written %llu read %llu | %d events pending (first %08X at %llu) | "
+            "token budget %d | PE ctrl %04X | CP sr %04X cr %04X | bp %04X%04X wp %08X\n",
+            g_bp_armed, g_bp_hit, (unsigned long long)g_written, (unsigned long long)g_read, g_nev,
+            g_nev ? g_ev[0].v : 0, g_nev ? (unsigned long long)g_ev[0].pos : 0ull, g_token_budget,
+            r16(0x0C00100A), r16(0x0C000000), r16(0x0C000002), r16(0x0C00003E), r16(0x0C00003C), mmio_peek(0x0C003014));
 }

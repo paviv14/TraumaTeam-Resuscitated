@@ -12,8 +12,13 @@ HLE(8021A9A0, __OSInitAudioSystem) { (void)c; fprintf(stderr, "[hle] __OSInitAud
 // Debug hook for functions listed in RECOMP_LOG at lift time. Prints arguments and the game's
 // frame-pacing state (queue at 0x804860B0, flags in small data) - adjust freely while investigating.
 void rt_logfn(CPU *c, u32 addr) {
+    if (addr == 0x8000C660u || addr == 0x8000C6D0u) return;   // per-retrace callbacks: too chatty
     static int n; if (n++ > 4000) return;
     u32 r13 = c->r[13];
+    if (addr == 0x802320B0u || addr == 0x80232410u) {
+        fprintf(stderr, "[fn %08X] drawdone flag %u | msr EE %u\n", addr, R8(r13 - 0x4720), (c->msr >> 15) & 1);
+        return;
+    }
     fprintf(stderr, "[fn %08X] r3=%08X r4=%08X | q head %u tail %u | flags %u %u | last tok %u gpu tok %u | fb %08X\n",
             addr, c->r[3], c->r[4], R16(0x804860EE), R16(0x804860EC), R8(r13 - 0x51FB), R8(r13 - 0x51FA),
             R16(r13 - 0x51F8), R16(0xCC00100E), R32(r13 - 0x5200));

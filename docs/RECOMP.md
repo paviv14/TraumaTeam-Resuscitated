@@ -85,6 +85,26 @@ Fixed along the way: dtk-missed switch tables (any data pointer into a function 
 * Debug aids: `RECOMP_LOG=<addrs>` at lift time logs function entries (`rt_logfn` in hle.c);
   `TTPC_SEEN=<file>` dumps every game function that ran; `TTPC_PEEK` / `TTPC_WATCH` at timeout.
 
+## Status - milestone 5: boots to its first screens, rendering continuously (headless)
+
+* Runs indefinitely without stalls: ~3.5 MB/s of GPU commands (417 MB in 2 minutes), 2,171 functions.
+* Game screens reached: `RatingCalc/RatingDraw` (boot rating notice), `TitleCalc`, fades, background,
+  sprites, message balloons, comic panels (`itfComaBack/Chara`), bust-up portraits.
+* Assets loaded through the disc stand-in: font, effects, Home Button menu, sound archive
+  (`static.brsar`), title texture `title/hanken.tpx`, effect sprites, first 3D model
+  (`model/tool/0501-01-loupe.brres`).
+* Fixes that got here:
+  - GPU events only advance at interrupt polls (never inside a register write);
+  - PE status bits read back as 0 (write-1-to-clear only) - the token handler's read-modify-write
+    acknowledge was wiping a pending draw-done;
+  - a reused thread object starts a fresh fiber (context points at an entry, not SelectThread's
+    resume point);
+  - nested interrupts allowed whenever MSR[EE] is set (SelectThread may idle inside an interrupt);
+  - diagnostics: exact per-thread backtraces at timeout, GPU state dump, safe stack walking.
+* Next: (1) **renderer** - translate the GX FIFO the game is producing so the screens become visible;
+  (2) **input** - inject a virtual Wii Remote at the WPAD level so the game can be advanced past
+  "press A"; (3) AX mixing for sound.
+
 ## Roadmap to "opening sequence -> main menu in 4K"
 
 | # | Piece | Approach |

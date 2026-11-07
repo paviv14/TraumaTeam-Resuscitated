@@ -45,7 +45,8 @@ static void on_segv(int sig) {
     static const char m[] = "CRASH (host stack overflow or bad pointer)\n"; write(2, m, sizeof m - 1);
     dump(&g_cpu); dump_trace(); report_seen(); rt_dump_threads(); _exit(3);
 }
-static void on_alarm(int sig) { (void)sig; fprintf(stderr, "TIMEOUT\n"); dump_trace(); report_seen(); rt_dump_threads(); _exit(2); }
+void gx_dump(void);
+static void on_alarm(int sig) { (void)sig; fprintf(stderr, "TIMEOUT\n"); dump_trace(); report_seen(); rt_dump_threads(); gx_dump(); _exit(2); }
 static jmp_buf g_halt;
 static int g_trace_mmio = 1;
 static unsigned g_mmio_count;
@@ -182,6 +183,9 @@ u32 mmio_read(u32 p, int size) {
     if (p == 0x0D006C08) *reg_slot(p) = (u32)(host_ns() * 48000ull / 1000000000ull);
     u32 v = *reg_slot(p);
     if (size == 2) v = (p & 2) ? (v & 0xFFFF) : (v >> 16);
+    // PE control: the token/finish status bits are write-1-to-clear and read back as 0 (as in Dolphin's
+    // model); otherwise one handler's read-modify-write acknowledge clears the other's pending event.
+    if (p == 0x0C00100A && size == 2) v &= ~0xCu;
     else if (size == 1) v = (v >> (8 * (3 - (p & 3)))) & 0xFF;
     if (p == g_poll_reg) {
         if (++g_poll_count == 5000000) {
@@ -200,6 +204,7 @@ void mmio_write(u32 p, u32 v, int size) {
     if ((p & 0xFFFFFFC0u) == 0x0C005000u) { dsp_write(p, v, size); return; }   // GX FIFO (write-gather pipe)
     u32 *r = reg_slot(p);
     if (p == 0x0C00100A && size == 2) {   // PE control: status bits 2/3 are write-1-to-clear
+        if (getenv("TTPC_GXLOG")) fprintf(stderr, "[gx] PE ctrl write %04X (was %04X)\n", v & 0xFFFF, *r & 0xFFFF);
         u32 cur = *r & 0xFFFF; u32 nv = (v & ~0xCu) | (cur & 0xC & ~(v & 0xC));
         *r = (*r & 0xFFFF0000u) | nv; g_poll_reg = 0; return;
     }
