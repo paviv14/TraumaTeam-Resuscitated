@@ -113,9 +113,11 @@ static void read_vertex(u32 *p, int vat, Vtx *v) {
     int nm = (vcd_lo >> 11) & 3;
     if (nm) {
         int nbt = (va >> 9) & 1, fmt = (va >> 10) & 7, frac = fmt == 1 ? 6 : fmt == 3 ? 14 : 0;
+        int idx3 = nbt && nm != 1 && ((va >> 31) & 1);   // NRMIDX3: normal, binormal, tangent each have an index
         u32 a = nm == 1 ? 0 : attr_addr(p, nm, 1); u32 *src = nm == 1 ? p : &a;
         for (int k = 0; k < 3; k++) v->nrm[k] = read_comp(src, fmt, frac);
-        if (nbt) for (int k = 0; k < 6; k++) read_comp(src, fmt, frac);
+        if (idx3) { attr_addr(p, nm, 1); attr_addr(p, nm, 1); }   // B and T indices (values unused)
+        else if (nbt) for (int k = 0; k < 6; k++) read_comp(src, fmt, frac);
     }
     // colors
     for (int ci = 0; ci < 2; ci++) {
@@ -725,7 +727,9 @@ static void xf_write(u32 addr, u32 v) {
 
 // ---------------------------------------------------------------- primitives
 // GPU path: cull on the CPU (same rule as draw_tri) and collect a triangle list.
-static Out g_tris[3 * 2 * 4096]; static int g_ntris;
+// A draw has up to 65535 vertices (u16 count); a strip/fan of n vertices yields up to 3n corners.
+#define MAX_VERTS 65536
+static Out *g_tris; static int g_ntris;   // 3 * MAX_VERTS entries, allocated on first use
 static void collect_tri(const Out *a, const Out *b, const Out *c) {
     if (a->w > 1e-6f && b->w > 1e-6f && c->w > 1e-6f && S.cull) {
         if (S.cull == 3) return;
@@ -734,12 +738,12 @@ static void collect_tri(const Out *a, const Out *b, const Out *c) {
         float area = (X[1] - X[0]) * (Y[2] - Y[0]) - (X[2] - X[0]) * (Y[1] - Y[0]);
         if ((S.cull == 1 && area < 0) || (S.cull == 2 && area > 0)) return;
     }
-    if (g_ntris + 3 > (int)(sizeof g_tris / sizeof *g_tris)) return;
+    if (g_ntris + 3 > 3 * MAX_VERTS) return;
     g_tris[g_ntris++] = *a; g_tris[g_ntris++] = *b; g_tris[g_ntris++] = *c;
 }
 static void draw_prims(int prim, int vat, int n, u32 *p) {
-    static Vtx vin[4096]; static Out vout[4096];
-    if (n > 4096) n = 4096;
+    static Vtx *vin; static Out *vout;
+    if (!vin) { vin = malloc(sizeof *vin * MAX_VERTS); vout = malloc(sizeof *vout * MAX_VERTS); g_tris = malloc(sizeof *g_tris * 3 * MAX_VERTS); }
     for (int k = 0; k < n; k++) { memset(&vin[k], 0, sizeof vin[k]); read_vertex(p, vat, &vin[k]); }
     g_video_draws++;
     if (!g_render) return;
@@ -780,6 +784,7 @@ static void draw_prims(int prim, int vat, int n, u32 *p) {
 }
 
 // Parse commands from guest memory [p, end). Returns bytes consumed (stops at an incomplete command).
+static u32 g_last_op, g_last_n, g_last_at;
 static u32 parse(u32 p, u32 end, int depth);
 static u32 run_display_list(u32 addr, u32 size, int depth) { if (depth < 4) parse(addr, addr + size, depth + 1); return 0; }
 
@@ -814,13 +819,18 @@ static u32 parse(u32 p, u32 end, int depth) {
         if (op >= 0x80 && op < 0xC0) {
             if (p + 3 > end) break;
             int n = V16(p + 1); u32 q = p + 3;
+            g_last_op = op; g_last_n = (u32)n; g_last_at = p;
             // vertices may still be arriving: measure the size with a dry run over a scratch copy
             draw_prims((op >> 3) & 7, op & 7, n, &q);
             if (q > end) { p = s; break; }
             p = q; continue;
         }
         // unknown opcode: skip a byte so we can resynchronise
-        static int warned; if (warned++ < 5) fprintf(stderr, "[video] unknown GX opcode %02X at %08X\n", op, p);
+        static int warned; if (warned++ < 5) {
+            fprintf(stderr, "[video] unknown GX opcode %02X at %08X | last draw op %02X n %u at %08X vcd %08X %08X vat %08X %08X %08X\n", op, p,
+                    g_last_op, g_last_n, g_last_at, cp[0x50], cp[0x60], cp[0x70 + (g_last_op & 7)], cp[0x80 + (g_last_op & 7)], cp[0x90 + (g_last_op & 7)]);
+            if (warned == 1) { fprintf(stderr, "  bytes from last draw:"); for (u32 k = g_last_at; k < p + 8 && k < g_last_at + 96; k++) fprintf(stderr, " %02X", V8(k)); fprintf(stderr, "\n"); }
+        }
         p += 1;
     }
     return p - start;

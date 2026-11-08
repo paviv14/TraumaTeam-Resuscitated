@@ -1,14 +1,25 @@
 #include "port.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+// TTPC_SPEED=N runs the guest's clocks (retrace, timers, audio DMA, time base) N times faster than
+// real time - for automated tests, where the game should simply run as fast as the host allows.
+static uint64_t raw_now_ns(void);
+uint64_t host_now_ns(void) {
+    static double speed = -1; static uint64_t t0;
+    if (speed < 0) { const char *e = getenv("TTPC_SPEED"); speed = e ? atof(e) : 1.0; if (speed <= 0) speed = 1.0; t0 = raw_now_ns(); }
+    uint64_t t = raw_now_ns();
+    return speed == 1.0 ? t : t0 + (uint64_t)((double)(t - t0) * speed);
+}
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <direct.h>
 
-uint64_t host_now_ns(void) {
+static uint64_t raw_now_ns(void) {
     static LARGE_INTEGER f; LARGE_INTEGER c;
     if (!f.QuadPart) QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&c);
@@ -61,7 +72,7 @@ void host_set_timeout(int seconds, void (*fn)(void)) {
 #include <sys/mman.h>
 #include <sys/stat.h>
 
-uint64_t host_now_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec; }
+static uint64_t raw_now_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec; }
 void *host_alloc_guest(size_t size) {
     void *p = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
     return p == MAP_FAILED ? NULL : p;

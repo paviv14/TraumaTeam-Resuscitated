@@ -170,6 +170,21 @@ Fixed along the way: dtk-missed switch tables (any data pointer into a function 
   rate) to SDL audio; `TTPC_WAV=file` records it, `TTPC_MUTE=1` silences.
 * Not yet: Wii Remote speaker output, compressor, DPL2 surround, polyphase (4-tap) resampling.
 
+## Status - milestone 10: into the first operation; controllers
+
+* **Event dialogue advances.** At the end of a voice the AX address now wraps to the loop start
+  before the voice stops (as the hardware accelerator does). NW4R reads the position back to decide
+  a sound finished; left past the end, every voiced line stayed "playing" and events never got past
+  line 1 (the message window waits in state 3 on `fn_80039A00` -> sound manager channel 2).
+* **3D meshes with more than 4096 vertices**: the decoder capped a draw at 4096 vertices, so the
+  patient's body (4440) was cut short and the rest of its data was parsed as commands ("unknown GX
+  opcode" + a hang). Limit is now the GX maximum (65535). Also NRMIDX3 (three normal indices).
+* Reached from the user's save: Episode 2 "Frozen in Time" event -> conference (A+B to start) ->
+  the operation (body, drape, vitals, tool palette, tutorial).
+* **Game controllers** (SDL GameController): left stick = Nunchuk stick, right stick = pointer.
+* Test tooling: `run.sh` replays from a saved NAND, scripted input clocked by controller reads,
+  `TTPC_SPEED=N` (guest clocks N x real time), `TTPC_TEXDUMP`, `TTPC_DRAWLOG`, range watchpoints.
+
 ## Roadmap to "opening sequence -> main menu in 4K"
 
 | # | Piece | Approach |

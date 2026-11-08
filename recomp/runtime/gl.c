@@ -259,8 +259,8 @@ static void set_state(const Setup *s) {
 }
 
 void gpu_draw(const Setup *s, const Out *v, int n) {
-    static GV buf[3 * 2 * 4096];
-    if (n > (int)(sizeof buf / sizeof *buf)) n = sizeof buf / sizeof *buf;
+    static GV *buf; static int cap;
+    if (n > cap) { free(buf); cap = n + 1024; buf = malloc(sizeof *buf * (size_t)cap); }
     float wd = s->vp[0], ht = s->vp[1], zr = s->vp[2], xo = s->vp[3] - 342.f, yo = s->vp[4] - 342.f, fz = s->vp[5];
     for (int i = 0; i < n; i++) {
         const Out *o = &v[i]; GV *g = &buf[i];
