@@ -17,9 +17,11 @@
 //   mouse = pointer, left button = A, right button = B
 //   arrows = D-pad, WASD = Nunchuk stick, Space/Enter = A, Shift = B, Q/C = C, E/F = Z
 //   1, 2 = 1/2 buttons, +/- (or P/M) = Plus/Minus, Esc/H = Home
+// Game controller (platform.c): left stick = Nunchuk stick, right stick = pointer (RB recentres),
+//   A = A, B / RT = B, LT = Z, LB = C, D-pad, X/Y = 1/2, Start/Back = +/-, Guide = Home
 //
 // TTPC_INPUT scripts presses for headless tests: "600+10:A;900+5:A,B;1200+60:right"
-//   = from retrace 600 hold A for 10 frames, etc. Names: A B 1 2 plus minus home up down left right C Z.
+//   = from the game's 600th controller read (~ game frame) hold A for 10 reads, etc. Names: A B 1 2 plus minus home up down left right C Z.
 #include "cpu.h"
 #include "platform.h"
 #include <stdio.h>
@@ -33,13 +35,14 @@ enum {
     BTN_Z = 0x2000, BTN_C = 0x4000, BTN_HOME = 0x8000,
 };
 
-static u32 g_hold, g_prev, g_trig, g_rel;
+static u32 g_hold, g_prev, g_trig, g_rel, g_host_hold;
+static u64 g_reads;   // controller reads by the game (~ game frames): the clock for TTPC_INPUT
 static float g_px, g_py, g_ppx, g_ppy, g_sx, g_sy;
 static int g_point_valid = 1;
 static u64 g_vi;
 
 typedef struct { u64 from, len; u32 mask; } ScriptEv;
-static ScriptEv g_script[64]; static int g_nscript;
+static ScriptEv g_script[4096]; static int g_nscript;
 
 static u32 name_mask(const char *s, int n) {
     static const struct { const char *n; u32 m; } t[] = {
@@ -51,7 +54,7 @@ static u32 name_mask(const char *s, int n) {
 }
 static void parse_script(void) {
     const char *s = getenv("TTPC_INPUT");
-    while (s && *s && g_nscript < 64) {
+    while (s && *s && g_nscript < 4096) {
         char *e; ScriptEv ev = {0};
         ev.from = strtoull(s, &e, 10); s = e;
         ev.len = 1; if (*s == '+') { ev.len = strtoull(s + 1, &e, 10); s = e; }
@@ -75,9 +78,7 @@ void wiimote_frame(void) {
     if (in->plus) h |= BTN_PLUS;   if (in->minus) h |= BTN_MINUS;
     if (in->home) h |= BTN_HOME;   if (in->one) h |= BTN_1;   if (in->two) h |= BTN_2;
     if (in->c) h |= BTN_C;         if (in->z) h |= BTN_Z;
-    for (int k = 0; k < g_nscript; k++) if (g_vi >= g_script[k].from && g_vi < g_script[k].from + g_script[k].len) h |= g_script[k].mask;
-    g_prev = g_hold; g_hold = h;
-    g_trig = g_hold & ~g_prev; g_rel = g_prev & ~g_hold;
+    g_host_hold = h;
     g_ppx = g_px; g_ppy = g_py;
     if (g_window_open && !getenv("TTPC_POINTER")) {
         g_px = in->mouse_x * 2.f - 1.f; g_py = in->mouse_y * 2.f - 1.f;
@@ -87,9 +88,12 @@ void wiimote_frame(void) {
         if (!got) { got = 1; const char *e = getenv("TTPC_POINTER"); if (e) sscanf(e, "%f,%f", &hx, &hy); }
         g_px = hx; g_py = hy; g_point_valid = 1;
     }
-    g_sx = (float)(in->stick_right - in->stick_left);
-    g_sy = (float)(in->stick_up - in->stick_down);
-    if (g_sx && g_sy) { g_sx *= 0.7071f; g_sy *= 0.7071f; }
+    if (in->has_analog) { g_sx = in->nx; g_sy = in->ny; }
+    else {
+        g_sx = (float)(in->stick_right - in->stick_left);
+        g_sy = (float)(in->stick_up - in->stick_down);
+        if (g_sx && g_sy) { g_sx *= 0.7071f; g_sy *= 0.7071f; }
+    }
 }
 
 static void wf(u32 a, float f) { u32 v; memcpy(&v, &f, 4); W32(a, v); }
@@ -104,7 +108,15 @@ void f_802533C0(CPU *c) {
 // KPADReadEx(chan, KPADStatus *samples, u32 max, void *uwpad, s32 *err) -> number of samples.
 void f_8025F830(CPU *c) {
     u32 chan = c->r[3], buf = c->r[4], max = c->r[5], err = c->r[7];
+    static int dbg = -1; if (dbg < 0) dbg = getenv("TTPC_PADLOG") != NULL;
+    if (0 && dbg && chan == 0) { static u64 n; if (n++ % 600 == 0 || g_trig) fprintf(stderr, "[pad] read #%llu vi %llu hold %04X trig %04X lr %08X\n", (unsigned long long)n, (unsigned long long)g_vi, g_hold, g_trig, c->lr); }
     if (chan != 0 || !max) { if (err) W32(err, (u32)-1); c->r[3] = 0; return; }   // no controller
+    // buttons are latched per read: host input from the last retrace plus any scripted presses
+    g_reads++;
+    u32 h = g_host_hold;
+    for (int k = 0; k < g_nscript; k++) if (g_reads >= g_script[k].from && g_reads < g_script[k].from + g_script[k].len) h |= g_script[k].mask;
+    g_prev = g_hold; g_hold = h; g_trig = g_hold & ~g_prev; g_rel = g_prev & ~g_hold;
+    if (dbg && (g_trig || g_reads % 600 == 0)) fprintf(stderr, "[pad] read %llu vi %llu hold %04X trig %04X\n", (unsigned long long)g_reads, (unsigned long long)g_vi, g_hold, g_trig);
     for (u32 k = 0; k < 0xB0; k += 4) W32(buf + k, 0);
     W32(buf + 0x00, g_hold); W32(buf + 0x04, g_trig); W32(buf + 0x08, g_rel);
     wf(buf + 0x0C, 0.f); wf(buf + 0x10, -1.f); wf(buf + 0x14, 0.f); wf(buf + 0x18, 1.f);   // held level, pointing at the TV

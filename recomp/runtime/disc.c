@@ -9,7 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { u64 off, size; char path[256]; } DiscFile;
+typedef struct { u64 off, size; char path[256]; int logged; } DiscFile;
 static DiscFile *g_files; static int g_nfiles;
 static char g_root[512];
 static int g_log = 1;
@@ -62,7 +62,7 @@ int disc_read(u64 off, u32 len, u32 dst) {
     while (len) {
         DiscFile *f = NULL;
         for (int k = 0; k < g_nfiles; k++) if (off >= g_files[k].off && off < g_files[k].off + g_files[k].size) { f = &g_files[k]; break; }
-        if (!f) { fprintf(stderr, "[disc] read %llX: not inside any file (padding?) - zeros\n", (unsigned long long)off);
+        if (!f) { static int np; if (np++ < 5) fprintf(stderr, "[disc] read %llX: past the end of a file (padding) - zeros\n", (unsigned long long)off);
                   for (u32 k = 0; k < len; k++) W8(dst + k, 0); return 1; }
         u64 in = off - f->off; u32 n = (u32)(f->size - in < len ? f->size - in : len);
         char p[800]; snprintf(p, sizeof p, "%s/%s", g_root, f->path);
@@ -72,7 +72,7 @@ int disc_read(u64 off, u32 len, u32 dst) {
         for (u32 k = 0; k < got; k++) W8(dst + k, buf[k]);
         for (u32 k = got; k < n; k++) W8(dst + k, 0);
         free(buf);
-        if (g_log) { static int nl; if (nl++ < 40) fprintf(stderr, "[disc] %s +%llX (%u bytes)\n", f->path, (unsigned long long)in, n); }
+        if (g_log && !f->logged) { f->logged = 1; fprintf(stderr, "[disc] %s +%llX (%u bytes)\n", f->path, (unsigned long long)in, n); }
         off += n; len -= n; dst += n;
     }
     return 1;

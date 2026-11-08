@@ -75,8 +75,11 @@ static s16 fetch(PB *p, int *ended) {
     } else { cur++; }
     // end of sample data (the end address is inclusive)
     if (cur > end) {   // the end address is the last sample
+        // Like the hardware accelerator: the address always wraps to the loop start, then the
+        // microcode either continues (looping) or stops the voice. NW4R reads the position back to
+        // decide a sound has finished, so a stopped voice must not be left past its end.
+        cur = pb32(p, PB_LOOP_ADDR);
         if (p->w[PB_LOOPING]) {
-            cur = pb32(p, PB_LOOP_ADDR);
             if (fmt == 0 && !p->w[PB_IS_STREAM]) {
                 p->w[PB_PRED_SCALE] = p->w[PB_LOOP_PS]; p->w[PB_YN1] = p->w[PB_LOOP_YN1]; p->w[PB_YN2] = p->w[PB_LOOP_YN2];
             }
@@ -155,7 +158,17 @@ static void process_list(u32 addr) {
         u32 next = pb32(&pb, PB_NEXT);
         if (pb.w[PB_RUNNING] == 1) {
             u16 before[PB_WORDS]; memcpy(before, pb.w, sizeof before);
+            static int axlog = -1; if (axlog < 0) axlog = getenv("TTPC_AXLOG") != NULL;
+            if (axlog && pb.w[PB_IS_STREAM]) {
+                static u32 last_loop[256], last_end[256], last_flags[256]; int slot = (addr >> 6) & 255;
+                u32 flags = pb.w[PB_LOOPING] | pb.w[PB_FORMAT] << 4;
+                if (pb32(&pb, PB_LOOP_ADDR) != last_loop[slot] || pb32(&pb, PB_END_ADDR) != last_end[slot] || flags != last_flags[slot])
+                    fprintf(stderr, "[axv] %08X loop %08X end %08X cur %08X looping %u fmt %u ratio %08X vol %04X\n", addr,
+                            pb32(&pb, PB_LOOP_ADDR), pb32(&pb, PB_END_ADDR), pb32(&pb, PB_CUR_ADDR), pb.w[PB_LOOPING], pb.w[PB_FORMAT], pb32(&pb, PB_RATIO), pb.w[PB_VOL]);
+                last_loop[slot] = pb32(&pb, PB_LOOP_ADDR); last_end[slot] = pb32(&pb, PB_END_ADDR); last_flags[slot] = flags;
+            }
             process_voice(&pb);
+            if (axlog && pb.w[PB_RUNNING] == 0) fprintf(stderr, "[axv] %08X ended at %08X\n", addr, pb32(&pb, PB_CUR_ADDR));
             g_voices_run++;
             for (unsigned k = 0; k < sizeof g_writeback / sizeof *g_writeback; k++) wr16(addr + 2 * g_writeback[k], pb.w[g_writeback[k]]);
             for (int k = 0; k < 24; k++) if (pb.w[PB_MIXER + k] != before[PB_MIXER + k]) wr16(addr + 2 * (PB_MIXER + k), pb.w[PB_MIXER + k]);

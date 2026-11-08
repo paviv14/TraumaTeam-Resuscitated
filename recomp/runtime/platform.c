@@ -75,6 +75,7 @@ static void sdl_audio_push(const s16 *lr, int frames, int rate) {
 
 int platform_init(void) {
     if (getenv("TTPC_HEADLESS")) return 0;
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "[platform] no display (%s): running headless\n", SDL_GetError());
         return 0;
@@ -126,11 +127,34 @@ void platform_present(const u32 *px, int x0, int y0, int w, int h, int stride) {
     SDL_RenderPresent(g_ren);
 }
 
+// ---------------------------------------------------------------- game controllers
+// Any SDL game controller (Xbox, PlayStation, Switch Pro...). The right stick drives the pointer
+// like a mouse would; whichever of mouse or pad moved last owns the pointer.
+static SDL_GameController *g_pad;
+static int g_pointer_pad;                 // 1 = pad owns the pointer
+static float g_pad_px = 0.5f, g_pad_py = 0.5f;
+static void pad_open(int index) {
+    if (g_pad || !SDL_IsGameController(index)) return;
+    g_pad = SDL_GameControllerOpen(index);
+    if (g_pad) fprintf(stderr, "[input] controller: %s\n", SDL_GameControllerName(g_pad));
+}
+static float axis(SDL_GameControllerAxis a) {
+    float v = g_pad ? SDL_GameControllerGetAxis(g_pad, a) / 32767.f : 0.f;
+    const float dz = 0.18f;                                    // dead zone, rescaled to 0..1 beyond it
+    if (v > dz) return (v - dz) / (1 - dz); if (v < -dz) return (v + dz) / (1 - dz); return 0;
+}
+
 void platform_poll(void) {
     if (!g_window_open) return;
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) { fprintf(stderr, "[platform] window closed\n"); exit(0); }
+        if (e.type == SDL_CONTROLLERDEVICEADDED) pad_open(e.cdevice.which);
+        if (e.type == SDL_CONTROLLERDEVICEREMOVED && g_pad && e.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(g_pad))) {
+            SDL_GameControllerClose(g_pad); g_pad = NULL; g_pointer_pad = 0;
+            for (int i = 0; i < SDL_NumJoysticks(); i++) pad_open(i);
+        }
+        if (e.type == SDL_MOUSEMOTION) g_pointer_pad = 0;
         if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F11) {
             u32 fs = SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN_DESKTOP;
             SDL_SetWindowFullscreen(g_win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
@@ -166,6 +190,29 @@ void platform_poll(void) {
     g_input.one = KEY(1);  g_input.two = KEY(2);
     g_input.c = KEY(C) || KEY(Q);  g_input.z = KEY(E) || KEY(F);   // Nunchuk buttons
 #undef KEY
+    g_input.nx = g_input.ny = 0; g_input.has_analog = 0;
+    if (g_pad) {
+#define PB(b) SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_##b)
+        g_input.a |= PB(A);                     g_input.b |= PB(B) || axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 0.3f;
+        g_input.z |= axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 0.3f;   g_input.c |= PB(LEFTSHOULDER);
+        g_input.up |= PB(DPAD_UP); g_input.down |= PB(DPAD_DOWN); g_input.left |= PB(DPAD_LEFT); g_input.right |= PB(DPAD_RIGHT);
+        g_input.one |= PB(X); g_input.two |= PB(Y);
+        g_input.plus |= PB(START); g_input.minus |= PB(BACK); g_input.home |= PB(GUIDE);
+        // left stick = Nunchuk stick (y up)
+        g_input.nx = axis(SDL_CONTROLLER_AXIS_LEFTX); g_input.ny = -axis(SDL_CONTROLLER_AXIS_LEFTY);
+        g_input.has_analog = g_input.nx != 0 || g_input.ny != 0;
+        // right stick = pointer velocity (full tilt crosses the screen in ~0.6 s; squared for precision)
+        float rx = axis(SDL_CONTROLLER_AXIS_RIGHTX), ry = axis(SDL_CONTROLLER_AXIS_RIGHTY);
+        if (rx || ry) {
+            if (!g_pointer_pad) { g_pad_px = g_input.mouse_x; g_pad_py = g_input.mouse_y; g_pointer_pad = 1; }
+            const float speed = 1.6f / 60.f;
+            g_pad_px += rx * (rx < 0 ? -rx : rx) * speed; g_pad_py += ry * (ry < 0 ? -ry : ry) * speed;
+        }
+        if (PB(RIGHTSHOULDER)) { g_pad_px = 0.5f; g_pad_py = 0.5f; g_pointer_pad = 1; }
+        if (g_pad_px < 0) g_pad_px = 0; if (g_pad_px > 1) g_pad_px = 1; if (g_pad_py < 0) g_pad_py = 0; if (g_pad_py > 1) g_pad_py = 1;
+#undef PB
+    }
+    if (g_pointer_pad) { g_input.mouse_x = g_pad_px; g_input.mouse_y = g_pad_py; g_input.mouse_in = 1; }
 }
 
 #else   // headless build

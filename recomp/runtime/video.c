@@ -368,6 +368,17 @@ static void setup_draw(void) {
         int b = m < 4 ? 0 : 0x20, mm = m & 3;
         u32 img0 = bp[0x88 + b + mm], mode0 = bp[0x80 + b + mm], tlut = bp[0x98 + b + mm];
         S.tex[m].e = tex_decode(&t, img0, tlut); S.tex[m].px = S.tex[m].e->px;
+        {   // debug: TTPC_TEXDUMP=<addr>,<frame> saves that texture (as decoded) once the frame is reached
+            static u32 want, at; static int init, done;
+            if (!init) { init = 1; const char *e = getenv("TTPC_TEXDUMP"); if (e) sscanf(e, "%x,%u", &want, &at); }
+            if (want && !done && (t.addr & 0x1FFFFFFF) == (want & 0x1FFFFFFF) && g_copies >= at) {
+                done = 1; char path[256]; snprintf(path, sizeof path, "texdump_%08X_f%llu.ppm", want, (unsigned long long)g_copies);
+                FILE *f = fopen(path, "wb");
+                if (f) { fprintf(f, "P6\n%d %d\n255\n", t.w, t.h);
+                         for (int k = 0; k < t.w * t.h; k++) { u32 c = S.tex[m].px[k]; u8 rgb[3] = { (u8)(c >> 24), (u8)(c >> 16), (u8)(c >> 8) }; fwrite(rgb, 1, 3, f); }
+                         fclose(f); fprintf(stderr, "[video] dumped texture %08X -> %s\n", want, path); }
+            }
+        }
         S.tex[m].w = t.w; S.tex[m].h = t.h; S.tex[m].ws = t.wrap_s; S.tex[m].wt = t.wrap_t;
         S.tex[m].linear = (mode0 >> 4) & 1;                       // magnification filter
     }

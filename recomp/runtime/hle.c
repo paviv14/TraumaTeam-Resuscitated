@@ -24,12 +24,13 @@ void rt_logfn(CPU *c, u32 addr) {
         if (c->r[3] != last) fprintf(stderr, "[save] message %u | state %u res %d 0x12c %08X 0x128 %08X\n", c->r[3], R32(b), (s32)R32(b + 0x130), R32(b + 0x12C), R32(b + 0x128));
         last = c->r[3]; return;
     }
-    static int n; if (n++ > 4000) return;
+    static int n; if (n++ > 20000) return;
     u32 r13 = c->r[13];
     if (addr == 0x802320B0u || addr == 0x80232410u) {
         fprintf(stderr, "[fn %08X] drawdone flag %u | msr EE %u\n", addr, R8(r13 - 0x4720), (c->msr >> 15) & 1);
         return;
     }
+    if (getenv("TTPC_LOGSHORT")) { fprintf(stderr, "[fn %08X] r3=%08X r4=%08X r5=%08X r6=%08X lr %08X\n", addr, c->r[3], c->r[4], c->r[5], c->r[6], c->lr); return; }
     fprintf(stderr, "[fn %08X] r3=%08X r4=%08X | q head %u tail %u | flags %u %u | last tok %u gpu tok %u | fb %08X\n",
             addr, c->r[3], c->r[4], R16(0x804860EE), R16(0x804860EC), R8(r13 - 0x51FB), R8(r13 - 0x51FA),
             R16(r13 - 0x51F8), R16(0xCC00100E), R32(r13 - 0x5200));
