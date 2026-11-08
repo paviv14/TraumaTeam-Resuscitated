@@ -3,9 +3,8 @@
 #include "cpu.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <setjmp.h>
-#include <sys/mman.h>
-#include <time.h>
+#include <string.h>
+#include "port.h"
 
 u8 *g_mem;
 u8 g_lc[0x4000];
@@ -25,8 +24,6 @@ static void report_seen(void) {
     const char *w = getenv("TTPC_WATCH");   // e.g. TTPC_WATCH=8022FCC0,8000C500
     while (w && *w) { u32 a = (u32)strtoul(w, (char **)&w, 16); fprintf(stderr, "  %08X ran: %s\n", a, g_seen[(a - 0x80004000u) >> 2] ? "yes" : "no"); if (*w == ',') w++; else break; }
 }
-#include <signal.h>
-#include <unistd.h>
 static void dump_trace(void) {
     // print distinct recent functions, newest last
     fprintf(stderr, "recent functions:");
@@ -40,10 +37,9 @@ static void dump_trace(void) {
 }
 void rt_dump_threads(void);
 static void dump(CPU *c);
-static void on_segv(int sig) {
-    (void)sig;
-    static const char m[] = "CRASH (host stack overflow or bad pointer)\n"; write(2, m, sizeof m - 1);
-    dump(&g_cpu); dump_trace(); report_seen(); rt_dump_threads(); _exit(3);
+static void on_crash(void) {
+    fprintf(stderr, "CRASH (host stack overflow or bad pointer)\n");
+    dump(&g_cpu); dump_trace(); report_seen(); rt_dump_threads();
 }
 void gx_dump(void); void video_dump_stats(void);
 u32 g_wp = 1;
@@ -52,8 +48,7 @@ void rt_wp_hit(u32 a, u32 v, int size) {
     fprintf(stderr, "[wp] store%d %08X <- %08X | lr %08X\n", size * 8, a, v, g_cpu.lr); dump_trace();
 }
 __attribute__((constructor)) static void wp_init(void) { const char *e = getenv("TTPC_WP"); if (e) g_wp = (u32)strtoul(e, 0, 16) & ~3u; }
-static void on_alarm(int sig) { (void)sig; fprintf(stderr, "TIMEOUT\n"); dump_trace(); report_seen(); rt_dump_threads(); gx_dump(); video_dump_stats(); _exit(2); }
-static jmp_buf g_halt;
+static void on_timeout(void) { fprintf(stderr, "TIMEOUT\n"); dump_trace(); report_seen(); rt_dump_threads(); gx_dump(); video_dump_stats(); fflush(stderr); if (getenv("TTPC_GMON")) exit(2); _Exit(2); }
 static int g_trace_mmio = 1;
 static unsigned g_mmio_count;
 
@@ -131,8 +126,8 @@ void rt_mtspr(CPU *c, int spr, u32 v) {
 }
 u32 rt_mftb(CPU *c, int which) {
     (void)c;
-    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    u64 tb = (u64)ts.tv_sec * 60750000ull + (u64)ts.tv_nsec * 60750000ull / 1000000000ull;  // bus/4
+    u64 ns = host_now_ns();
+    u64 tb = ns / 1000000000ull * 60750000ull + ns % 1000000000ull * 60750000ull / 1000000000ull;  // bus/4
     return which == 269 ? (u32)(tb >> 32) : (u32)tb;
 }
 void rt_mtmsr(CPU *c, u32 v) { c->msr = v; }
@@ -181,7 +176,7 @@ void rt_psq_st(CPU *c, u32 ea, int fs, int w, int i) {
 static u32 g_regs[0x20000];  // 0x0C000000-0x0C00FFFF and 0x0D000000-0x0D00FFFF, 4-byte granularity
 static u32 g_poll_reg, g_poll_count;
 static u32 *reg_slot(u32 p) { return &g_regs[((p >> 24) & 1) * 0x4000 + ((p & 0xFFFF) >> 2)]; }
-static u64 host_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (u64)ts.tv_sec * 1000000000ull + ts.tv_nsec; }
+static u64 host_ns(void) { return host_now_ns(); }
 u32 dsp_read(u32 p, int size); void dsp_write(u32 p, u32 v, int size);
 u32 mmio_read(u32 p, int size) {
     if ((p & 0xFFFFFFC0u) == 0x0C005000u) return dsp_read(p, size);
@@ -261,26 +256,54 @@ static void setup_lowmem(void) {
     memcpy(HOSTPTR(0x80000000, 1), "SUOE01", 6);  // disc ID
 }
 
+static int file_exists(const char *p) { FILE *f = fopen(p, "rb"); if (f) fclose(f); return f != NULL; }
+
+// Usage: ttpc [main.dol] [timeout-seconds]
+// The extracted disc (folder with sys/ and files/) comes from TTPC_DISC, or is looked for at
+// disc/DATA, ../disc/DATA, ../../disc/DATA, DATA next to the working folder or the executable.
+static const char *find_disc(const char *exe) {
+    static char buf[1024];
+    if (getenv("TTPC_DISC")) return getenv("TTPC_DISC");
+    static const char *rel[] = { "disc/DATA", "../disc/DATA", "../../disc/DATA", "DATA" };
+    char dir[1024] = "";
+    const char *slash = strrchr(exe, '/'), *bslash = strrchr(exe, '\\');
+    if (bslash && (!slash || bslash > slash)) slash = bslash;
+    if (slash && slash - exe < (long)sizeof dir) { memcpy(dir, exe, slash - exe + 1); dir[slash - exe + 1] = 0; }
+    for (int pass = 0; pass < 2; pass++)
+        for (unsigned k = 0; k < sizeof rel / sizeof *rel; k++) {
+            snprintf(buf, sizeof buf, "%s%s/sys/main.dol", pass ? dir : "", rel[k]);
+            if (file_exists(buf)) { snprintf(buf, sizeof buf, "%s%s", pass ? dir : "", rel[k]); return buf; }
+        }
+    return "disc/DATA";
+}
+
 int main(int argc, char **argv) {
-    if (argc < 2) { fprintf(stderr, "usage: %s main.dol\n", argv[0]); return 1; }
-    g_mem = mmap(NULL, 0x14000000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (g_mem == MAP_FAILED) { perror("mmap"); return 1; }
-    load_dol(argv[1]);
+    const char *disc = find_disc(argv[0]);
+    char dolpath[1200];
+    if (argc > 1) snprintf(dolpath, sizeof dolpath, "%s", argv[1]);
+    else snprintf(dolpath, sizeof dolpath, "%s/sys/main.dol", disc);
+    if (!file_exists(dolpath)) {
+        fprintf(stderr, "Cannot find the game's main.dol (looked at %s).\n"
+                        "Set TTPC_DISC to the extracted disc folder (the one containing sys/ and files/).\n", dolpath);
+        return 1;
+    }
+    g_mem = host_alloc_guest(0x14000000);
+    if (!g_mem) { fprintf(stderr, "cannot reserve guest memory\n"); return 1; }
+    load_dol(dolpath);
     setup_lowmem();
-    void disc_init(const char *root); void video_init(void); void ios_init(void);
+    void disc_init(const char *root); void video_init(void); void ios_init(void); int platform_init(void);
     ios_init();
+    platform_init();
     video_init();
-    disc_init(getenv("TTPC_DISC") ? getenv("TTPC_DISC") : "disc/DATA");
+    fprintf(stderr, "disc: %s\n", disc);
+    disc_init(disc);
     CPU *c = &g_cpu;
-    signal(SIGALRM, on_alarm); alarm(argc > 2 ? atoi(argv[2]) : 15);
-    { static char altstack[1 << 16]; stack_t ss = { .ss_sp = altstack, .ss_size = sizeof altstack };
-      sigaltstack(&ss, NULL); struct sigaction sa = { .sa_handler = on_segv, .sa_flags = SA_ONSTACK };
-      sigaction(SIGSEGV, &sa, NULL); sigaction(SIGBUS, &sa, NULL); }
+    int timeout = argc > 2 ? atoi(argv[2]) : getenv("TTPC_TIMEOUT") ? atoi(getenv("TTPC_TIMEOUT")) : 0;
+    host_set_timeout(timeout, on_timeout);
+    host_install_crash_handler(on_crash);
     c->msr = 0x00002032;
     fprintf(stderr, "booting at %08X (%u recompiled entry points)\n", g_entry, g_nfuncs);
-    if (!setjmp(g_halt)) {
-        rt_call(c, g_entry);
-        fprintf(stderr, "entry returned\n");
-    }
+    rt_call(c, g_entry);
+    fprintf(stderr, "entry returned\n");
     return 0;
 }

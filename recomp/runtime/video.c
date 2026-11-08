@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "platform.h"
+#include "port.h"
 
 // ---------------------------------------------------------------- state
 static u32 cp[256];                 // CP registers
@@ -53,7 +55,7 @@ void video_init(void) {
     tmem = calloc(1, 1 << 20);
     g_dump_dir = getenv("TTPC_FRAMES");
     if (getenv("TTPC_FRAME_EVERY")) g_dump_every = atoi(getenv("TTPC_FRAME_EVERY"));
-    g_render = g_dump_dir != NULL;   // rasterizing is only needed when frames are being looked at
+    g_render = g_dump_dir != NULL || g_window_open;   // rasterize only when frames are being looked at
 }
 
 // ---------------------------------------------------------------- vertex formats
@@ -264,19 +266,6 @@ static int wrap(int v, int n, int mode) {
     if (mode == 2) { int p = 2 * n; v %= p; if (v < 0) v += p; return v < n ? v : p - 1 - v; }
     return v < 0 ? 0 : v >= n ? n - 1 : v;
 }
-static void sample(int map, float s, float tc, float out[4]) {
-    Tex t; get_tex(map, &t);
-    float fx = s * t.w - 0.5f, fy = tc * t.h - 0.5f;
-    int x0 = (int)floorf(fx), y0 = (int)floorf(fy); float ax = fx - x0, ay = fy - y0;
-    float acc[4] = { 0 };
-    for (int k = 0; k < 4; k++) {
-        int xx = wrap(x0 + (k & 1), t.w, t.wrap_s), yy = wrap(y0 + (k >> 1), t.h, t.wrap_t);
-        u32 c = texel(&t, xx, yy);
-        float wgt = ((k & 1) ? ax : 1 - ax) * ((k >> 1) ? ay : 1 - ay);
-        acc[0] += wgt * (c >> 24); acc[1] += wgt * ((c >> 16) & 255); acc[2] += wgt * ((c >> 8) & 255); acc[3] += wgt * (c & 255);
-    }
-    for (int k = 0; k < 4; k++) out[k] = acc[k] / 255.f;
-}
 
 // ---------------------------------------------------------------- TEV (texture environment) combiner
 static void tev_reg(int r, float out[4]) {   // C0..C2 / PREV registers set via BP 0xE0-0xE7
@@ -295,73 +284,152 @@ static void konst_value(int stage, int alpha, float out[4]) {
     int k = (sel - 16) & 3, comp = (sel - 16) >> 2;   // 16-31: K0_R,K1_R,K2_R,K3_R,K0_G,...
     float v = g_konst[k][comp]; out[0] = out[1] = out[2] = out[3] = v;
 }
-static void tev(const float ras[2][4], const float tex[8][4], int texmap_of_stage[16], float out[4]) {
-    int nst = ((bp[0x00] >> 10) & 15) + 1;
-    float R[4][4]; memcpy(R, g_reg, sizeof R);
-    for (int s = 0; s < nst; s++) {
-        u32 order = bp[0x28 + s / 2] >> ((s & 1) ? 12 : 0);
-        int map = order & 7, en = (order >> 6) & 1, chan = (order >> 7) & 7;
-        float T[4] = { 1, 1, 1, 1 }, C[4] = { 0, 0, 0, 0 };
-        if (en && texmap_of_stage[s] >= 0) memcpy(T, tex[s], 16);
-        if (chan == 0 || chan == 2 || chan == 4) memcpy(C, ras[0], 16);
-        else if (chan == 1 || chan == 3 || chan == 5) memcpy(C, ras[1], 16);
+
+// ---------------------------------------------------------------- decoded texture cache
+// Textures are decoded to RGBA once per displayed frame (and again after a TLUT load or an EFB copy
+// that may have rewritten them), instead of once per texel fetch.
+typedef struct { u32 addr, img0, tlut, gen; int w, h; u32 *px; size_t cap; } TexEntry;
+static TexEntry g_tcache[1024];
+static u32 g_tgen = 1;               // bumped when cached textures may be stale
+static const u32 *tex_decode(const Tex *t, u32 img0, u32 tlutreg) {
+    int pal = t->fmt >= 8 && t->fmt <= 10;
+    u32 key = t->addr ^ (img0 * 2654435761u) ^ (pal ? tlutreg * 40503u : 0);
+    for (int probe = 0; probe < 8; probe++) {
+        TexEntry *e = &g_tcache[(key + probe) & 1023];
+        if (e->px && e->gen == g_tgen && e->addr == t->addr && e->img0 == img0 && (!pal || e->tlut == tlutreg)) return e->px;
+        if (!e->px || e->gen != g_tgen || probe == 7) {
+            size_t n = (size_t)t->w * t->h;
+            if (e->cap < n) { free(e->px); e->px = malloc(n * 4); e->cap = n; }
+            for (int y = 0; y < t->h; y++) for (int x = 0; x < t->w; x++) e->px[(size_t)y * t->w + x] = texel(t, x, y);
+            e->addr = t->addr; e->img0 = img0; e->tlut = tlutreg; e->gen = g_tgen; e->w = t->w; e->h = t->h;
+            return e->px;
+        }
+    }
+    return NULL;
+}
+
+// ---------------------------------------------------------------- per-draw pipeline state
+// Everything the pixel loop needs, decoded from BP registers once per draw call.
+typedef struct { const u32 *px; int w, h, ws, wt, linear; } TexV;
+typedef struct {
+    int map, coord, chan, csel[4], asel[4];
+    int cb, csub, cclamp, cscale, cdest, ab, asub, aclamp, ascale, adest;
+    float K[4], KA;
+} Stage;
+typedef struct {
+    int nst; Stage st[16]; TexV tex[8];
+    float reg[4][4];
+    int ac_r0, ac_r1, ac_c0, ac_c1, ac_op;
+    u32 zm, bm;
+    int sx0, sy0, sx1, sy1, cull;
+    float vp[6];
+} Setup;
+static Setup S;
+
+static void setup_draw(void) {
+    S.nst = ((bp[0x00] >> 10) & 15) + 1;
+    S.cull = (bp[0x00] >> 14) & 3;
+    memcpy(S.reg, g_reg, sizeof S.reg);
+    int used[8] = { 0 };
+    for (int s = 0; s < S.nst; s++) {
+        Stage *g = &S.st[s];
+        u32 o = bp[0x28 + s / 2] >> ((s & 1) ? 12 : 0);
+        g->map = (o >> 6) & 1 ? (int)(o & 7) : -1; g->coord = (o >> 3) & 7;
+        int chan = (o >> 7) & 7;
+        g->chan = (chan == 0 || chan == 2 || chan == 4) ? 0 : (chan == 1 || chan == 3 || chan == 5) ? 1 : -1;
         float K[4], KA[4]; konst_value(s, 0, K); konst_value(s, 1, KA);
+        memcpy(g->K, K, 16); g->KA = KA[3];
         u32 ce = bp[0xC0 + 2 * s], ae = bp[0xC1 + 2 * s];
-        // color
+        for (int i = 0; i < 4; i++) { g->csel[i] = (ce >> (12 - 4 * i)) & 15; g->asel[i] = (ae >> (13 - 3 * i)) & 7; }
+        g->cb = (ce >> 16) & 3; g->csub = (ce >> 18) & 1; g->cclamp = (ce >> 19) & 1; g->cscale = (ce >> 20) & 3; g->cdest = (ce >> 22) & 3;
+        g->ab = (ae >> 16) & 3; g->asub = (ae >> 18) & 1; g->aclamp = (ae >> 19) & 1; g->ascale = (ae >> 20) & 3; g->adest = (ae >> 22) & 3;
+        if (g->map >= 0) used[g->map] = 1;
+    }
+    for (int m = 0; m < 8; m++) {
+        S.tex[m].px = NULL;
+        if (!used[m]) continue;
+        Tex t; get_tex(m, &t);
+        int b = m < 4 ? 0 : 0x20, mm = m & 3;
+        u32 img0 = bp[0x88 + b + mm], mode0 = bp[0x80 + b + mm], tlut = bp[0x98 + b + mm];
+        S.tex[m].px = tex_decode(&t, img0, tlut);
+        S.tex[m].w = t.w; S.tex[m].h = t.h; S.tex[m].ws = t.wrap_s; S.tex[m].wt = t.wrap_t;
+        S.tex[m].linear = (mode0 >> 4) & 1;                       // magnification filter
+    }
+    u32 ac = bp[0xF3];
+    S.ac_r0 = ac & 255; S.ac_r1 = (ac >> 8) & 255; S.ac_c0 = (ac >> 16) & 7; S.ac_c1 = (ac >> 19) & 7; S.ac_op = (ac >> 22) & 3;
+    S.zm = bp[0x40]; S.bm = bp[0x41];
+    int stl = bp[0x20], sbr = bp[0x21];
+    S.sx0 = ((stl >> 12) & 0x7FF) - 342; S.sy0 = (stl & 0x7FF) - 342; S.sx1 = ((sbr >> 12) & 0x7FF) - 342; S.sy1 = (sbr & 0x7FF) - 342;
+    for (int k = 0; k < 6; k++) S.vp[k] = xf_f(0x101A + k);
+}
+
+static inline void samp(const TexV *t, float s, float tc, float out[4]) {
+    if (!t->px) { out[0] = out[1] = out[2] = out[3] = 1; return; }
+    if (!t->linear) {
+        int x = wrap((int)floorf(s * t->w), t->w, t->ws), y = wrap((int)floorf(tc * t->h), t->h, t->wt);
+        u32 c = t->px[y * t->w + x];
+        out[0] = (c >> 24) * (1 / 255.f); out[1] = ((c >> 16) & 255) * (1 / 255.f); out[2] = ((c >> 8) & 255) * (1 / 255.f); out[3] = (c & 255) * (1 / 255.f);
+        return;
+    }
+    float fx = s * t->w - 0.5f, fy = tc * t->h - 0.5f;
+    int x0 = (int)floorf(fx), y0 = (int)floorf(fy); float ax = fx - x0, ay = fy - y0;
+    int xa = wrap(x0, t->w, t->ws), xb = wrap(x0 + 1, t->w, t->ws), ya = wrap(y0, t->h, t->wt), yb = wrap(y0 + 1, t->h, t->wt);
+    u32 c00 = t->px[ya * t->w + xa], c10 = t->px[ya * t->w + xb], c01 = t->px[yb * t->w + xa], c11 = t->px[yb * t->w + xb];
+    float w00 = (1 - ax) * (1 - ay), w10 = ax * (1 - ay), w01 = (1 - ax) * ay, w11 = ax * ay;
+    for (int k = 0; k < 4; k++) {
+        int sh = 24 - 8 * k;
+        out[k] = (w00 * ((c00 >> sh) & 255) + w10 * ((c10 >> sh) & 255) + w01 * ((c01 >> sh) & 255) + w11 * ((c11 >> sh) & 255)) * (1 / 255.f);
+    }
+}
+
+static inline float clampf(float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; }
+static void tev_fast(const float ras[2][4], const float tex[16][4], float out[4]) {
+    static const float bias_t[4] = { 0, 0.5f, -0.5f, 0 }, scale_t[4] = { 1, 2, 4, 0.5f };
+    float R[4][4]; memcpy(R, S.reg, sizeof R);
+    for (int s = 0; s < S.nst; s++) {
+        const Stage *g = &S.st[s];
+        const float *T = g->map >= 0 ? tex[s] : (const float[4]){ 1, 1, 1, 1 };
+        const float *C = g->chan >= 0 ? ras[g->chan] : (const float[4]){ 0, 0, 0, 0 };
         float in[4][3];
         for (int i = 0; i < 4; i++) {
-            int sel = (ce >> (12 - 4 * i)) & 15; float *dst = in[i];   // a(12-15), b(8-11), c(4-7), d(0-3)
+            float *d = in[i]; int sel = g->csel[i];
             switch (sel) {
-            case 0: case 2: case 4: case 6: { int r = sel / 2; dst[0] = R[r][0]; dst[1] = R[r][1]; dst[2] = R[r][2]; break; }
-            case 1: case 3: case 5: case 7: { int r = sel / 2; dst[0] = dst[1] = dst[2] = R[r][3]; break; }
-            case 8: dst[0] = T[0]; dst[1] = T[1]; dst[2] = T[2]; break;
-            case 9: dst[0] = dst[1] = dst[2] = T[3]; break;
-            case 10: dst[0] = C[0]; dst[1] = C[1]; dst[2] = C[2]; break;
-            case 11: dst[0] = dst[1] = dst[2] = C[3]; break;
-            case 12: dst[0] = dst[1] = dst[2] = 1; break;
-            case 13: dst[0] = dst[1] = dst[2] = 0.5f; break;
-            case 14: dst[0] = K[0]; dst[1] = K[1]; dst[2] = K[2]; break;
-            default: dst[0] = dst[1] = dst[2] = 0; break;
+            case 0: case 2: case 4: case 6: { const float *r = R[sel / 2]; d[0] = r[0]; d[1] = r[1]; d[2] = r[2]; break; }
+            case 1: case 3: case 5: case 7: d[0] = d[1] = d[2] = R[sel / 2][3]; break;
+            case 8: d[0] = T[0]; d[1] = T[1]; d[2] = T[2]; break;
+            case 9: d[0] = d[1] = d[2] = T[3]; break;
+            case 10: d[0] = C[0]; d[1] = C[1]; d[2] = C[2]; break;
+            case 11: d[0] = d[1] = d[2] = C[3]; break;
+            case 12: d[0] = d[1] = d[2] = 1; break;
+            case 13: d[0] = d[1] = d[2] = 0.5f; break;
+            case 14: d[0] = g->K[0]; d[1] = g->K[1]; d[2] = g->K[2]; break;
+            default: d[0] = d[1] = d[2] = 0; break;
             }
         }
         float ain[4];
         for (int i = 0; i < 4; i++) {
-            int sel = (ae >> (13 - 3 * i)) & 7;   // a(13-15), b(10-12), c(7-9), d(4-6)
-            switch (sel) {
-            case 0: case 1: case 2: case 3: ain[i] = R[sel][3]; break;
-            case 4: ain[i] = T[3]; break;
-            case 5: ain[i] = C[3]; break;
-            case 6: ain[i] = KA[3]; break;
-            default: ain[i] = 0; break;
-            }
+            int sel = g->asel[i];
+            ain[i] = sel < 4 ? R[sel][3] : sel == 4 ? T[3] : sel == 5 ? C[3] : sel == 6 ? g->KA : 0;
         }
-        static const float bias_t[4] = { 0, 0.5f, -0.5f, 0 }, scale_t[4] = { 1, 2, 4, 0.5f };
-        int cb = (ce >> 16) & 3, csub = (ce >> 18) & 1, cclamp = (ce >> 19) & 1, cscale = (ce >> 20) & 3, cdest = (ce >> 22) & 3;
-        int ab = (ae >> 16) & 3, asub = (ae >> 18) & 1, aclamp = (ae >> 19) & 1, ascale = (ae >> 20) & 3, adest = (ae >> 22) & 3;
-        float res[4];
         for (int k = 0; k < 3; k++) {
             float l = in[0][k] * (1 - in[2][k]) + in[1][k] * in[2][k];
-            float v = cb == 3 ? in[3][k] + l : (in[3][k] + (csub ? -l : l) + bias_t[cb]) * scale_t[cscale];
-            res[k] = cclamp ? fminf(1, fmaxf(0, v)) : fminf(4, fmaxf(-4, v));
+            float v = g->cb == 3 ? in[3][k] + l : (in[3][k] + (g->csub ? -l : l) + bias_t[g->cb]) * scale_t[g->cscale];
+            R[g->cdest][k] = g->cclamp ? clampf(v, 0, 1) : clampf(v, -4, 4);
         }
-        {
-            float l = ain[0] * (1 - ain[2]) + ain[1] * ain[2];
-            float v = ab == 3 ? ain[3] + l : (ain[3] + (asub ? -l : l) + bias_t[ab]) * scale_t[ascale];
-            res[3] = aclamp ? fminf(1, fmaxf(0, v)) : fminf(4, fmaxf(-4, v));
-        }
-        R[cdest][0] = res[0]; R[cdest][1] = res[1]; R[cdest][2] = res[2]; R[adest][3] = res[3];
-        if (s == nst - 1) { out[0] = R[cdest][0]; out[1] = R[cdest][1]; out[2] = R[cdest][2]; out[3] = R[adest][3]; }
+        float l = ain[0] * (1 - ain[2]) + ain[1] * ain[2];
+        float v = g->ab == 3 ? ain[3] + l : (ain[3] + (g->asub ? -l : l) + bias_t[g->ab]) * scale_t[g->ascale];
+        R[g->adest][3] = g->aclamp ? clampf(v, 0, 1) : clampf(v, -4, 4);
+        if (s == S.nst - 1) { out[0] = R[g->cdest][0]; out[1] = R[g->cdest][1]; out[2] = R[g->cdest][2]; out[3] = R[g->adest][3]; }
     }
-    for (int k = 0; k < 4; k++) out[k] = fminf(1, fmaxf(0, out[k]));
+    for (int k = 0; k < 4; k++) out[k] = clampf(out[k], 0, 1);
 }
 
 // ---------------------------------------------------------------- rasterizer
-static int alpha_test(float a) {
-    u32 ac = bp[0xF3];
-    int r0 = ac & 255, r1 = (ac >> 8) & 255, c0 = (ac >> 16) & 7, c1 = (ac >> 19) & 7, op = (ac >> 22) & 3;
+static inline int alpha_test(float a) {
     int v = (int)(a * 255 + 0.5f);
     #define CMP(c, r) ((c) == 0 ? 0 : (c) == 1 ? v < (r) : (c) == 2 ? v == (r) : (c) == 3 ? v <= (r) : (c) == 4 ? v > (r) : (c) == 5 ? v != (r) : (c) == 6 ? v >= (r) : 1)
-    int a0 = CMP(c0, r0), a1 = CMP(c1, r1);
+    int a0 = CMP(S.ac_c0, S.ac_r0), a1 = CMP(S.ac_c1, S.ac_r1);
+    int op = S.ac_op;
     return op == 0 ? a0 && a1 : op == 1 ? a0 || a1 : op == 2 ? a0 != a1 : a0 == a1;
 }
 static float blend_factor(int f, int src, const float s[4], const float d[4], int k) {
@@ -374,16 +442,20 @@ static float blend_factor(int f, int src, const float s[4], const float d[4], in
     }
     return 1;
 }
-static void put_pixel(int x, int y, float z, const float c[4]) {
+static inline void put_pixel(int x, int y, float z, const float c[4]) {
     long i = (long)y * EW + x;
-    u32 zm = bp[0x40];
+    u32 zm = S.zm;
     if (zm & 1) {
         int fn = (zm >> 1) & 7; float dz = efb_z[i];
         int pass = fn == 0 ? 0 : fn == 1 ? z < dz : fn == 2 ? z == dz : fn == 3 ? z <= dz : fn == 4 ? z > dz : fn == 5 ? z != dz : fn == 6 ? z >= dz : 1;
         if (!pass) return;
         if (zm & 16) efb_z[i] = z;
     }
-    u32 bm = bp[0x41];
+    u32 bm = S.bm;
+    if (!(bm & 1) && (bm & 8) && (bm & 16)) {   // plain write: the common case
+        efb_c[i] = rgba((u32)(c[0] * 255 + .5f), (u32)(c[1] * 255 + .5f), (u32)(c[2] * 255 + .5f), (u32)(c[3] * 255 + .5f));
+        return;
+    }
     u32 dc = efb_c[i];
     float d[4] = { (dc >> 24) / 255.f, ((dc >> 16) & 255) / 255.f, ((dc >> 8) & 255) / 255.f, (dc & 255) / 255.f };
     float o[4]; memcpy(o, c, 16);
@@ -391,7 +463,7 @@ static void put_pixel(int x, int y, float z, const float c[4]) {
         int sf = (bm >> 8) & 7, df = (bm >> 5) & 7;
         for (int k = 0; k < 4; k++) {
             float v = (bm & 0x800) ? d[k] - c[k] : c[k] * blend_factor(sf, 1, c, d, k) + d[k] * blend_factor(df, 0, c, d, k);
-            o[k] = fminf(1, fmaxf(0, v));
+            o[k] = clampf(v, 0, 1);
         }
     }
     if (!(bm & 8)) { o[0] = d[0]; o[1] = d[1]; o[2] = d[2]; }   // color update disabled
@@ -400,11 +472,10 @@ static void put_pixel(int x, int y, float z, const float c[4]) {
 }
 
 static void to_screen(const Out *o, float *sx, float *sy, float *sz) {
-    float wd = xf_f(0x101A), ht = xf_f(0x101B), zr = xf_f(0x101C), xo = xf_f(0x101D), yo = xf_f(0x101E), fz = xf_f(0x101F);
     float iw = 1.f / o->w;
-    *sx = (o->x * iw * wd + xo - 342.f) * g_scale;
-    *sy = (o->y * iw * ht + yo - 342.f) * g_scale;
-    *sz = (o->z * iw * zr + fz) / 16777215.f;
+    *sx = (o->x * iw * S.vp[0] + S.vp[3] - 342.f) * g_scale;
+    *sy = (o->y * iw * S.vp[1] + S.vp[4] - 342.f) * g_scale;
+    *sz = (o->z * iw * S.vp[2] + S.vp[5]) / 16777215.f;
 }
 
 static void draw_tri(const Out *a, const Out *b, const Out *c) {
@@ -414,48 +485,48 @@ static void draw_tri(const Out *a, const Out *b, const Out *c) {
     float X[3], Y[3], Z[3], IW[3];
     for (int k = 0; k < 3; k++) { to_screen(v[k], &X[k], &Y[k], &Z[k]); IW[k] = 1.f / v[k]->w; }
     float area = (X[1] - X[0]) * (Y[2] - Y[0]) - (X[2] - X[0]) * (Y[1] - Y[0]);
-    if (st_samples < 6) { st_samples++; fprintf(stderr, "[video] tri screen (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f) z %.3f w %.3f | vp %g %g %g %g proj %s\n",
-        X[0], Y[0], X[1], Y[1], X[2], Y[2], Z[0], a->w, xf_f(0x101A), xf_f(0x101B), xf_f(0x101D), xf_f(0x101E), (xfreg[0x26] & 1) ? "ortho" : "persp"); }
     if (fabsf(area) < 1e-9f) { st_area++; return; }
     // Front faces are clockwise on screen (y down) = positive area here. GENMODE cull: 1 = back, 2 = front.
-    int cull = (bp[0x00] >> 14) & 3;
+    int cull = S.cull;
     if (cull == 3 || (cull == 1 && area < 0) || (cull == 2 && area > 0)) { st_cull++; return; }
-    // scissor (BP 0x20/0x21, offset by 342)
-    int stl = bp[0x20], sbr = bp[0x21];
-    int sx0 = ((stl >> 12) & 0x7FF) - 342, sy0 = (stl & 0x7FF) - 342, sx1 = ((sbr >> 12) & 0x7FF) - 342, sy1 = (sbr & 0x7FF) - 342;
     int minx = (int)floorf(fminf(X[0], fminf(X[1], X[2]))), maxx = (int)ceilf(fmaxf(X[0], fmaxf(X[1], X[2])));
     int miny = (int)floorf(fminf(Y[0], fminf(Y[1], Y[2]))), maxy = (int)ceilf(fmaxf(Y[0], fmaxf(Y[1], Y[2])));
-    if (minx < sx0 * g_scale) minx = sx0 * g_scale; if (miny < sy0 * g_scale) miny = sy0 * g_scale;
-    if (maxx > (sx1 + 1) * g_scale) maxx = (sx1 + 1) * g_scale; if (maxy > (sy1 + 1) * g_scale) maxy = (sy1 + 1) * g_scale;
+    if (minx < S.sx0 * g_scale) minx = S.sx0 * g_scale; if (miny < S.sy0 * g_scale) miny = S.sy0 * g_scale;
+    if (maxx > (S.sx1 + 1) * g_scale) maxx = (S.sx1 + 1) * g_scale; if (maxy > (S.sy1 + 1) * g_scale) maxy = (S.sy1 + 1) * g_scale;
     if (minx < 0) minx = 0; if (miny < 0) miny = 0; if (maxx > EW) maxx = EW; if (maxy > EH) maxy = EH;
     if (minx >= maxx || miny >= maxy) { st_empty++; return; }
-    int nst = ((bp[0x00] >> 10) & 15) + 1;
-    int stage_map[16], stage_coord[16];
-    for (int s = 0; s < nst; s++) { u32 o = bp[0x28 + s / 2] >> ((s & 1) ? 12 : 0); stage_map[s] = (o >> 6) & 1 ? (int)(o & 7) : -1; stage_coord[s] = (o >> 3) & 7; }
+    // Edge functions are affine in x: step them instead of recomputing per pixel.
+    float ia = 1.f / area;
+    float A0 = -(Y[2] - Y[1]) * ia, B0 = (X[2] - X[1]) * ia;   // w0 = ((X1-px)(Y2-py) - (X2-px)(Y1-py)) / area
+    float A1 = -(Y[0] - Y[2]) * ia, B1 = (X[0] - X[2]) * ia;
+    int big = (maxx - minx) * (maxy - miny) > 2048;
+    #pragma omp parallel for schedule(dynamic, 8) if (big)
     for (int y = miny; y < maxy; y++) {
-        for (int x = minx; x < maxx; x++) {
-            float px = x + 0.5f, py = y + 0.5f;
-            float w0 = ((X[1] - px) * (Y[2] - py) - (X[2] - px) * (Y[1] - py)) / area;
-            float w1 = ((X[2] - px) * (Y[0] - py) - (X[0] - px) * (Y[2] - py)) / area;
+        float py = y + 0.5f, px0 = minx + 0.5f;
+        float w0 = ((X[1] - px0) * (Y[2] - py) - (X[2] - px0) * (Y[1] - py)) * ia;
+        float w1 = ((X[2] - px0) * (Y[0] - py) - (X[0] - px0) * (Y[2] - py)) * ia;
+        (void)B0; (void)B1;
+        for (int x = minx; x < maxx; x++, w0 += A0, w1 += A1) {
             float w2 = 1 - w0 - w1;
             if (w0 < 0 || w1 < 0 || w2 < 0) continue;
             float z = w0 * Z[0] + w1 * Z[1] + w2 * Z[2];
             float iw = w0 * IW[0] + w1 * IW[1] + w2 * IW[2];
-            float pw[3] = { w0 * IW[0] / iw, w1 * IW[1] / iw, w2 * IW[2] / iw };   // perspective-correct weights
-            float ras[2][4], tex[8][4];
+            float inv = 1.f / iw;
+            float pw[3] = { w0 * IW[0] * inv, w1 * IW[1] * inv, w2 * IW[2] * inv };   // perspective-correct weights
+            float ras[2][4], tex[16][4];
             for (int ch = 0; ch < 2; ch++) for (int k = 0; k < 4; k++)
                 ras[ch][k] = pw[0] * v[0]->col[ch][k] + pw[1] * v[1]->col[ch][k] + pw[2] * v[2]->col[ch][k];
-            for (int s = 0; s < nst; s++) {
-                if (stage_map[s] < 0) continue;
-                int tc = stage_coord[s];
-                float u = 0, vv = 0, q = 0;
-                for (int k = 0; k < 3; k++) { u += pw[k] * v[k]->uv[tc][0]; vv += pw[k] * v[k]->uv[tc][1]; q += pw[k] * v[k]->uv[tc][2]; }
+            for (int s = 0; s < S.nst; s++) {
+                int m = S.st[s].map; if (m < 0) continue;
+                int tc = S.st[s].coord;
+                float u = pw[0] * v[0]->uv[tc][0] + pw[1] * v[1]->uv[tc][0] + pw[2] * v[2]->uv[tc][0];
+                float vv = pw[0] * v[0]->uv[tc][1] + pw[1] * v[1]->uv[tc][1] + pw[2] * v[2]->uv[tc][1];
+                float q = pw[0] * v[0]->uv[tc][2] + pw[1] * v[1]->uv[tc][2] + pw[2] * v[2]->uv[tc][2];
                 if (q == 0) q = 1;
-                sample(stage_map[s], u / q, vv / q, tex[s]);
+                samp(&S.tex[m], u / q, vv / q, tex[s]);
             }
-            float col[4]; tev(ras, tex, stage_map, col);
-            if (!alpha_test(col[3])) { st_alpha++; continue; }
-            st_px++;
+            float col[4]; tev_fast(ras, tex, col);
+            if (!alpha_test(col[3])) continue;
             put_pixel(x, y, z, col);
         }
     }
@@ -481,7 +552,20 @@ static void efb_copy(u32 v) {
     if (to_xfb) {
         g_copies++;
         if (g_render && g_copies % g_dump_every == 0) dump_frame();
-        g_render = g_dump_dir && ((g_copies + 1) % g_dump_every == 0);   // only rasterize frames we save
+        if (g_window_open && g_render) {
+            u32 src = bp[0x49], wh = bp[0x4A];
+            int x0 = (src & 0x3FF) * g_scale, y0 = ((src >> 10) & 0x3FF) * g_scale;
+            int w = ((wh & 0x3FF) + 1) * g_scale, h = (((wh >> 10) & 0x3FF) + 1) * g_scale;
+            if (x0 + w > EW) w = EW - x0; if (y0 + h > EH) h = EH - y0;
+            platform_present(efb_c, x0, y0, w, h, EW);
+        }
+        // Frame skipping: if drawing has fallen behind real time, skip rasterizing the next frame
+        // (never two in a row) so the game keeps its normal speed.
+        static u64 last; static int skipped;
+        u64 now = host_now_ns();
+        int skip = g_window_open && !skipped && last && now - last > 18000000ull && !getenv("TTPC_NOSKIP");
+        skipped = skip; last = now;
+        g_render = (g_window_open && !skip) || (g_dump_dir && ((g_copies + 1) % g_dump_every == 0));
     }
     if (clear) {
         u32 ar = bp[0x4F], gb = bp[0x50];
@@ -515,7 +599,8 @@ static void bp_write(u32 v) {
         u32 dst = (val & 0x3FF) << 9, count = ((val >> 10) & 0x7FF) * 16;
         for (u32 k = 0; k < count * 2 && dst + k < (1u << 20); k++) tmem[dst + k] = (u8)V8(src + k);
     }
-    if (reg == 0x52) efb_copy(val);
+    if (reg == 0x65) g_tgen++;
+    if (reg == 0x52) { efb_copy(val); g_tgen++; }
 }
 static void xf_write(u32 addr, u32 v) {
     if (addr < 0x1000) xfmem[addr] = v;
@@ -531,6 +616,7 @@ static void draw_prims(int prim, int vat, int n, u32 *p) {
     for (int k = 0; k < n; k++) { memset(&vin[k], 0, sizeof vin[k]); read_vertex(p, vat, &vin[k]); }
     g_video_draws++;
     if (!g_render) return;
+    setup_draw();
     for (int k = 0; k < n; k++) transform(&vin[k], &vout[k]);
     switch (prim) {
     case 0: case 1: for (int k = 0; k + 3 < n; k += 4) { draw_tri(&vout[k], &vout[k + 1], &vout[k + 2]); draw_tri(&vout[k], &vout[k + 2], &vout[k + 3]); } break;

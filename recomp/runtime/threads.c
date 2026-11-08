@@ -13,18 +13,16 @@
 #include "cpu.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include <setjmp.h>
-#include <ucontext.h>
-#include <time.h>
+#include "port.h"
 
 void rt_halt(const char *why);
 u32 g_irq_pending;
 
 // ---------------------------------------------------------------- fibers
-typedef struct Resume { jmp_buf jb; CPU regs; u32 irq_ctx; int kind; struct Resume *prev; } Resume;
+typedef struct Resume { rt_jmp_buf jb; CPU regs; u32 irq_ctx; int kind; struct Resume *prev; } Resume;
 typedef struct Fiber {
     u32 ctx;                 // guest OSContext address
-    ucontext_t uc;
+    HostFiber *hf;
     Resume *top;             // newest resume point
     int started;
     int in_irq;              // >0 while this fiber is running an interrupt handler (no nesting)
@@ -62,19 +60,14 @@ static void fiber_entry(void) {
 
 static void switch_to(Fiber *t) {
     Fiber *me = g_cur;
-    if (!t->started) {
-        t->started = 1;
-        getcontext(&t->uc);
-        size_t sz = 4 << 20;
-        t->uc.uc_stack.ss_sp = malloc(sz); t->uc.uc_stack.ss_size = sz; t->uc.uc_link = NULL;
-        makecontext(&t->uc, fiber_entry, 0);
-    }
+    if (!me->hf) me->hf = host_fiber_main();          // first switch away from the boot thread
+    if (!t->started) { t->started = 1; t->hf = host_fiber_new(fiber_entry, 4 << 20); }
     g_cur = t;
-    swapcontext(&me->uc, &t->uc);
+    host_fiber_switch(me->hf, t->hf);
     // ---- we are `me` again: someone loaded our context. Continue at our newest resume point.
     Resume *r = me->top;
     if (!r) rt_halt("fiber resumed without a resume point");
-    longjmp(r->jb, 1);
+    RT_LONGJMP(r->jb);
 }
 
 // ---------------------------------------------------------------- replaced SDK functions
@@ -137,7 +130,7 @@ void f_802222E0(CPU *c) {
     record_bt(c);
     Resume r; r.regs = *c; r.kind = 0; r.irq_ctx = 0; r.prev = g_cur->top;
     Fiber *me = g_cur;
-    if (setjmp(r.jb)) {               // resumed: OSSaveContext "returned 1" -> SelectThread returns 0
+    if (RT_SETJMP(r.jb)) {               // resumed: OSSaveContext "returned 1" -> SelectThread returns 0
         me->top = r.prev;
         *c = r.regs; c->r[3] = 0;
         return;
@@ -152,7 +145,7 @@ void f_8021B650(CPU *c) {
     u32 ctx = c->r[3];
     Fiber *me = g_cur;
     // returning from an interrupt delivered to this fiber (possibly while idling on another context)
-    if (me->top && me->top->kind == 1 && me->top->irq_ctx == ctx) longjmp(me->top->jb, 1);
+    if (me->top && me->top->kind == 1 && me->top->irq_ctx == ctx) RT_LONGJMP(me->top->jb);
     Fiber *t = fiber_of(ctx);
     // A thread object reused for a new thread (OSCreateThread on an exited thread): its context then
     // points at the new entry function instead of the resume point after OSSaveContext in SelectThread.
@@ -160,13 +153,13 @@ void f_8021B650(CPU *c) {
         t->ctx = 0;                                   // retire the old fiber (its stack is abandoned)
         t = NULL;
     }
-    if (t == me) { if (!me->top) rt_halt("OSLoadContext(self) with nothing to resume"); longjmp(me->top->jb, 1); }
+    if (t == me) { if (!me->top) rt_halt("OSLoadContext(self) with nothing to resume"); RT_LONGJMP(me->top->jb); }
     if (!t) { t = calloc(1, sizeof *t); t->ctx = ctx; t->next = g_fibers; g_fibers = t; }
     switch_to(t);
 }
 
 // ---------------------------------------------------------------- interrupts
-static u64 now_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (u64)ts.tv_sec * 1000000000ull + ts.tv_nsec; }
+static u64 now_ns(void) { return host_now_ns(); }
 static u64 g_next_vi, g_dec_deadline; static int g_dec_armed;
 u32 mmio_peek(u32 p); void mmio_poke(u32 p, u32 v);
 
@@ -184,7 +177,7 @@ static void deliver(CPU *c, u32 handler, u32 exc) {
     u32 ctx = R32(0x800000D4);         // current OSContext (OSGetCurrentContext)
     Resume r; r.regs = *c; r.kind = 1; r.irq_ctx = ctx; r.prev = g_cur->top;
     Fiber *me = g_cur;
-    if (setjmp(r.jb)) { me->top = r.prev; *c = r.regs; me->in_irq--; return; }
+    if (RT_SETJMP(r.jb)) { me->top = r.prev; *c = r.regs; me->in_irq--; return; }
     me->top = &r;
     me->in_irq++;
     c->msr &= ~0x8000u;                // EE off inside the handler
@@ -194,7 +187,7 @@ static void deliver(CPU *c, u32 handler, u32 exc) {
     me->in_irq--;
 }
 
-void ios_service(CPU *c); void dsp_tick(void); void gx_tick(void); u32 gx_cause(void); void gx_on_retrace(void);
+void ios_service(CPU *c); void dsp_tick(void); void gx_tick(void); u32 gx_cause(void); void gx_on_retrace(void); void platform_poll(void); void wiimote_frame(void);
 void rt_poll(CPU *c) {
     // MSR[EE] alone decides, as on hardware: handlers run with EE off, but code inside them may enable
     // interrupts on purpose (e.g. SelectThread's idle loop when called from an interrupt).
@@ -225,6 +218,7 @@ void rt_poll(CPU *c) {
     if (t >= g_next_vi) {
         g_next_vi += 16683333;
         gx_on_retrace();
+        platform_poll(); wiimote_frame();
         if (g_next_vi < t) g_next_vi = t + 16683333;
         // VI display interrupts DI0/DI1 (0x0C002030/34): raise bit 31 on each enabled one (bit 28),
         // and the VI cause bit in the PI interrupt cause register (0x0C003000).

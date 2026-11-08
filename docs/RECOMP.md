@@ -123,6 +123,27 @@ Fixed along the way: dtk-missed switch tables (any data pointer into a function 
 * Next: real-time GPU backend (window, 4K, widescreen, texture filtering), input (virtual Wii Remote),
   AX mixing, near-plane clipping/lighting.
 
+## Status - milestone 7: playable window on Windows and Linux (480p, mouse + keyboard)
+
+* **Window** (`runtime/platform.c`, SDL2): every displayed frame is presented at 640x480 (window 2x,
+  F11 fullscreen). Frame skipping keeps the game at full speed when drawing falls behind.
+* **Virtual Wii Remote + Nunchuk** (`runtime/wiimote.c`): replaces `WPADProbe` (fn_802533C0) and
+  `KPADReadEx` (fn_8025F830, 0xB0-byte KPADStatus) - mouse = pointer, clicks = A/B, arrows = D-pad,
+  WASD = Nunchuk stick (full mapping in the play folder's README). Headless tests can script input:
+  `TTPC_INPUT="1500+6:A;1800+6:A" TTPC_POINTER="-0.3,0.3"`.
+  With it the game shows the Nunchuk notice, and NEW GAME -> difficulty select -> disclaimer works.
+* **Renderer speed**: textures decoded once per frame into a cache, TEV/blend state decoded once per
+  draw, rows spread across cores (OpenMP). ~10 -> ~26 fps on a 2-core VM; game logic alone runs 60.
+* **Windows build** (`make -f build.mk TARGET=windows`, mingw-w64): `runtime/port.c` provides fibers
+  (Win32 fibers / ucontext), non-unwinding jumps (`__builtin_setjmp`), clock, memory, crash handler.
+  Native replacements are no longer weak symbols (PE has none): the lifter scans `recomp/runtime` for
+  `f_XXXXXXXX` / `HLE()` definitions and leaves those bodies out. SDL2.dll comes from the
+  `pysdl2-dll` wheel, headers from the SDL repo (in `third_party/`, not committed).
+* The exe finds the disc by itself (`disc/DATA`, `../disc/DATA`, `../../disc/DATA` from the working
+  folder or the exe); `TTPC_DISC` overrides; no timeout unless a second argument / `TTPC_TIMEOUT`.
+* Next: what follows the disclaimer (black - likely the opening movie: THP video), sound (AX),
+  controllers / real Wii Remote, then the GPU backend for speed and 4K.
+
 ## Roadmap to "opening sequence -> main menu in 4K"
 
 | # | Piece | Approach |

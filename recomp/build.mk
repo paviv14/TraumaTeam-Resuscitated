@@ -1,44 +1,48 @@
 # Build the recompiled game. Run `python -m recomp.lift ...` first to produce ../generated/.
-CC ?= gcc
+#   make -f build.mk -j                      Linux, SDL2 window
+#   make -f build.mk -j SDL=0                headless
+#   make -f build.mk -j TARGET=windows       Windows .exe (mingw-w64 cross compiler, see docs/RECOMP.md)
+TARGET ?= linux
+SDL ?= 1
+
+ifeq ($(TARGET),windows)
+CC := x86_64-w64-mingw32-gcc
+BUILD ?= ../build-win
+EXE ?= $(BUILD)/ttpc.exe
+SDL_DIR ?= ../third_party/SDL2-win
+SDL_CFLAGS ?= -I$(SDL_DIR)/include -DSDL_MAIN_HANDLED
+SDL_LIBS ?= -L$(SDL_DIR)/lib -lSDL2
+LDFLAGS += -static-libgcc -Wl,--stack,16777216
+else
+CC := gcc
+BUILD ?= ../build
+EXE ?= $(BUILD)/ttpc
+SDL_CFLAGS ?= $(shell pkg-config --cflags sdl2 2>/dev/null)
+SDL_LIBS ?= $(shell pkg-config --libs sdl2 2>/dev/null)
+endif
+
+OMP ?= -fopenmp
+RTFLAGS += $(OMP)
+LDFLAGS += $(OMP)
+
+ifeq ($(SDL),1)
+RTFLAGS += -DTTPC_SDL $(SDL_CFLAGS)
+LIBS += $(SDL_LIBS)
+endif
+
 CFLAGS ?= -O1 -g0 -fno-strict-aliasing -fwrapv -w -Iruntime
+RTCFLAGS := -O2 -g -Wall -Wno-unused -Wno-misleading-indentation -fno-strict-aliasing -fwrapv -Iruntime $(RTFLAGS) $(EXTRA)
+RUNTIME := port runtime hle ios threads dsp gx disc video platform wiimote
 GEN := $(wildcard ../generated/*.c)
-OBJ := $(patsubst ../generated/%.c,../build/%.o,$(GEN)) ../build/runtime.o ../build/hle.o ../build/ios.o ../build/threads.o ../build/dsp.o ../build/gx.o ../build/disc.o ../build/video.o
+OBJ := $(patsubst ../generated/%.c,$(BUILD)/%.o,$(GEN)) $(patsubst %,$(BUILD)/rt_%.o,$(RUNTIME))
 
-../build/ttpc: $(OBJ)
-	$(CC) -o $@ $^ -lm
+$(EXE): $(OBJ)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS) -lm
 
-../build/%.o: ../generated/%.c runtime/cpu.h
-	@mkdir -p ../build
-	$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD)/%.o: ../generated/%.c runtime/cpu.h
+	@mkdir -p $(BUILD)
+	$(CC) $(CFLAGS) $(EXTRA) -c $< -o $@
 
-../build/runtime.o: runtime/runtime.c runtime/cpu.h
-	@mkdir -p ../build
-	$(CC) -O2 -g -Wall -Wno-unused -c $< -o $@
-
-../build/hle.o: runtime/hle.c runtime/cpu.h
-	@mkdir -p ../build
-	$(CC) -O2 -g -Wall -Wno-unused -c $< -o $@
-
-../build/ios.o: runtime/ios.c runtime/cpu.h
-	@mkdir -p ../build
-	$(CC) -O2 -g -Wall -Wno-unused -c $< -o $@
-
-../build/threads.o: runtime/threads.c runtime/cpu.h
-	@mkdir -p ../build
-	$(CC) -O2 -g -Wall -Wno-unused -c $< -o $@
-
-../build/dsp.o: runtime/dsp.c runtime/cpu.h
-	@mkdir -p ../build
-	$(CC) -O2 -g -Wall -Wno-unused -c $< -o $@
-
-../build/gx.o: runtime/gx.c runtime/cpu.h
-	@mkdir -p ../build
-	$(CC) -O2 -g -Wall -Wno-unused -c $< -o $@
-
-../build/disc.o: runtime/disc.c runtime/cpu.h
-	@mkdir -p ../build
-	$(CC) -O2 -g -Wall -Wno-unused -c $< -o $@
-
-../build/video.o: runtime/video.c runtime/cpu.h
-	@mkdir -p ../build
-	$(CC) -O2 -g -Wall -Wno-unused -Wno-misleading-indentation -c $< -o $@
+$(BUILD)/rt_%.o: runtime/%.c runtime/cpu.h runtime/platform.h runtime/port.h
+	@mkdir -p $(BUILD)
+	$(CC) $(RTCFLAGS) -c $< -o $@

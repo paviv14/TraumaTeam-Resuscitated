@@ -95,6 +95,20 @@ WRAP = {
 }
 
 
+# Functions with a native replacement in recomp/runtime (a definition `void f_XXXXXXXX(CPU *c) {`):
+# their recompiled body is not emitted (weak symbols would do this on ELF, but not on Windows/PE).
+def _replaced_functions():
+    rt = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runtime")
+    out = set()
+    for fn in os.listdir(rt):
+        if fn.endswith(".c"):
+            src = open(os.path.join(rt, fn)).read()
+            for m in re.finditer(r"^(?:void f_([0-9A-F]{8})\(CPU \*c\)\s*\{|HLE\(([0-9A-F]{8}),)", src, re.M):
+                out.add(int(m.group(1) or m.group(2), 16))
+    return out - WRAP
+REPLACED = _replaced_functions()
+
+
 # Debugging: functions that log every entry (RECOMP_LOG=8000C5C0,8000C500 python -m recomp.lift ...)
 LOG_FUNCS = {int(x, 16) for x in os.environ.get("RECOMP_LOG", "").split(",") if x}
 
@@ -159,7 +173,9 @@ class Lifter:
             if ins.name in ("b", "bc") and entry <= ins.target < end and not (ins.name == "b" and ins.LK):
                 labels.add(ins.target)
         jt = sorted(t for t in labels if t in self.jt_targets.get(start, set()) and t >= entry)
-        head = f"void orig_{entry:08X}(CPU *c)" if entry in WRAP else f"WEAK void f_{entry:08X}(CPU *c)"
+        if entry in REPLACED:
+            return f"/* f_{entry:08X}: native replacement in recomp/runtime */"
+        head = f"void orig_{entry:08X}(CPU *c)" if entry in WRAP else f"void f_{entry:08X}(CPU *c)"
         out = [head + " {", f"    u32 ea; (void)ea; TRACE(0x{entry:08X}u);"]
         if entry in LOG_FUNCS:
             out.append(f"    rt_logfn(c, 0x{entry:08X}u);")

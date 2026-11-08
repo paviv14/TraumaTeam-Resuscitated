@@ -8,6 +8,7 @@
 //   +0x20 callback   +0x24 callback arg   (+0x2C thread queue for synchronous callers)
 // Pointers inside requests are physical addresses; R32/W32 mask addresses so they work as-is.
 #include "cpu.h"
+#include "port.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,7 +31,7 @@ typedef struct { u32 req, cb; s32 result; u64 due; } Pending;
 // stores the async call's return value *after* issuing the request, so a reply delivered before the call
 // returns gets overwritten (seen as the save-data check failing). Replies wait at least this long.
 #define IOS_LATENCY_NS 200000ull
-static u64 now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (u64)t.tv_sec * 1000000000ull + t.tv_nsec; }
+static u64 now_ns(void) { return host_now_ns(); }
 static Pending g_pend[64]; static int g_npend;   // request being handled (for requests completed later)
 static void complete_later(u32 req, u32 cb, s32 result);
 const char *g_nand_root = "nand";  // host folder standing in for the Wii's internal storage
@@ -39,7 +40,7 @@ const char *g_nand_root = "nand";  // host folder standing in for the Wii's inte
 void ios_init(void) {
     char p[512];
     snprintf(p, sizeof p, "%s/title/00010000/53554f45/data/x", g_nand_root);
-    for (char *q = p + 1; *q; q++) if (*q == '/') { *q = 0; mkdir(p, 0755); *q = '/'; }
+    for (char *q = p + 1; *q; q++) if (*q == '/') { *q = 0; host_mkdir(p); *q = '/'; }
 }
 
 static void rd_str(u32 a, char *out, int max) {
@@ -52,7 +53,7 @@ static void zero(u32 a, u32 n) { for (u32 k = 0; k < n; k++) W8(a + k, 0); }
 static void nand_host_path(const char *p, char *out, int n) { snprintf(out, n, "%s%s", g_nand_root, p); }
 static void mkdirs(const char *path) {
     char tmp[512]; snprintf(tmp, sizeof tmp, "%s", path);
-    for (char *q = tmp + 1; *q; q++) if (*q == '/') { *q = 0; mkdir(tmp, 0755); *q = '/'; }
+    for (char *q = tmp + 1; *q; q++) if (*q == '/') { *q = 0; host_mkdir(tmp); *q = '/'; }
 }
 
 static int open_fd(const char *path, int mode) {
@@ -104,7 +105,7 @@ static s32 dev_ioctl(Fd *d, u32 cmd, u32 in, u32 inl, u32 out, u32 outl) {
         case 0x03:   /* CreateDir */
             rd_str(in + 6, p, sizeof p); nand_host_path(p, hp, sizeof hp);
             if (!stat(hp, &st)) return IOS_EEXIST;
-            mkdirs(hp); mkdir(hp, 0755); return 0;
+            mkdirs(hp); host_mkdir(hp); return 0;
         case 0x05: return 0;   /* SetAttr */
         case 0x06:   /* GetAttr -> owner u32, group u16, path[64], owner/group/other perms, attributes */
             rd_str(in, p, sizeof p); nand_host_path(p, hp, sizeof hp);
@@ -160,7 +161,7 @@ static void bt_pump(void) {
     }
 }
 static void hci_command(u16 op, u32 data, u32 len) {
-    u8 e[64] = { 0x0E, 0, 1, (u8)op, (u8)(op >> 8), 0 };   // Command Complete, 1 packet, opcode, status 0
+    u8 e[320] = { 0x0E, 0, 1, (u8)op, (u8)(op >> 8), 0 };   // Command Complete, 1 packet, opcode, status 0
     int n = 6;
     switch (op) {
     case 0x1009: memcpy(e + n, "\x11\x22\x33\x44\x55\x66", 6); n += 6; break;          // Read_BD_ADDR

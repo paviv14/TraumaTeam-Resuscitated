@@ -9,6 +9,7 @@
 // program to load (0x80F3A001, addr, 0x80F3C002, iram addr, 0x80F3A002, len, 0x80F3B002, 0,
 // 0x80F3D001, entry); the program starts and reports 0xDCD10000 (task INIT) with a DSP interrupt.
 #include "cpu.h"
+#include "port.h"
 #include <stdio.h>
 #include <time.h>
 
@@ -58,7 +59,7 @@ static void on_mail(u32 m) {
 // (CSR bit 3); the AX library then queues the next buffer and mixes the next frame.
 static u32 g_dma_hi, g_dma_lo, g_dma_ctl; static u64 g_dma_due; static int g_dma_frames;
 u32 g_audio_last_buffer, g_audio_last_len;   // where PC audio output will read from
-static u64 dsp_now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (u64)ts.tv_sec * 1000000000ull + ts.tv_nsec; }
+static u64 dsp_now(void) { return host_now_ns(); }
 static u64 dma_period_ns(void) { u32 blocks = g_dma_ctl & 0x7FFF; return blocks ? (u64)blocks * 32 / 4 * 1000000000ull / 48000 : 0; }
 
 void dsp_tick(void) {      // called from rt_poll

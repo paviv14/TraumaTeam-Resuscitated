@@ -11,3 +11,4 @@ build/
 generated/
 frames/
 nand/
+third_party/
