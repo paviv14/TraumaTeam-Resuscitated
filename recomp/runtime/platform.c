@@ -8,9 +8,38 @@
 #include "platform.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 Input g_input;
 int g_window_open;
+
+// ---------------------------------------------------------------- audio
+// The audio DMA hands over each buffer as it "plays" (paced by the host clock). Optional WAV capture
+// (TTPC_WAV=file) for testing; SDL output keeps a small queue and drops data if it falls behind.
+static FILE *g_wav; static u32 g_wav_frames; static int g_wav_rate;
+static void wav_header(void) {
+    u32 data = g_wav_frames * 4, rate = (u32)g_wav_rate;
+    u8 h[44] = { 'R','I','F','F', 0,0,0,0, 'W','A','V','E', 'f','m','t',' ', 16,0,0,0, 1,0, 2,0, 0,0,0,0, 0,0,0,0, 4,0, 16,0, 'd','a','t','a', 0,0,0,0 };
+    u32 riff = 36 + data, br = rate * 4;
+    memcpy(h + 4, &riff, 4); memcpy(h + 24, &rate, 4); memcpy(h + 28, &br, 4); memcpy(h + 40, &data, 4);
+    fseek(g_wav, 0, SEEK_SET); fwrite(h, 1, 44, g_wav); fseek(g_wav, 0, SEEK_END); fflush(g_wav);
+}
+static void wav_push(const s16 *lr, int frames, int rate) {
+    static int tried;
+    if (!g_wav && !tried) { tried = 1; const char *f = getenv("TTPC_WAV"); if (f && (g_wav = fopen(f, "wb"))) { g_wav_rate = rate; wav_header(); } }
+    if (!g_wav) return;
+    fwrite(lr, 4, (size_t)frames, g_wav); g_wav_frames += (u32)frames;
+    if ((g_wav_frames & 0x3FFF) < (u32)frames) wav_header();
+}
+#ifdef TTPC_SDL
+static void sdl_audio_push(const s16 *lr, int frames, int rate);
+#endif
+void platform_audio_push(const s16 *lr, int frames, int rate) {
+    wav_push(lr, frames, rate);
+#ifdef TTPC_SDL
+    sdl_audio_push(lr, frames, rate);
+#endif
+}
 
 #ifdef TTPC_SDL
 #include <SDL2/SDL.h>
@@ -23,6 +52,26 @@ static SDL_GLContext g_glctx;
 extern int g_view_x, g_view_y, g_view_w, g_view_h;
 static SDL_Texture *g_tex;
 static int g_tw, g_th;
+
+static SDL_AudioDeviceID g_audio; static int g_audio_rate;
+static void sdl_audio_push(const s16 *lr, int frames, int rate) {
+    static int failed;
+    if (failed || getenv("TTPC_MUTE")) return;
+    if (!g_audio || rate != g_audio_rate) {
+        if (g_audio) SDL_CloseAudioDevice(g_audio);
+        if (!(SDL_WasInit(SDL_INIT_AUDIO)) && SDL_InitSubSystem(SDL_INIT_AUDIO) != 0) { fprintf(stderr, "[audio] unavailable: %s\n", SDL_GetError()); failed = 1; return; }
+        SDL_AudioSpec want = { 0 }, have;
+        want.freq = rate; want.format = AUDIO_S16SYS; want.channels = 2; want.samples = 512;
+        g_audio = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+        g_audio_rate = rate;
+        if (!g_audio) { fprintf(stderr, "[audio] no output device (%s): continuing without sound\n", SDL_GetError()); failed = 1; return; }
+        SDL_PauseAudioDevice(g_audio, 0);
+        fprintf(stderr, "[audio] output %d Hz stereo\n", rate);
+    }
+    // keep latency bounded: if more than ~120 ms is queued (host clock drift), drop this buffer
+    if (SDL_GetQueuedAudioSize(g_audio) > (u32)rate * 4 * 120 / 1000) return;
+    SDL_QueueAudio(g_audio, lr, (u32)frames * 4);
+}
 
 int platform_init(void) {
     if (getenv("TTPC_HEADLESS")) return 0;

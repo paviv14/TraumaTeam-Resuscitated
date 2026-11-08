@@ -12,6 +12,7 @@
 #include "port.h"
 #include <stdio.h>
 #include <time.h>
+#include <stdlib.h>
 
 extern u32 g_irq_pending;
 u32 mmio_peek(u32 p); void mmio_poke(u32 p, u32 v);
@@ -21,6 +22,7 @@ static u32 g_in_hi, g_boot_count, g_booted;
 static u16 g_csr;
 static int g_log = 1;
 
+void ax_run_list(u32 addr, u32 size); int ax_dump_pbs(u32 list); void platform_audio_push(const s16 *lr, int frames, int rate);
 static void push(u32 m) { if (g_nout < 32) g_out[g_nout++] = m; }
 static void raise_dsp_int(void) {
     g_csr |= 0x80;
@@ -40,12 +42,20 @@ static void on_mail(u32 m) {
     // AX: 0xBABExxxx announces a command list (low 16 bits = size), the next mail is its address.
     // We acknowledge each list like the AX program does when it has finished a frame: "yield"
     // (0xDCD10002) + DSP interrupt; the SDK task manager answers 0xCDD1000x (resume/continue).
-    // TODO (audio): execute the command list = mix the voices into the output buffers.
     static u32 cmdlist_size; static int nframes;
     if ((m & 0xFFFF0000u) == 0xBABE0000u) { cmdlist_size = m & 0xFFFF; return; }
     if (cmdlist_size) {
-        cmdlist_size = 0;
+        u32 sz = cmdlist_size; (void)sz;
         if (g_log && nframes++ < 3) fprintf(stderr, "[dsp] AX command list at %08X -> frame done\n", m);
+        if (getenv("TTPC_AXDUMP") && nframes == atoi(getenv("TTPC_AXDUMP"))) {
+            fprintf(stderr, "[ax] list %08X size %u:", m, cmdlist_size);
+            for (int k = 0; k < 96; k++) fprintf(stderr, "%s%04X", k % 16 ? " " : "\n   ", R16(0x80000000u | (m + 2 * k)));
+            fprintf(stderr, "\n");
+        }
+        { static int dumps; static int on = -1; if (on < 0) on = getenv("TTPC_AXPB") != NULL;
+          if (on && dumps < 2 && ax_dump_pbs(m)) dumps++; }
+        ax_run_list(m, sz);
+        cmdlist_size = 0;
         push(0xDCD10002u); raise_dsp_int();
         return;
     }
@@ -60,13 +70,22 @@ static void on_mail(u32 m) {
 static u32 g_dma_hi, g_dma_lo, g_dma_ctl; static u64 g_dma_due; static int g_dma_frames;
 u32 g_audio_last_buffer, g_audio_last_len;   // where PC audio output will read from
 static u64 dsp_now(void) { return host_now_ns(); }
-static u64 dma_period_ns(void) { u32 blocks = g_dma_ctl & 0x7FFF; return blocks ? (u64)blocks * 32 / 4 * 1000000000ull / 48000 : 0; }
+// AI_CR (0x0D006C00) bit 6 (AIDFR) = DMA sample rate: 1 = 32 kHz, 0 = 48 kHz. AX sets it: 96 samples
+// per 3 ms frame, and voice resampling ratios are relative to 32 kHz (22.05 kHz music = 0xB066).
+u32 ai_dma_rate(void) { return (mmio_peek(0x0D006C00u) & 0x40) ? 32000 : 48000; }
+static u64 dma_period_ns(void) { u32 blocks = g_dma_ctl & 0x7FFF; return blocks ? (u64)blocks * 32 / 4 * 1000000000ull / ai_dma_rate() : 0; }
 
 void dsp_tick(void) {      // called from rt_poll
     if (!(g_dma_ctl & 0x8000) || !g_dma_due) return;
     u64 t = dsp_now();
     if (t < g_dma_due) return;
     g_audio_last_buffer = ((g_dma_hi << 16) | g_dma_lo); g_audio_last_len = (g_dma_ctl & 0x7FFF) * 32;
+    {   // hand the buffer to the host: interleaved big-endian s16, right channel first (AX order)
+        static s16 pcm[4096]; u32 n = g_audio_last_len / 4; if (n > 2048) n = 2048;
+        u32 a = 0x80000000u | (g_audio_last_buffer & 0x1FFFFFFF);
+        for (u32 i = 0; i < n; i++) { pcm[2 * i + 1] = (s16)R16(a + 4 * i); pcm[2 * i] = (s16)R16(a + 4 * i + 2); }
+        platform_audio_push(pcm, (int)n, (int)ai_dma_rate());
+    }
     g_dma_due += dma_period_ns(); if (g_dma_due < t) g_dma_due = t + dma_period_ns();
     g_csr |= 0x08;
     if (g_csr & 0x10) { mmio_poke(0x0C003000u, mmio_peek(0x0C003000u) | 0x40); g_irq_pending = 1; }

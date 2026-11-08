@@ -156,6 +156,20 @@ Fixed along the way: dtk-missed switch tables (any data pointer into a function 
 * Texture cache revalidates by hashing source bytes once per frame; GL textures re-upload only on change.
 * Tested under Xvfb + Mesa llvmpipe (Linux) and Wine (Windows exe).
 
+## Status - milestone 9: opening cutscene and sound
+
+* **Opening comic cutscene renders.** Two missing pieces: (1) locked-cache DMA (SPR DMAU/DMAL) - NW4R
+  G3D computes its matrices in the locked cache and stores them with it, so every model had zero
+  matrices; (2) EFB->texture copies (the comic is rendered to a 320x240 RGBA8 texture each frame),
+  now encoded into guest memory in the requested format (both renderers).
+* **Sound** (`runtime/ax.c`): the AX DSP microcode's work done natively - command lists (new Wii
+  command set: SETUP, ADD_TO_LR, PROCESS, MIX_AUX*, COMPRESSOR, OUTPUT, WM_OUTPUT, END), voice
+  blocks (AXPBWii, 0x140 bytes; layout checked against live blocks), ADPCM/PCM16/PCM8 with looping
+  and stream handling, linear resampling, volume envelope, LPF, per-bus volume ramps, aux bus
+  upload/mix-back for CPU effects. Output via the audio DMA (32 kHz when AI_CR bit 6 is set - AX's
+  rate) to SDL audio; `TTPC_WAV=file` records it, `TTPC_MUTE=1` silences.
+* Not yet: Wii Remote speaker output, compressor, DPL2 surround, polyphase (4-tap) resampling.
+
 ## Roadmap to "opening sequence -> main menu in 4K"
 
 | # | Piece | Approach |
