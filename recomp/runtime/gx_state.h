@@ -13,6 +13,7 @@ typedef struct {
     u32 addr, img0, tlut, gen; int w, h; u32 *px; size_t cap;
     u64 hash; u32 version;
     u32 gl_tex, gl_version;            // owned by the GPU backend
+    const u8 *hi; int hw, hh;          // replacement from a texture pack (RGBA bytes), or NULL
 } TexEntry;
 
 typedef struct { TexEntry *e; const u32 *px; int w, h, ws, wt, linear; } TexV;

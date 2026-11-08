@@ -47,7 +47,9 @@ static inline u32 V32(u32 a) { return V16(a) << 16 | V16(a + 2); }
 static float xf_f(u32 addr) { u32 v = addr < 0x1000 ? xfmem[addr] : xfreg[addr & 0xFF]; float f; memcpy(&f, &v, 4); return f; }
 
 extern int g_video_on;
+void texpack_init(void);
 void video_init(void) {
+    texpack_init();
     if (getenv("TTPC_NOVIDEO")) g_video_on = 0;
     const char *s = getenv("TTPC_SCALE"); if (s) g_scale = atoi(s); if (g_scale < 1) g_scale = 1;
     EW = 640 * g_scale; EH = 528 * g_scale;
@@ -291,6 +293,9 @@ static void konst_value(int stage, int alpha, float out[4]) {
 // Textures are decoded to RGBA once and kept; once per displayed frame (or after a TLUT load) a
 // cached texture is revalidated by hashing its source bytes, and re-decoded only if they changed.
 static TexEntry g_tcache[1024];
+const u8 *texpack_lookup(u64 hash, int *w, int *h); void texpack_dump(u64 hash, int w, int h, int fmt, const u32 *px);
+static u32 g_copy_dst[32]; static int g_ncopy;     // recent EFB->texture destinations
+static int is_copy_target(u32 a) { a &= 0x1FFFFFFF; for (int k = 0; k < g_ncopy; k++) if (g_copy_dst[k] == a) return 1; return 0; }
 static u32 g_tgen = 1;               // bumped when cached textures need revalidation
 static const int TBW[16] = { 8, 8, 8, 4, 4, 4, 4, 0, 8, 8, 4, 0, 0, 0, 8, 0 };
 static const int TBH[16] = { 8, 4, 4, 4, 4, 4, 4, 0, 8, 4, 4, 0, 0, 0, 8, 0 };
@@ -332,6 +337,12 @@ static TexEntry *tex_decode(const Tex *t, u32 img0, u32 tlutreg) {
     if (e->cap < n) { free(e->px); e->px = malloc(n * 4); e->cap = n; }
     for (int y = 0; y < t->h; y++) for (int x = 0; x < t->w; x++) e->px[(size_t)y * t->w + x] = texel(t, x, y);
     e->addr = t->addr; e->img0 = img0; e->tlut = tlutreg; e->w = t->w; e->h = t->h; e->hash = h; e->version++;
+    // texture packs: render-target textures (EFB copies) are excluded - their content changes
+    e->hi = NULL;
+    if (!is_copy_target(t->addr)) {
+        e->hi = texpack_lookup(h, &e->hw, &e->hh);
+        texpack_dump(h, t->w, t->h, t->fmt, e->px);
+    }
     return e;
 }
 
@@ -595,6 +606,7 @@ static void efb_copy_to_texture(u32 v) {
     int x0 = src & 0x3FF, y0 = (src >> 10) & 0x3FF, w = (wh & 0x3FF) + 1, h = ((wh >> 10) & 0x3FF) + 1;
     int tp = (v >> 3) & 15, fmt = (tp >> 1) | ((tp & 1) << 3), half = (v >> 9) & 1, inten = (v >> 15) & 1;
     u32 dst = (bp[0x4B] & 0xFFFFFF) << 5, stride = (bp[0x4D] & 0x3FF) << 5;
+    if (!is_copy_target(dst)) { g_copy_dst[g_ncopy % 32] = dst & 0x1FFFFFFF; if (g_ncopy < 32) g_ncopy++; }
     if (x0 + w > 640) w = 640 - x0; if (y0 + h > 528) h = 528 - y0;
     if (w <= 0 || h <= 0) return;
     static u32 pix[640 * 528];                    // copied rect at native resolution, R<<24|G<<16|B<<8|A
@@ -746,8 +758,10 @@ static void draw_prims(int prim, int vat, int n, u32 *p) {
     if (!vin) { vin = malloc(sizeof *vin * MAX_VERTS); vout = malloc(sizeof *vout * MAX_VERTS); g_tris = malloc(sizeof *g_tris * 3 * MAX_VERTS); }
     for (int k = 0; k < n; k++) { memset(&vin[k], 0, sizeof vin[k]); read_vertex(p, vat, &vin[k]); }
     g_video_draws++;
+    static int dumping = -1; if (dumping < 0) { const char *d = getenv("TTPC_DUMP_TEXTURES"); dumping = d && *d && strcmp(d, "0"); }
+    if (!g_render && !dumping) return;
+    setup_draw();                     // also decodes (and, when dumping, saves) the draw's textures
     if (!g_render) return;
-    setup_draw();
     for (int k = 0; k < n; k++) transform(&vin[k], &vout[k]);
     void (*tri)(const Out *, const Out *, const Out *) = g_gpu ? collect_tri : draw_tri;
     g_ntris = 0;

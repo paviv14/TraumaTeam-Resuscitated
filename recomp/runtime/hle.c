@@ -2,6 +2,7 @@
 // address. Keep every replacement small and document what the original did.
 #include "cpu.h"
 #include <stdio.h>
+#include <stdlib.h>
 
 #define HLE(addr, name) void f_##addr(CPU *c)
 

@@ -31,7 +31,7 @@ int g_gpu;
     X(void, ReadPixels, (GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *)) X(void, PixelStorei, (GLenum, GLint)) \
     X(void, GenTextures, (GLsizei, GLuint *)) X(void, BindTexture, (GLenum, GLuint)) X(void, ActiveTexture, (GLenum)) \
     X(void, TexImage2D, (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *)) \
-    X(void, TexParameteri, (GLenum, GLenum, GLint)) \
+    X(void, TexParameteri, (GLenum, GLenum, GLint)) X(void, GenerateMipmap, (GLenum)) \
     X(void, GenFramebuffers, (GLsizei, GLuint *)) X(void, BindFramebuffer, (GLenum, GLuint)) \
     X(void, FramebufferTexture2D, (GLenum, GLenum, GLenum, GLuint, GLint)) X(GLenum, CheckFramebufferStatus, (GLenum)) \
     X(void, GenRenderbuffers, (GLsizei, GLuint *)) X(void, BindRenderbuffer, (GLenum, GLuint)) \
@@ -206,15 +206,20 @@ static void bind_texture(int unit, const TexV *t) {
     if (!e->gl_tex) glGenTextures_(1, &e->gl_tex);
     glBindTexture_(GL_TEXTURE_2D, e->gl_tex);
     if (e->gl_version != e->version) {
-        // px holds R<<24|G<<16|B<<8|A in host order: GL_UNSIGNED_INT_8_8_8_8 reads exactly that.
-        glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, e->w, e->h, 0, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, e->px);
+        if (e->hi) {   // texture pack replacement (RGBA bytes), with mipmaps since it is usually larger
+            glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, e->hw, e->hh, 0, GL_RGBA, GL_UNSIGNED_BYTE, e->hi);
+            glGenerateMipmap_(GL_TEXTURE_2D);
+        } else
+            // px holds R<<24|G<<16|B<<8|A in host order: GL_UNSIGNED_INT_8_8_8_8 reads exactly that.
+            glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, e->w, e->h, 0, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, e->px);
         e->gl_version = e->version;
     }
     static const GLint wrap[4] = { GL_CLAMP_TO_EDGE, GL_REPEAT, GL_MIRRORED_REPEAT, GL_CLAMP_TO_EDGE };
     glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap[t->ws & 3]);
     glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap[t->wt & 3]);
-    GLint f = t->linear ? GL_LINEAR : GL_NEAREST;
-    glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, f); glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, f);
+    GLint f = t->linear || e->hi ? GL_LINEAR : GL_NEAREST;
+    glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, e->hi ? GL_LINEAR_MIPMAP_LINEAR : f);
+    glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, f);
 }
 
 // ---------------------------------------------------------------- state

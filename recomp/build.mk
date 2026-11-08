@@ -32,7 +32,7 @@ endif
 
 CFLAGS ?= -O1 -g0 -fno-strict-aliasing -fwrapv -w -Iruntime
 RTCFLAGS := -O2 -g -Wall -Wno-unused -Wno-misleading-indentation -fno-strict-aliasing -fwrapv -Iruntime $(RTFLAGS) $(EXTRA)
-RUNTIME := port runtime hle ios threads dsp ax gx disc video gl platform wiimote
+RUNTIME := port runtime hle ios threads dsp ax gx disc video gl texpack platform wiimote
 GEN := $(wildcard ../generated/*.c)
 OBJ := $(patsubst ../generated/%.c,$(BUILD)/%.o,$(GEN)) $(patsubst %,$(BUILD)/rt_%.o,$(RUNTIME))
 
