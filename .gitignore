@@ -12,3 +12,4 @@ generated/
 frames/
 nand/
 third_party/
+build-win/
