@@ -144,6 +144,18 @@ Fixed along the way: dtk-missed switch tables (any data pointer into a function 
 * Next: what follows the disclaimer (black - likely the opening movie: THP video), sound (AX),
   controllers / real Wii Remote, then the GPU backend for speed and 4K.
 
+## Status - milestone 8: GPU rendering, correct colors
+
+* **OpenGL 3.3 backend** (`runtime/gl.c`): EFB as an off-screen framebuffer, XFB copies blitted to the
+  window, an uber fragment shader running the TEV combiner and alpha test from uniforms, GX blend /
+  depth / color-mask / scissor mapped to GL state. Vertices are still transformed on the CPU and mapped
+  through the GX viewport into clip space (perspective-correct, GL clips, depth clamp on).
+  `TTPC_SOFTWARE=1` keeps the CPU rasterizer; shared state lives in `runtime/gx_state.h`.
+* **Colors**: TEV swap tables (BP 0xF6-0xFD, selected per stage by the alpha-combiner bits 0-3) were
+  missing - green showed red's value (skin turned yellow, cyan text dark blue). Now matches Dolphin.
+* Texture cache revalidates by hashing source bytes once per frame; GL textures re-upload only on change.
+* Tested under Xvfb + Mesa llvmpipe (Linux) and Wine (Windows exe).
+
 ## Roadmap to "opening sequence -> main menu in 4K"
 
 | # | Piece | Approach |

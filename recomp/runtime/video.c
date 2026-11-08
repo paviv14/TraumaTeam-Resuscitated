@@ -13,6 +13,7 @@
 #include <math.h>
 #include "platform.h"
 #include "port.h"
+#include "gx_state.h"
 
 // ---------------------------------------------------------------- state
 static u32 cp[256];                 // CP registers
@@ -147,7 +148,6 @@ static void read_vertex(u32 *p, int vat, Vtx *v) {
 }
 
 // ---------------------------------------------------------------- transform
-typedef struct { float x, y, z, w; float col[2][4]; float uv[8][3]; } Out;
 
 static void mtx_apply(u32 base, const float in[3], float out[3], int rows) {
     for (int r = 0; r < rows; r++)
@@ -226,7 +226,7 @@ static u32 tlut_color(const Tex *t, u32 idx) {
 // Fetch one texel (x, y already wrapped). Formats are stored in tiles (block-linear).
 static u32 texel(const Tex *t, int x, int y) {
     static const int bw[16] = { 8, 8, 8, 4, 4, 4, 4, 0, 8, 8, 4, 0, 0, 0, 8, 0 };
-    static const int bh[16] = { 8, 4, 4, 4, 4, 4, 4, 0, 8, 4, 4, 0, 0, 0, 8, 0 };
+    static const int bh[16] = { 8, 4, 4, 4, 4, 4, 4, 0, 8, 4, 4, 0, 0, 0, 8, 0 };   // = TBW/TBH
     int f = t->fmt; if (!bw[f]) return 0xFF00FFFF;
     int bx = x / bw[f], by = y / bh[f], ix = x % bw[f], iy = y % bh[f];
     int bpr = (t->w + bw[f] - 1) / bw[f];
@@ -286,44 +286,55 @@ static void konst_value(int stage, int alpha, float out[4]) {
 }
 
 // ---------------------------------------------------------------- decoded texture cache
-// Textures are decoded to RGBA once per displayed frame (and again after a TLUT load or an EFB copy
-// that may have rewritten them), instead of once per texel fetch.
-typedef struct { u32 addr, img0, tlut, gen; int w, h; u32 *px; size_t cap; } TexEntry;
+// Textures are decoded to RGBA once and kept; once per displayed frame (or after a TLUT load) a
+// cached texture is revalidated by hashing its source bytes, and re-decoded only if they changed.
 static TexEntry g_tcache[1024];
-static u32 g_tgen = 1;               // bumped when cached textures may be stale
-static const u32 *tex_decode(const Tex *t, u32 img0, u32 tlutreg) {
-    int pal = t->fmt >= 8 && t->fmt <= 10;
-    u32 key = t->addr ^ (img0 * 2654435761u) ^ (pal ? tlutreg * 40503u : 0);
-    for (int probe = 0; probe < 8; probe++) {
-        TexEntry *e = &g_tcache[(key + probe) & 1023];
-        if (e->px && e->gen == g_tgen && e->addr == t->addr && e->img0 == img0 && (!pal || e->tlut == tlutreg)) return e->px;
-        if (!e->px || e->gen != g_tgen || probe == 7) {
-            size_t n = (size_t)t->w * t->h;
-            if (e->cap < n) { free(e->px); e->px = malloc(n * 4); e->cap = n; }
-            for (int y = 0; y < t->h; y++) for (int x = 0; x < t->w; x++) e->px[(size_t)y * t->w + x] = texel(t, x, y);
-            e->addr = t->addr; e->img0 = img0; e->tlut = tlutreg; e->gen = g_tgen; e->w = t->w; e->h = t->h;
-            return e->px;
-        }
+static u32 g_tgen = 1;               // bumped when cached textures need revalidation
+static const int TBW[16] = { 8, 8, 8, 4, 4, 4, 4, 0, 8, 8, 4, 0, 0, 0, 8, 0 };
+static const int TBH[16] = { 8, 4, 4, 4, 4, 4, 4, 0, 8, 4, 4, 0, 0, 0, 8, 0 };
+static u64 hash_bytes(const u8 *b, u32 n, u64 h) {
+    u32 i = 0;
+    for (; i + 8 <= n; i += 8) { u64 v; memcpy(&v, b + i, 8); h = (h ^ v) * 0x100000001B3ull; h ^= h >> 29; }
+    for (; i < n; i++) h = (h ^ b[i]) * 0x100000001B3ull;
+    return h;
+}
+static u64 tex_hash(const Tex *t) {
+    int f = t->fmt; if (!TBW[f]) return 0;
+    u32 blocks = (u32)((t->w + TBW[f] - 1) / TBW[f]) * (u32)((t->h + TBH[f] - 1) / TBH[f]);
+    u32 bytes = blocks * (f == 6 ? 64 : 32), p = t->addr & 0x1FFFFFFF;
+    if (!(p + bytes <= 0x01800000u || (p >= 0x10000000u && p + bytes <= 0x14000000u))) return 1;
+    u64 h = hash_bytes(g_mem + p, bytes, 0x9E3779B97F4A7C15ull);
+    if (f >= 8 && f <= 10) {
+        u32 n = (f == 8 ? 16 : f == 9 ? 256 : 16384) * 2, o = (u32)t->tlut_off & 0xFFFFF;
+        if (o + n > (1u << 20)) n = (1u << 20) - o;
+        h = hash_bytes(tmem + o, n, h ^ (u64)t->tlut_fmt);
     }
-    return NULL;
+    return h;
+}
+static TexEntry *tex_decode(const Tex *t, u32 img0, u32 tlutreg) {
+    int pal = t->fmt >= 8 && t->fmt <= 10;
+    u32 key = (t->addr >> 5) ^ (img0 * 2654435761u) ^ (pal ? tlutreg * 40503u : 0);
+    TexEntry *e = NULL, *empty = NULL;
+    for (int probe = 0; probe < 8; probe++) {
+        TexEntry *c = &g_tcache[(key + probe) & 1023];
+        if (c->px && c->addr == t->addr && c->img0 == img0 && (!pal || c->tlut == tlutreg)) { e = c; break; }
+        if (!c->px && !empty) empty = c;
+    }
+    int fresh = !e;
+    if (!e) e = empty ? empty : &g_tcache[(key + (g_tgen & 7)) & 1023];   // evict a slot if all are taken
+    if (!fresh && e->gen == g_tgen) return e;
+    u64 h = tex_hash(t);
+    e->gen = g_tgen;
+    if (!fresh && h == e->hash) return e;
+    size_t n = (size_t)t->w * t->h;
+    if (e->cap < n) { free(e->px); e->px = malloc(n * 4); e->cap = n; }
+    for (int y = 0; y < t->h; y++) for (int x = 0; x < t->w; x++) e->px[(size_t)y * t->w + x] = texel(t, x, y);
+    e->addr = t->addr; e->img0 = img0; e->tlut = tlutreg; e->w = t->w; e->h = t->h; e->hash = h; e->version++;
+    return e;
 }
 
 // ---------------------------------------------------------------- per-draw pipeline state
-// Everything the pixel loop needs, decoded from BP registers once per draw call.
-typedef struct { const u32 *px; int w, h, ws, wt, linear; } TexV;
-typedef struct {
-    int map, coord, chan, csel[4], asel[4];
-    int cb, csub, cclamp, cscale, cdest, ab, asub, aclamp, ascale, adest;
-    float K[4], KA;
-} Stage;
-typedef struct {
-    int nst; Stage st[16]; TexV tex[8];
-    float reg[4][4];
-    int ac_r0, ac_r1, ac_c0, ac_c1, ac_op;
-    u32 zm, bm;
-    int sx0, sy0, sx1, sy1, cull;
-    float vp[6];
-} Setup;
+// Everything the pixel loop (or the GPU) needs, decoded from BP registers once per draw call.
 static Setup S;
 
 static void setup_draw(void) {
@@ -343,15 +354,20 @@ static void setup_draw(void) {
         for (int i = 0; i < 4; i++) { g->csel[i] = (ce >> (12 - 4 * i)) & 15; g->asel[i] = (ae >> (13 - 3 * i)) & 7; }
         g->cb = (ce >> 16) & 3; g->csub = (ce >> 18) & 1; g->cclamp = (ce >> 19) & 1; g->cscale = (ce >> 20) & 3; g->cdest = (ce >> 22) & 3;
         g->ab = (ae >> 16) & 3; g->asub = (ae >> 18) & 1; g->aclamp = (ae >> 19) & 1; g->ascale = (ae >> 20) & 3; g->adest = (ae >> 22) & 3;
+        int rs = ae & 3, ts = (ae >> 2) & 3;
+        for (int k = 0; k < 4; k++) {
+            g->rsw[k] = (bp[0xF6 + 2 * rs + (k >> 1)] >> (2 * (k & 1))) & 3;
+            g->tsw[k] = (bp[0xF6 + 2 * ts + (k >> 1)] >> (2 * (k & 1))) & 3;
+        }
         if (g->map >= 0) used[g->map] = 1;
     }
     for (int m = 0; m < 8; m++) {
-        S.tex[m].px = NULL;
+        S.tex[m].px = NULL; S.tex[m].e = NULL;
         if (!used[m]) continue;
         Tex t; get_tex(m, &t);
         int b = m < 4 ? 0 : 0x20, mm = m & 3;
         u32 img0 = bp[0x88 + b + mm], mode0 = bp[0x80 + b + mm], tlut = bp[0x98 + b + mm];
-        S.tex[m].px = tex_decode(&t, img0, tlut);
+        S.tex[m].e = tex_decode(&t, img0, tlut); S.tex[m].px = S.tex[m].e->px;
         S.tex[m].w = t.w; S.tex[m].h = t.h; S.tex[m].ws = t.wrap_s; S.tex[m].wt = t.wrap_t;
         S.tex[m].linear = (mode0 >> 4) & 1;                       // magnification filter
     }
@@ -388,8 +404,9 @@ static void tev_fast(const float ras[2][4], const float tex[16][4], float out[4]
     float R[4][4]; memcpy(R, S.reg, sizeof R);
     for (int s = 0; s < S.nst; s++) {
         const Stage *g = &S.st[s];
-        const float *T = g->map >= 0 ? tex[s] : (const float[4]){ 1, 1, 1, 1 };
-        const float *C = g->chan >= 0 ? ras[g->chan] : (const float[4]){ 0, 0, 0, 0 };
+        float T[4] = { 1, 1, 1, 1 }, C[4] = { 0, 0, 0, 0 };
+        if (g->map >= 0) for (int k = 0; k < 4; k++) T[k] = tex[s][g->tsw[k]];
+        if (g->chan >= 0) for (int k = 0; k < 4; k++) C[k] = ras[g->chan][g->rsw[k]];
         float in[4][3];
         for (int i = 0; i < 4; i++) {
             float *d = in[i]; int sel = g->csel[i];
@@ -536,6 +553,15 @@ static void draw_tri(const Out *a, const Out *b, const Out *c) {
 static void dump_frame(void) {
     if (!g_dump_dir) return;
     u32 src = bp[0x49], wh = bp[0x4A];
+    if (g_gpu) {
+        int x0 = src & 0x3FF, y0 = (src >> 10) & 0x3FF, w = (wh & 0x3FF) + 1, h = ((wh >> 10) & 0x3FF) + 1;
+        static u8 buf[640 * 8 * 528 * 8 * 3];
+        int W, H; if (!(W = gpu_read_rgb(x0, y0, w, h, buf))) return; H = W >> 16; W &= 0xFFFF;
+        char path[512]; snprintf(path, sizeof path, "%s/frame_%06llu.ppm", g_dump_dir, (unsigned long long)g_copies);
+        FILE *f = fopen(path, "wb"); if (!f) return;
+        fprintf(f, "P6\n%d %d\n255\n", W, H); fwrite(buf, 3, (size_t)W * H, f); fclose(f);
+        return;
+    }
     int x0 = (src & 0x3FF) * g_scale, y0 = ((src >> 10) & 0x3FF) * g_scale;
     int w = ((wh & 0x3FF) + 1) * g_scale, h = (((wh >> 10) & 0x3FF) + 1) * g_scale;
     if (x0 + w > EW) w = EW - x0; if (y0 + h > EH) h = EH - y0;
@@ -549,10 +575,17 @@ static void dump_frame(void) {
 }
 static void efb_copy(u32 v) {
     int to_xfb = (v >> 14) & 1, clear = (v >> 11) & 1;
+    if (!to_xfb && getenv("TTPC_COPYLOG")) {
+        static int n; if (n++ < 40) fprintf(stderr, "[efbcopy] tex copy v=%06X src %06X wh %06X dst %08X stride %u frame %llu\n",
+            v, bp[0x49], bp[0x4A], (bp[0x4B] & 0xFFFFFF) << 5, bp[0x4D] & 0x3FF, (unsigned long long)g_copies);
+    }
     if (to_xfb) {
         g_copies++;
         if (g_render && g_copies % g_dump_every == 0) dump_frame();
-        if (g_window_open && g_render) {
+        if (g_gpu) {
+            u32 src = bp[0x49], wh = bp[0x4A];
+            gpu_present(src & 0x3FF, (src >> 10) & 0x3FF, (wh & 0x3FF) + 1, ((wh >> 10) & 0x3FF) + 1);
+        } else if (g_window_open && g_render) {
             u32 src = bp[0x49], wh = bp[0x4A];
             int x0 = (src & 0x3FF) * g_scale, y0 = ((src >> 10) & 0x3FF) * g_scale;
             int w = ((wh & 0x3FF) + 1) * g_scale, h = (((wh >> 10) & 0x3FF) + 1) * g_scale;
@@ -563,15 +596,20 @@ static void efb_copy(u32 v) {
         // (never two in a row) so the game keeps its normal speed.
         static u64 last; static int skipped;
         u64 now = host_now_ns();
-        int skip = g_window_open && !skipped && last && now - last > 18000000ull && !getenv("TTPC_NOSKIP");
+        int skip = !g_gpu && g_window_open && !skipped && last && now - last > 18000000ull && !getenv("TTPC_NOSKIP");
         skipped = skip; last = now;
-        g_render = (g_window_open && !skip) || (g_dump_dir && ((g_copies + 1) % g_dump_every == 0));
+        g_render = g_gpu || (g_window_open && !skip) || (g_dump_dir && ((g_copies + 1) % g_dump_every == 0));
     }
     if (clear) {
         u32 ar = bp[0x4F], gb = bp[0x50];
         u32 c = rgba(ar & 255, (gb >> 8) & 255, gb & 255, (ar >> 8) & 255);
         float z = (bp[0x51] & 0xFFFFFF) / 16777215.f;
         u32 src = bp[0x49], wh = bp[0x4A];
+        if (g_gpu) {
+            gpu_clear(src & 0x3FF, (src >> 10) & 0x3FF, (wh & 0x3FF) + 1, ((wh >> 10) & 0x3FF) + 1, c, z,
+                      (bp[0x41] & 8) != 0, (bp[0x41] & 16) != 0, (bp[0x40] & 16) != 0);
+            return;
+        }
         int x0 = (src & 0x3FF) * g_scale, y0 = ((src >> 10) & 0x3FF) * g_scale;
         int w = ((wh & 0x3FF) + 1) * g_scale, h = (((wh >> 10) & 0x3FF) + 1) * g_scale;
         for (int y = y0; y < y0 + h && y < EH; y++) for (int x = x0; x < x0 + w && x < EW; x++) {
@@ -610,6 +648,19 @@ static void xf_write(u32 addr, u32 v) {
 }
 
 // ---------------------------------------------------------------- primitives
+// GPU path: cull on the CPU (same rule as draw_tri) and collect a triangle list.
+static Out g_tris[3 * 2 * 4096]; static int g_ntris;
+static void collect_tri(const Out *a, const Out *b, const Out *c) {
+    if (a->w > 1e-6f && b->w > 1e-6f && c->w > 1e-6f && S.cull) {
+        if (S.cull == 3) return;
+        float X[3], Y[3], Z; const Out *v[3] = { a, b, c };
+        for (int k = 0; k < 3; k++) to_screen(v[k], &X[k], &Y[k], &Z);
+        float area = (X[1] - X[0]) * (Y[2] - Y[0]) - (X[2] - X[0]) * (Y[1] - Y[0]);
+        if ((S.cull == 1 && area < 0) || (S.cull == 2 && area > 0)) return;
+    }
+    if (g_ntris + 3 > (int)(sizeof g_tris / sizeof *g_tris)) return;
+    g_tris[g_ntris++] = *a; g_tris[g_ntris++] = *b; g_tris[g_ntris++] = *c;
+}
 static void draw_prims(int prim, int vat, int n, u32 *p) {
     static Vtx vin[4096]; static Out vout[4096];
     if (n > 4096) n = 4096;
@@ -618,13 +669,16 @@ static void draw_prims(int prim, int vat, int n, u32 *p) {
     if (!g_render) return;
     setup_draw();
     for (int k = 0; k < n; k++) transform(&vin[k], &vout[k]);
+    void (*tri)(const Out *, const Out *, const Out *) = g_gpu ? collect_tri : draw_tri;
+    g_ntris = 0;
     switch (prim) {
-    case 0: case 1: for (int k = 0; k + 3 < n; k += 4) { draw_tri(&vout[k], &vout[k + 1], &vout[k + 2]); draw_tri(&vout[k], &vout[k + 2], &vout[k + 3]); } break;
-    case 2: for (int k = 0; k + 2 < n; k += 3) draw_tri(&vout[k], &vout[k + 1], &vout[k + 2]); break;
-    case 3: for (int k = 0; k + 2 < n; k++) { if (k & 1) draw_tri(&vout[k + 1], &vout[k], &vout[k + 2]); else draw_tri(&vout[k], &vout[k + 1], &vout[k + 2]); } break;
-    case 4: for (int k = 1; k + 1 < n; k++) draw_tri(&vout[0], &vout[k], &vout[k + 1]); break;
+    case 0: case 1: for (int k = 0; k + 3 < n; k += 4) { tri(&vout[k], &vout[k + 1], &vout[k + 2]); tri(&vout[k], &vout[k + 2], &vout[k + 3]); } break;
+    case 2: for (int k = 0; k + 2 < n; k += 3) tri(&vout[k], &vout[k + 1], &vout[k + 2]); break;
+    case 3: for (int k = 0; k + 2 < n; k++) { if (k & 1) tri(&vout[k + 1], &vout[k], &vout[k + 2]); else tri(&vout[k], &vout[k + 1], &vout[k + 2]); } break;
+    case 4: for (int k = 1; k + 1 < n; k++) tri(&vout[0], &vout[k], &vout[k + 1]); break;
     default: break;   // lines/points: not drawn yet
     }
+    if (g_gpu && g_ntris) gpu_draw(&S, g_tris, g_ntris);
 }
 
 // Parse commands from guest memory [p, end). Returns bytes consumed (stops at an incomplete command).

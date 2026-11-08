@@ -15,8 +15,12 @@ int g_window_open;
 #ifdef TTPC_SDL
 #include <SDL2/SDL.h>
 
-static SDL_Window *g_win;
+#include "gx_state.h"
+SDL_Window *g_sdl_window;
+#define g_win g_sdl_window
 static SDL_Renderer *g_ren;
+static SDL_GLContext g_glctx;
+extern int g_view_x, g_view_y, g_view_w, g_view_h;
 static SDL_Texture *g_tex;
 static int g_tw, g_th;
 
@@ -28,7 +32,27 @@ int platform_init(void) {
     }
     int zoom = getenv("TTPC_ZOOM") ? atoi(getenv("TTPC_ZOOM")) : 2;   // window size multiplier
     if (zoom < 1) zoom = 1;
-    g_win = SDL_CreateWindow("Trauma Team (native)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+    // OpenGL (GPU rendering) unless TTPC_SOFTWARE=1 or it is unavailable.
+    if (!getenv("TTPC_SOFTWARE")) {
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3); SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+        g_win = SDL_CreateWindow("Trauma Team (native)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                 640 * zoom, 480 * zoom, SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
+        if (g_win && (g_glctx = SDL_GL_CreateContext(g_win))) {
+            SDL_GL_SetSwapInterval(0);   // the game paces itself to the 60 Hz retrace
+            int scale = getenv("TTPC_SCALE") ? atoi(getenv("TTPC_SCALE")) : 1;
+            if (gpu_init(scale)) {
+                SDL_ShowCursor(SDL_DISABLE);
+                g_window_open = 1;
+                return 1;
+            }
+            SDL_GL_DeleteContext(g_glctx); g_glctx = NULL;
+        }
+        fprintf(stderr, "[platform] OpenGL 3.3 unavailable (%s): using the software renderer\n", SDL_GetError());
+        if (g_win) SDL_DestroyWindow(g_win);
+    }
+    g_win = SDL_CreateWindow("Trauma Team (native, software)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                              640 * zoom, 480 * zoom, SDL_WINDOW_RESIZABLE);
     if (!g_win) { fprintf(stderr, "[platform] window: %s\n", SDL_GetError()); return 0; }
     g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_ACCELERATED);
@@ -66,10 +90,16 @@ void platform_poll(void) {
     const u8 *k = SDL_GetKeyboardState(NULL);
     int mx, my; u32 mb = SDL_GetMouseState(&mx, &my);
     // Mouse position -> game screen coordinates (0..1), honouring the letterboxed logical size.
-    float lx, ly; SDL_RenderWindowToLogical(g_ren, mx, my, &lx, &ly);
-    int lw, lh; SDL_RenderGetLogicalSize(g_ren, &lw, &lh);
-    if (lw <= 0) { lw = 640; lh = 480; }
-    g_input.mouse_x = lx / lw; g_input.mouse_y = ly / lh;
+    if (g_ren) {
+        float lx, ly; SDL_RenderWindowToLogical(g_ren, mx, my, &lx, &ly);
+        int lw, lh; SDL_RenderGetLogicalSize(g_ren, &lw, &lh);
+        if (lw <= 0) { lw = 640; lh = 480; }
+        g_input.mouse_x = lx / lw; g_input.mouse_y = ly / lh;
+    } else if (g_view_w > 0) {   // GL: picture rectangle in drawable pixels; mouse is in window points
+        int ww, wh, dw, dh; SDL_GetWindowSize(g_win, &ww, &wh); SDL_GL_GetDrawableSize(g_win, &dw, &dh);
+        float fx = mx * (float)dw / ww, fy = my * (float)dh / wh;
+        g_input.mouse_x = (fx - g_view_x) / g_view_w; g_input.mouse_y = (fy - g_view_y) / g_view_h;
+    }
     g_input.mouse_in = SDL_GetMouseFocus() == g_win;
     g_input.lmb = (mb & SDL_BUTTON_LMASK) != 0;
     g_input.rmb = (mb & SDL_BUTTON_RMASK) != 0;

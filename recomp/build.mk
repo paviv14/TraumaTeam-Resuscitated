@@ -32,7 +32,7 @@ endif
 
 CFLAGS ?= -O1 -g0 -fno-strict-aliasing -fwrapv -w -Iruntime
 RTCFLAGS := -O2 -g -Wall -Wno-unused -Wno-misleading-indentation -fno-strict-aliasing -fwrapv -Iruntime $(RTFLAGS) $(EXTRA)
-RUNTIME := port runtime hle ios threads dsp gx disc video platform wiimote
+RUNTIME := port runtime hle ios threads dsp gx disc video gl platform wiimote
 GEN := $(wildcard ../generated/*.c)
 OBJ := $(patsubst ../generated/%.c,$(BUILD)/%.o,$(GEN)) $(patsubst %,$(BUILD)/rt_%.o,$(RUNTIME))
 
@@ -43,6 +43,6 @@ $(BUILD)/%.o: ../generated/%.c runtime/cpu.h
 	@mkdir -p $(BUILD)
 	$(CC) $(CFLAGS) $(EXTRA) -c $< -o $@
 
-$(BUILD)/rt_%.o: runtime/%.c runtime/cpu.h runtime/platform.h runtime/port.h
+$(BUILD)/rt_%.o: runtime/%.c runtime/cpu.h runtime/platform.h runtime/port.h runtime/gx_state.h
 	@mkdir -p $(BUILD)
 	$(CC) $(RTCFLAGS) -c $< -o $@
