@@ -22,6 +22,7 @@
 //
 // TTPC_INPUT scripts presses for headless tests: "600+10:A;900+5:A,B;1200+60:right"
 //   = from the game's 600th controller read (~ game frame) hold A for 10 reads, etc. Names: A B 1 2 plus minus home up down left right C Z.
+//   Also: su sd sl sr (Nunchuk stick up/down/left/right) and @x/y (pointer, -1..1) for the event's span.
 #include "cpu.h"
 #include "platform.h"
 #include <stdio.h>
@@ -41,7 +42,7 @@ static float g_px, g_py, g_ppx, g_ppy, g_sx, g_sy;
 static int g_point_valid = 1;
 static u64 g_vi;
 
-typedef struct { u64 from, len; u32 mask; } ScriptEv;
+typedef struct { u64 from, len; u32 mask; int stick, has_ptr; float px, py; float sx, sy; } ScriptEv;
 static ScriptEv g_script[4096]; static int g_nscript;
 
 static u32 name_mask(const char *s, int n) {
@@ -59,7 +60,14 @@ static void parse_script(void) {
         ev.from = strtoull(s, &e, 10); s = e;
         ev.len = 1; if (*s == '+') { ev.len = strtoull(s + 1, &e, 10); s = e; }
         if (*s == ':') s++;
-        while (*s && *s != ';') { const char *b = s; while (*s && *s != ',' && *s != ';') s++; ev.mask |= name_mask(b, (int)(s - b)); if (*s == ',') s++; }
+        while (*s && *s != ';') {
+            const char *b = s; while (*s && *s != ',' && *s != ';') s++;
+            int n = (int)(s - b);
+            if (b[0] == '@') { ev.has_ptr = 1; sscanf(b + 1, "%f/%f", &ev.px, &ev.py); }
+            else if (n == 2 && b[0] == 's' && strchr("udlr", b[1])) { ev.stick = 1; ev.sx += b[1] == 'r' ? 1 : b[1] == 'l' ? -1 : 0; ev.sy += b[1] == 'u' ? 1 : b[1] == 'd' ? -1 : 0; }
+            else ev.mask |= name_mask(b, n);
+            if (*s == ',') s++;
+        }
         if (*s == ';') s++;
         g_script[g_nscript++] = ev;
     }
@@ -114,7 +122,12 @@ void f_8025F830(CPU *c) {
     // buttons are latched per read: host input from the last retrace plus any scripted presses
     g_reads++;
     u32 h = g_host_hold;
-    for (int k = 0; k < g_nscript; k++) if (g_reads >= g_script[k].from && g_reads < g_script[k].from + g_script[k].len) h |= g_script[k].mask;
+    for (int k = 0; k < g_nscript; k++) if (g_reads >= g_script[k].from && g_reads < g_script[k].from + g_script[k].len) {
+        const ScriptEv *ev = &g_script[k];
+        h |= ev->mask;
+        if (ev->stick) { g_sx = ev->sx; g_sy = ev->sy; }
+        if (ev->has_ptr) { g_ppx = g_px; g_ppy = g_py; g_px = ev->px; g_py = ev->py; g_point_valid = 1; }
+    }
     g_prev = g_hold; g_hold = h; g_trig = g_hold & ~g_prev; g_rel = g_prev & ~g_hold;
     if (dbg && (g_trig || g_reads % 600 == 0)) fprintf(stderr, "[pad] read %llu vi %llu hold %04X trig %04X\n", (unsigned long long)g_reads, (unsigned long long)g_vi, g_hold, g_trig);
     for (u32 k = 0; k < 0xB0; k += 4) W32(buf + k, 0);

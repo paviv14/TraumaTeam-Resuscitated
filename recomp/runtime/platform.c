@@ -144,6 +144,7 @@ static float axis(SDL_GameControllerAxis a) {
     if (v > dz) return (v - dz) / (1 - dz); if (v < -dz) return (v + dz) / (1 - dz); return 0;
 }
 
+void platform_set_title(const char *t) { if (g_win) SDL_SetWindowTitle(g_win, t); }
 void platform_poll(void) {
     if (!g_window_open) return;
     SDL_Event e;
@@ -219,4 +220,5 @@ void platform_poll(void) {
 int platform_init(void) { return 0; }
 void platform_present(const u32 *px, int x0, int y0, int w, int h, int stride) { (void)px; (void)x0; (void)y0; (void)w; (void)h; (void)stride; }
 void platform_poll(void) {}
+void platform_set_title(const char *t) { (void)t; }
 #endif

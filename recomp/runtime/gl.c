@@ -51,7 +51,7 @@ int g_gpu;
     X(void, BindAttribLocation, (GLuint, GLuint, const GLchar *)) \
     X(GLint, GetUniformLocation, (GLuint, const GLchar *)) X(void, Uniform1i, (GLint, GLint)) \
     X(void, Uniform1iv, (GLint, GLsizei, const GLint *)) X(void, Uniform4iv, (GLint, GLsizei, const GLint *)) \
-    X(void, Uniform4fv, (GLint, GLsizei, const GLfloat *)) X(void, Uniform1fv, (GLint, GLsizei, const GLfloat *))
+    X(void, Uniform4fv, (GLint, GLsizei, const GLfloat *)) X(void, Uniform4f, (GLint, GLfloat, GLfloat, GLfloat, GLfloat)) X(void, Uniform1fv, (GLint, GLsizei, const GLfloat *))
 
 #define X(ret, name, args) static ret (APIENTRY *gl##name##_) args;
 GLFUNCS
@@ -139,6 +139,34 @@ static const char *FS =
     "}\n";
 
 static GLuint g_prog, g_vao, g_vbo, g_fbo, g_color, g_depth;
+
+// ---------------------------------------------------------------- EFB -> texture copies on the GPU
+// The copied rectangle is drawn from the EFB colour texture into a texture of its own, converted to
+// the requested format (intensity, RGB565 alpha, single channels...). Draws that sample the copy's
+// destination address use that texture: no GPU->CPU readback, and copies keep the internal resolution.
+static const char *CVS =
+    "#version 330 core\n"
+    "uniform vec4 uRect; out vec2 vUV;\n"
+    "void main() { vec2 p = vec2(gl_VertexID & 1, gl_VertexID >> 1);\n"
+    "  vUV = uRect.xy + p * uRect.zw; gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0); }\n";
+static const char *CFS =
+    "#version 330 core\n"
+    "uniform sampler2D uSrc; uniform int uFmt; uniform int uInten; in vec2 vUV; out vec4 o;\n"
+    "void main() { vec4 c = texture(uSrc, vUV);\n"
+    "  float y = clamp(dot(c.rgb, vec3(0.257, 0.504, 0.098)) + 16.0 / 255.0, 0.0, 1.0);\n"
+    "  float i = uInten != 0 ? y : c.r;\n"
+    "  if (uFmt == 0 || uFmt == 1 || uFmt == 8) o = vec4(i);\n"
+    "  else if (uFmt == 2 || uFmt == 3) o = vec4(i, i, i, c.a);\n"
+    "  else if (uFmt == 4) o = vec4(c.rgb, 1.0);\n"
+    "  else if (uFmt == 7) o = vec4(c.a);\n"
+    "  else if (uFmt == 9) o = vec4(c.g);\n"
+    "  else if (uFmt == 10) o = vec4(c.b);\n"
+    "  else if (uFmt == 11) o = vec4(c.r, c.r, c.r, c.g);\n"
+    "  else if (uFmt == 12) o = vec4(c.g, c.g, c.g, c.b);\n"
+    "  else o = c; }\n";
+typedef struct { u32 dst; GLuint tex, fbo; int w, h, tw, th; } CopyTex;
+static CopyTex g_ct[64]; static int g_nct;
+static GLuint g_cprog, g_cvao; static GLint g_cu_rect, g_cu_fmt, g_cu_inten;
 static int g_scale = 1, g_W, g_H;
 static struct { GLint nst, csel, asel, cop, aop, st, rsw, tsw, chan, k, ka, reg, at, aop2; } U;
 
@@ -193,6 +221,17 @@ int gpu_init(int scale) {
     glEnable_(GL_SCISSOR_TEST);
     glEnable_(GL_DEPTH_CLAMP);               // GX does not clip against near/far like GL would
     glPixelStorei_(GL_UNPACK_ALIGNMENT, 4); glPixelStorei_(GL_PACK_ALIGNMENT, 1);
+    {   // EFB copy conversion program
+        GLuint cv = compile(GL_VERTEX_SHADER, CVS), cf = compile(GL_FRAGMENT_SHADER, CFS);
+        if (!cv || !cf) return 0;
+        g_cprog = glCreateProgram_(); glAttachShader_(g_cprog, cv); glAttachShader_(g_cprog, cf); glLinkProgram_(g_cprog);
+        glGetProgramiv_(g_cprog, GL_LINK_STATUS, &ok); if (!ok) { fprintf(stderr, "[gl] copy shader link failed\n"); return 0; }
+        glUseProgram_(g_cprog);
+        g_cu_rect = glGetUniformLocation_(g_cprog, "uRect"); g_cu_fmt = glGetUniformLocation_(g_cprog, "uFmt"); g_cu_inten = glGetUniformLocation_(g_cprog, "uInten");
+        glUniform1i_(glGetUniformLocation_(g_cprog, "uSrc"), 0);
+        glGenVertexArrays_(1, &g_cvao);
+        glUseProgram_(g_prog); glBindVertexArray_(g_vao);
+    }
     g_gpu = 1;
     fprintf(stderr, "[gl] backend ready: %s | %s | EFB %dx%d\n", (const char *)glGetString_(GL_RENDERER), (const char *)glGetString_(GL_VERSION), g_W, g_H);
     return 1;
@@ -201,6 +240,14 @@ int gpu_init(int scale) {
 // ---------------------------------------------------------------- textures
 static void bind_texture(int unit, const TexV *t) {
     glActiveTexture_(GL_TEXTURE0 + unit);
+    static const GLint wrapm[4] = { GL_CLAMP_TO_EDGE, GL_REPEAT, GL_MIRRORED_REPEAT, GL_CLAMP_TO_EDGE };
+    if (t->gl_copy) {   // an EFB copy kept on the GPU
+        glBindTexture_(GL_TEXTURE_2D, t->gl_copy);
+        glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrapm[t->ws & 3]); glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrapm[t->wt & 3]);
+        GLint f = t->linear ? GL_LINEAR : GL_NEAREST;
+        glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, f);
+        return;
+    }
     TexEntry *e = t->e;
     if (!e || !e->px) { glBindTexture_(GL_TEXTURE_2D, 0); return; }
     if (!e->gl_tex) glGenTextures_(1, &e->gl_tex);
@@ -240,7 +287,7 @@ static void set_state(const Setup *s) {
     glUniform4iv_(U.st, n, st); glUniform4iv_(U.rsw, n, rsw); glUniform4iv_(U.tsw, n, tsw); glUniform1iv_(U.chan, n, chan);
     glUniform4fv_(U.k, n, k); glUniform1fv_(U.ka, n, ka); glUniform4fv_(U.reg, 4, reg);
     GLint at[4] = { s->ac_c0, s->ac_r0, s->ac_c1, s->ac_r1 }; glUniform4iv_(U.at, 1, at); glUniform1i_(U.aop2, s->ac_op);
-    for (int m = 0; m < 8; m++) if (s->tex[m].e) bind_texture(m, &s->tex[m]);
+    for (int m = 0; m < 8; m++) if (s->tex[m].e || s->tex[m].gl_copy) bind_texture(m, &s->tex[m]);
 
     // depth
     static const GLenum zf[8] = { GL_NEVER, GL_LESS, GL_EQUAL, GL_LEQUAL, GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS };
@@ -327,6 +374,50 @@ int gpu_read_rgb(int x0, int y0, int w, int h, u8 *out) {
     return W | H << 16;
 }
 
+// Copy an EFB rectangle (1x EFB pixels) into the GPU texture registered for `dst`.
+// ow/oh: the destination texture size in texels (after optional halving).
+int gpu_copy_to_texture(u32 dst, int x0, int y0, int w, int h, int ow, int oh, int fmt, int inten) {
+    dst &= 0x1FFFFFFF;
+    CopyTex *c = NULL;
+    for (int k = 0; k < g_nct; k++) if (g_ct[k].dst == dst) { c = &g_ct[k]; break; }
+    if (!c) { c = &g_ct[g_nct < 64 ? g_nct++ : (int)(dst >> 5) & 63]; memset(c, 0, sizeof *c); c->dst = dst; }
+    int tw = ow * g_scale, th = oh * g_scale;
+    if (!c->tex) { glGenTextures_(1, &c->tex); glGenFramebuffers_(1, &c->fbo); }
+    if (c->tw != tw || c->th != th) {
+        glBindTexture_(GL_TEXTURE_2D, c->tex);
+        glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glBindFramebuffer_(GL_FRAMEBUFFER, c->fbo);
+        glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, c->tex, 0);
+        c->tw = tw; c->th = th;
+    }
+    c->w = ow; c->h = oh;
+    glBindFramebuffer_(GL_FRAMEBUFFER, c->fbo);
+    glViewport_(0, 0, tw, th);
+    glDisable_(GL_SCISSOR_TEST); glDisable_(GL_BLEND); glDisable_(GL_DEPTH_TEST);
+    glColorMask_(1, 1, 1, 1); glDepthMask_(GL_FALSE);
+    glUseProgram_(g_cprog); glBindVertexArray_(g_cvao);
+    glActiveTexture_(GL_TEXTURE0); glBindTexture_(GL_TEXTURE_2D, g_color);
+    glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);   // half-scale copies average texels
+    // source rect in EFB texture coordinates (the EFB is stored bottom-up): top row maps to v = 0 here
+    float u0 = (float)x0 / 640.f, uw = (float)w / 640.f;
+    float v0 = (float)(528 - y0) / 528.f, vh = -(float)h / 528.f;
+    glUniform4f_(g_cu_rect, u0, v0, uw, vh);
+    glUniform1i_(g_cu_fmt, fmt); glUniform1i_(g_cu_inten, inten);
+    glDrawArrays_(GL_TRIANGLE_STRIP, 0, 4);
+    glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    // back to normal drawing
+    glUseProgram_(g_prog); glBindVertexArray_(g_vao);
+    glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo); glViewport_(0, 0, g_W, g_H);
+    glEnable_(GL_SCISSOR_TEST);
+    return 1;
+}
+// GPU texture holding an EFB copy made to `addr` with size w x h, or 0.
+u32 gpu_copy_lookup(u32 addr, int w, int h) {
+    addr &= 0x1FFFFFFF;
+    for (int k = 0; k < g_nct; k++) if (g_ct[k].dst == addr && g_ct[k].w == w && g_ct[k].h == h) return g_ct[k].tex;
+    return 0;
+}
+
 int gpu_read_rgba(int x0, int y0, int w, int h, u32 *out) {
     int W = w * g_scale, H = h * g_scale;
     static u8 *tmp; static size_t cap;
@@ -347,6 +438,50 @@ int gpu_read_rgba(int x0, int y0, int w, int h, u32 *out) {
 }
 
 #else   // no SDL: no GPU backend
+// Copy an EFB rectangle (1x EFB pixels) into the GPU texture registered for `dst`.
+// ow/oh: the destination texture size in texels (after optional halving).
+int gpu_copy_to_texture(u32 dst, int x0, int y0, int w, int h, int ow, int oh, int fmt, int inten) {
+    dst &= 0x1FFFFFFF;
+    CopyTex *c = NULL;
+    for (int k = 0; k < g_nct; k++) if (g_ct[k].dst == dst) { c = &g_ct[k]; break; }
+    if (!c) { c = &g_ct[g_nct < 64 ? g_nct++ : (int)(dst >> 5) & 63]; memset(c, 0, sizeof *c); c->dst = dst; }
+    int tw = ow * g_scale, th = oh * g_scale;
+    if (!c->tex) { glGenTextures_(1, &c->tex); glGenFramebuffers_(1, &c->fbo); }
+    if (c->tw != tw || c->th != th) {
+        glBindTexture_(GL_TEXTURE_2D, c->tex);
+        glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glBindFramebuffer_(GL_FRAMEBUFFER, c->fbo);
+        glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, c->tex, 0);
+        c->tw = tw; c->th = th;
+    }
+    c->w = ow; c->h = oh;
+    glBindFramebuffer_(GL_FRAMEBUFFER, c->fbo);
+    glViewport_(0, 0, tw, th);
+    glDisable_(GL_SCISSOR_TEST); glDisable_(GL_BLEND); glDisable_(GL_DEPTH_TEST);
+    glColorMask_(1, 1, 1, 1); glDepthMask_(GL_FALSE);
+    glUseProgram_(g_cprog); glBindVertexArray_(g_cvao);
+    glActiveTexture_(GL_TEXTURE0); glBindTexture_(GL_TEXTURE_2D, g_color);
+    glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);   // half-scale copies average texels
+    // source rect in EFB texture coordinates (the EFB is stored bottom-up): top row maps to v = 0 here
+    float u0 = (float)x0 / 640.f, uw = (float)w / 640.f;
+    float v0 = (float)(528 - y0) / 528.f, vh = -(float)h / 528.f;
+    glUniform4f_(g_cu_rect, u0, v0, uw, vh);
+    glUniform1i_(g_cu_fmt, fmt); glUniform1i_(g_cu_inten, inten);
+    glDrawArrays_(GL_TRIANGLE_STRIP, 0, 4);
+    glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    // back to normal drawing
+    glUseProgram_(g_prog); glBindVertexArray_(g_vao);
+    glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo); glViewport_(0, 0, g_W, g_H);
+    glEnable_(GL_SCISSOR_TEST);
+    return 1;
+}
+// GPU texture holding an EFB copy made to `addr` with size w x h, or 0.
+u32 gpu_copy_lookup(u32 addr, int w, int h) {
+    addr &= 0x1FFFFFFF;
+    for (int k = 0; k < g_nct; k++) if (g_ct[k].dst == addr && g_ct[k].w == w && g_ct[k].h == h) return g_ct[k].tex;
+    return 0;
+}
+
 int gpu_read_rgba(int x0, int y0, int w, int h, u32 *out) { (void)x0; (void)y0; (void)w; (void)h; (void)out; return 0; }
 int gpu_init(int scale) { (void)scale; return 0; }
 void gpu_draw(const Setup *s, const Out *v, int n) { (void)s; (void)v; (void)n; }

@@ -26,6 +26,7 @@ static int EW, EH;                  // EFB size in host pixels
 static u32 *efb_c; static float *efb_z;
 static const char *g_dump_dir; static int g_dump_every = 30; static u64 g_copies;
 static int g_render = 1;
+static u64 g_perf_draws;   // GPU draw calls since the last title update
 u64 g_video_draws;
 static u64 st_tri, st_w, st_area, st_cull, st_empty, st_px, st_alpha, st_z; static int st_samples;
 
@@ -293,30 +294,37 @@ static void konst_value(int stage, int alpha, float out[4]) {
 // Textures are decoded to RGBA once and kept; once per displayed frame (or after a TLUT load) a
 // cached texture is revalidated by hashing its source bytes, and re-decoded only if they changed.
 static TexEntry g_tcache[1024];
+static u64 g_st_decodes, g_st_decoded_px;
 const u8 *texpack_lookup(u64 hash, int *w, int *h); void texpack_dump(u64 hash, int w, int h, int fmt, const u32 *px);
 static u32 g_copy_dst[32]; static int g_ncopy;     // recent EFB->texture destinations
 static int is_copy_target(u32 a) { a &= 0x1FFFFFFF; for (int k = 0; k < g_ncopy; k++) if (g_copy_dst[k] == a) return 1; return 0; }
 static u32 g_tgen = 1;               // bumped when cached textures need revalidation
 static const int TBW[16] = { 8, 8, 8, 4, 4, 4, 4, 0, 8, 8, 4, 0, 0, 0, 8, 0 };
 static const int TBH[16] = { 8, 4, 4, 4, 4, 4, 4, 0, 8, 4, 4, 0, 0, 0, 8, 0 };
+static u64 g_st_hashed;
 static u64 hash_bytes(const u8 *b, u32 n, u64 h) {
+    g_st_hashed += n;
     u32 i = 0;
     for (; i + 8 <= n; i += 8) { u64 v; memcpy(&v, b + i, 8); h = (h ^ v) * 0x100000001B3ull; h ^= h >> 29; }
     for (; i < n; i++) h = (h ^ b[i]) * 0x100000001B3ull;
     return h;
 }
-static u64 tex_hash(const Tex *t) {
+// Texture identity = hash of the texel data, chained with the palette (TMEM) for paletted formats.
+// The data part is computed at most once per displayed frame; the palette part (32 B - 32 KB, cheap)
+// on every use, since palettes are reloaded freely between draws.
+static u64 tex_data_hash(const Tex *t) {
     int f = t->fmt; if (!TBW[f]) return 0;
     u32 blocks = (u32)((t->w + TBW[f] - 1) / TBW[f]) * (u32)((t->h + TBH[f] - 1) / TBH[f]);
     u32 bytes = blocks * (f == 6 ? 64 : 32), p = t->addr & 0x1FFFFFFF;
     if (!(p + bytes <= 0x01800000u || (p >= 0x10000000u && p + bytes <= 0x14000000u))) return 1;
-    u64 h = hash_bytes(g_mem + p, bytes, 0x9E3779B97F4A7C15ull);
-    if (f >= 8 && f <= 10) {
-        u32 n = (f == 8 ? 16 : f == 9 ? 256 : 16384) * 2, o = (u32)t->tlut_off & 0xFFFFF;
-        if (o + n > (1u << 20)) n = (1u << 20) - o;
-        h = hash_bytes(tmem + o, n, h ^ (u64)t->tlut_fmt);
-    }
-    return h;
+    return hash_bytes(g_mem + p, bytes, 0x9E3779B97F4A7C15ull);
+}
+static u64 tex_full_hash(const Tex *t, u64 data) {
+    int f = t->fmt;
+    if (f < 8 || f > 10) return data;
+    u32 n = (f == 8 ? 16 : f == 9 ? 256 : 16384) * 2, o = (u32)t->tlut_off & 0xFFFFF;
+    if (o + n > (1u << 20)) n = (1u << 20) - o;
+    return hash_bytes(tmem + o, n, data ^ (u64)t->tlut_fmt);
 }
 static TexEntry *tex_decode(const Tex *t, u32 img0, u32 tlutreg) {
     int pal = t->fmt >= 8 && t->fmt <= 10;
@@ -329,13 +337,15 @@ static TexEntry *tex_decode(const Tex *t, u32 img0, u32 tlutreg) {
     }
     int fresh = !e;
     if (!e) e = empty ? empty : &g_tcache[(key + (g_tgen & 7)) & 1023];   // evict a slot if all are taken
-    if (!fresh && e->gen == g_tgen) return e;
-    u64 h = tex_hash(t);
-    e->gen = g_tgen;
+    if (!fresh && e->gen == g_tgen && !pal) return e;
+    if (fresh || e->gen != g_tgen) { e->data_hash = tex_data_hash(t); e->gen = g_tgen; }
+    u64 h = tex_full_hash(t, e->data_hash);
     if (!fresh && h == e->hash) return e;
     size_t n = (size_t)t->w * t->h;
     if (e->cap < n) { free(e->px); e->px = malloc(n * 4); e->cap = n; }
     for (int y = 0; y < t->h; y++) for (int x = 0; x < t->w; x++) e->px[(size_t)y * t->w + x] = texel(t, x, y);
+    g_st_decodes++; g_st_decoded_px += n;
+    if (getenv("TTPC_TEXLOG") && !fresh) fprintf(stderr, "[tex] re-decode %08X %dx%d fmt %d (frame %llu)\n", t->addr, t->w, t->h, t->fmt, (unsigned long long)g_copies);
     e->addr = t->addr; e->img0 = img0; e->tlut = tlutreg; e->w = t->w; e->h = t->h; e->hash = h; e->version++;
     // texture packs: render-target textures (EFB copies) are excluded - their content changes
     e->hi = NULL;
@@ -375,9 +385,14 @@ static void setup_draw(void) {
         if (g->map >= 0) used[g->map] = 1;
     }
     for (int m = 0; m < 8; m++) {
-        S.tex[m].px = NULL; S.tex[m].e = NULL;
+        S.tex[m].px = NULL; S.tex[m].e = NULL; S.tex[m].gl_copy = 0;
         if (!used[m]) continue;
         Tex t; get_tex(m, &t);
+        if (g_gpu && (S.tex[m].gl_copy = gpu_copy_lookup(t.addr, t.w, t.h))) {   // render target kept on the GPU
+            int b = m < 4 ? 0 : 0x20, mm = m & 3; u32 mode0 = bp[0x80 + b + mm];
+            S.tex[m].w = t.w; S.tex[m].h = t.h; S.tex[m].ws = t.wrap_s; S.tex[m].wt = t.wrap_t; S.tex[m].linear = (mode0 >> 4) & 1;
+            continue;
+        }
         int b = m < 4 ? 0 : 0x20, mm = m & 3;
         u32 img0 = bp[0x88 + b + mm], mode0 = bp[0x80 + b + mm], tlut = bp[0x98 + b + mm];
         S.tex[m].e = tex_decode(&t, img0, tlut); S.tex[m].px = S.tex[m].e->px;
@@ -610,6 +625,11 @@ static void efb_copy_to_texture(u32 v) {
     if (x0 + w > 640) w = 640 - x0; if (y0 + h > 528) h = 528 - y0;
     if (w <= 0 || h <= 0) return;
     static u32 pix[640 * 528];                    // copied rect at native resolution, R<<24|G<<16|B<<8|A
+    static int to_ram = -1; if (to_ram < 0) to_ram = getenv("TTPC_COPY_TO_RAM") != NULL;
+    if (g_gpu && !to_ram) {   // keep it on the GPU (no readback); draws sampling `dst` use it
+        gpu_copy_to_texture(dst, x0, y0, w, h, half ? w / 2 : w, half ? h / 2 : h, fmt, inten);
+        return;
+    }
     if (g_gpu) { if (!gpu_read_rgba(x0, y0, w, h, pix)) return; }
     else for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
         long sx = (long)(x0 + x) * g_scale, sy = (long)(y0 + y) * g_scale;
@@ -662,6 +682,7 @@ static void efb_copy_to_texture(u32 v) {
     static int logged; if (!logged++) fprintf(stderr, "[video] EFB->texture copies active (first: %dx%d -> %dx%d fmt %d at %08X)\n", w, h, ow, oh, fmt, dst);
 }
 
+static void perf_title(void);
 static void efb_copy(u32 v) {
     int to_xfb = (v >> 14) & 1, clear = (v >> 11) & 1;
     if (!to_xfb && g_render) efb_copy_to_texture(v);
@@ -671,7 +692,13 @@ static void efb_copy(u32 v) {
     }
     if (to_xfb) {
         g_copies++;
+        perf_title();
         if (g_render && g_copies % g_dump_every == 0) dump_frame();
+        if (getenv("TTPC_TEXLOG") && g_copies % 300 == 0) {
+            fprintf(stderr, "[tex] frame %llu: %llu decodes, %.1f Mpixels decoded, %.1f MB hashed per frame (last 300 frames)\n", (unsigned long long)g_copies,
+                    (unsigned long long)g_st_decodes, g_st_decoded_px / 1e6, g_st_hashed / 300.0 / 1e6);
+            g_st_decodes = g_st_decoded_px = g_st_hashed = 0;
+        }
         if (g_gpu) {
             u32 src = bp[0x49], wh = bp[0x4A];
             gpu_present(src & 0x3FF, (src >> 10) & 0x3FF, (wh & 0x3FF) + 1, ((wh >> 10) & 0x3FF) + 1);
@@ -727,7 +754,6 @@ static void bp_write(u32 v) {
         u32 dst = (val & 0x3FF) << 9, count = ((val >> 10) & 0x7FF) * 16;
         for (u32 k = 0; k < count * 2 && dst + k < (1u << 20); k++) tmem[dst + k] = (u8)V8(src + k);
     }
-    if (reg == 0x65) g_tgen++;
     if (reg == 0x52) { efb_copy(val); g_tgen++; }
 }
 static void xf_write(u32 addr, u32 v) {
@@ -772,7 +798,7 @@ static void draw_prims(int prim, int vat, int n, u32 *p) {
     case 4: for (int k = 1; k + 1 < n; k++) tri(&vout[0], &vout[k], &vout[k + 1]); break;
     default: break;   // lines/points: not drawn yet
     }
-    if (g_gpu && g_ntris) gpu_draw(&S, g_tris, g_ntris);
+    if (g_gpu && g_ntris) { gpu_draw(&S, g_tris, g_ntris); g_perf_draws++; }
     static long dl_from = -2; if (dl_from == -2) dl_from = getenv("TTPC_DRAWLOG") ? atol(getenv("TTPC_DRAWLOG")) : -1;
     if (dl_from >= 0 && (long)g_copies >= dl_from && (long)g_copies < dl_from + 2) {
         float X, Y, Z; to_screen(&vout[0], &X, &Y, &Z);
@@ -855,10 +881,28 @@ void video_fifo(u32 v, int size) {          // bytes written to the write-gather
     if (g_len + 4 > sizeof g_buf) g_len = 0;
     for (int k = size - 1; k >= 0; k--) g_buf[g_len++] = (u8)(v >> (8 * k));
 }
+static u64 g_gx_ns;   // time spent decoding and drawing (for the window title)
 void video_flush(void) {                    // decode every complete command buffered so far
     if (!g_len) return;
+    u64 t0 = host_now_ns();
     u32 used = parse(0xF0000000u, 0xF0000000u + g_len, 0);
     if (used) { memmove(g_buf, g_buf + used, g_len - used); g_len -= used; }
+    g_gx_ns += host_now_ns() - t0;
+}
+// Once a second: "Trauma Team - 60 fps | GPU 4.1 ms" in the window title.
+static void perf_title(void) {
+    static u64 t_last, frames, gx_last;
+    u64 now = host_now_ns(); frames++;
+    if (!t_last) { t_last = now; gx_last = g_gx_ns; frames = 0; return; }
+    if (now - t_last < 1000000000ull) return;
+    double secs = (now - t_last) / 1e9, fps = frames / secs;
+    double gx = (g_gx_ns - gx_last) / 1e6 / (frames ? frames : 1);
+    double frame_ms = 1000.0 / (fps > 0 ? fps : 1);
+    char b[160]; snprintf(b, sizeof b, "Trauma Team - %.0f fps | frame %.1f ms: graphics %.1f ms, game %.1f ms", fps, frame_ms, gx, frame_ms - gx > 0 ? frame_ms - gx : 0);
+    platform_set_title(b);
+    static int log = -1; if (log < 0) log = getenv("TTPC_PERFLOG") != NULL;
+    if (log) { fprintf(stderr, "[perf] frame %llu: %s, %.0f draws/frame\n", (unsigned long long)g_copies, b, g_perf_draws / (double)(frames ? frames : 1)); g_perf_draws = 0; }
+    t_last = now; frames = 0; gx_last = g_gx_ns;
 }
 void video_dump_stats(void) {
     fprintf(stderr, "[video] tris %llu: w<=0 %llu, degenerate %llu, culled %llu, off-screen %llu | pixels %llu, alpha-rejected %llu\n",
