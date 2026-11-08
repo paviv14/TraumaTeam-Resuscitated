@@ -62,7 +62,9 @@ void video_fifo(u32 v, int size); void video_flush(void);
 int g_video_on = 1;   // TTPC_NOVIDEO=1 disables the decoder (set in video_init)
 void gx_fifo_write(u32 v, int size) {
     store(v, size);
-    if (g_video_on) video_fifo(v, size);
+    // CP control bit 4 links the CPU FIFO to the GPU. GXBeginDisplayList unlinks it: the writes then only
+    // fill the display list buffer in memory, and the GPU must not execute them until the list is called.
+    if (g_video_on && (r16(0x0C000002) & 0x10)) video_fifo(v, size);
     if (size == 1) { g_bp_opcode = (v == 0x61); return; }
     if (size == 4 && g_bp_opcode) {
         u32 reg = v >> 24;

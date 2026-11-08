@@ -156,6 +156,7 @@ void platform_poll(void) {
             for (int i = 0; i < SDL_NumJoysticks(); i++) pad_open(i);
         }
         if (e.type == SDL_MOUSEMOTION) g_pointer_pad = 0;
+        if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F9 && !e.key.repeat) { void video_capture_request(void); video_capture_request(); }
         if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F11) {
             u32 fs = SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN_DESKTOP;
             SDL_SetWindowFullscreen(g_win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);

@@ -36,3 +36,4 @@ void rt_logfn(CPU *c, u32 addr) {
             addr, c->r[3], c->r[4], R16(0x804860EE), R16(0x804860EC), R8(r13 - 0x51FB), R8(r13 - 0x51FA),
             R16(r13 - 0x51F8), R16(0xCC00100E), R32(r13 - 0x5200));
 }
+

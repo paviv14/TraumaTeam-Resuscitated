@@ -26,6 +26,9 @@ static int EW, EH;                  // EFB size in host pixels
 static u32 *efb_c; static float *efb_z;
 static const char *g_dump_dir; static int g_dump_every = 30; static u64 g_copies;
 static int g_render = 1;
+// Draw log (TTPC_DRAWLOG=frame, or F9 in the window): every draw's pipeline state for two frames.
+long g_dl_from = -2; FILE *g_dlf;
+static long dl_frame(void) { if (g_dl_from == -2) { g_dl_from = getenv("TTPC_DRAWLOG") ? atol(getenv("TTPC_DRAWLOG")) : -1; g_dlf = stderr; } return g_dl_from; }
 static u64 g_perf_draws;   // GPU draw calls since the last title update
 u64 g_video_draws;
 static u64 st_tri, st_w, st_area, st_cull, st_empty, st_px, st_alpha, st_z; static int st_samples;
@@ -370,7 +373,7 @@ static void setup_draw(void) {
         u32 o = bp[0x28 + s / 2] >> ((s & 1) ? 12 : 0);
         g->map = (o >> 6) & 1 ? (int)(o & 7) : -1; g->coord = (o >> 3) & 7;
         int chan = (o >> 7) & 7;
-        g->chan = (chan == 0 || chan == 2 || chan == 4) ? 0 : (chan == 1 || chan == 3 || chan == 5) ? 1 : -1;
+        g->chan = chan == 5 ? 5 : chan == 6 ? 6 : (chan == 0 || chan == 2 || chan == 4) ? 0 : (chan == 1 || chan == 3) ? 1 : -1;   // 5/6: bump alpha
         float K[4], KA[4]; konst_value(s, 0, K); konst_value(s, 1, KA);
         memcpy(g->K, K, 16); g->KA = KA[3];
         u32 ce = bp[0xC0 + 2 * s], ae = bp[0xC1 + 2 * s];
@@ -383,7 +386,25 @@ static void setup_draw(void) {
             g->tsw[k] = (bp[0xF6 + 2 * ts + (k >> 1)] >> (2 * (k & 1))) & 3;
         }
         if (g->map >= 0) used[g->map] = 1;
+        S.indcmd[s] = bp[0x10 + s] & 0x1FFFFF;
     }
+    // indirect texturing state
+    S.nbump = (bp[0x00] >> 16) & 7; if (S.nbump > 4) S.nbump = 4;
+    for (int i = 0; i < 4; i++) {
+        u32 iref = bp[0x27], ss = bp[0x25 + i / 2] >> ((i & 1) * 8);
+        S.is[i][0] = (iref >> (6 * i)) & 7; S.is[i][1] = (iref >> (6 * i + 3)) & 7;
+        S.is[i][2] = ss & 15; S.is[i][3] = (ss >> 4) & 15;
+        if (i < S.nbump) used[S.is[i][0]] = 1;
+    }
+    for (int i = 0; i < 3; i++) {
+        u32 A = bp[0x06 + 3 * i], B = bp[0x07 + 3 * i], C = bp[0x08 + 3 * i];
+        #define SX11(v) ((float)(((int)((v) & 0x7FF) ^ 0x400) - 0x400) / 1024.f)
+        S.im[2 * i][0] = SX11(A); S.im[2 * i][1] = SX11(B); S.im[2 * i][2] = SX11(C);
+        S.im[2 * i + 1][0] = SX11(A >> 11); S.im[2 * i + 1][1] = SX11(B >> 11); S.im[2 * i + 1][2] = SX11(C >> 11);
+        #undef SX11
+        S.im[2 * i][3] = S.im[2 * i + 1][3] = (float)(((A >> 22) & 3) | ((B >> 22) & 3) << 2 | ((C >> 22) & 3) << 4);
+    }
+    for (int n = 0; n < 8; n++) { S.cs[n][0] = (float)((bp[0x30 + 2 * n] & 0xFFFF) + 1); S.cs[n][1] = (float)((bp[0x31 + 2 * n] & 0xFFFF) + 1); }
     for (int m = 0; m < 8; m++) {
         S.tex[m].px = NULL; S.tex[m].e = NULL; S.tex[m].gl_copy = 0;
         if (!used[m]) continue;
@@ -683,6 +704,30 @@ static void efb_copy_to_texture(u32 v) {
 }
 
 static void perf_title(void);
+int texpack_write_png(const char *path, int w, int h, const u8 *rgb);
+void host_mkdir(const char *path);
+static long g_cap_end = -1; static char g_cap_png[256]; static long g_cap_png_at = -1;
+// F9: write the next frame's draw log and a screenshot to captures/ (for bug reports).
+void video_capture_request(void) {
+    if (g_cap_end >= 0) return;
+    dl_frame(); host_mkdir("captures");
+    static int n; char path[256];
+    for (;;) { snprintf(path, sizeof path, "captures/capture_%03d.txt", ++n); FILE *t = fopen(path, "r"); if (!t) break; fclose(t); if (n > 999) return; }
+    FILE *f = fopen(path, "w"); if (!f) return;
+    g_dlf = f; g_dl_from = (long)g_copies + 1; g_cap_end = g_dl_from + 2;
+    snprintf(g_cap_png, sizeof g_cap_png, "captures/capture_%03d.png", n); g_cap_png_at = g_dl_from + 1;
+    fprintf(stderr, "[capture] writing %s\n", path);
+}
+static void capture_frame_end(void) {
+    if (g_cap_png_at >= 0 && (long)g_copies == g_cap_png_at && g_gpu) {
+        u32 src = bp[0x49], wh = bp[0x4A];
+        static u8 *buf; if (!buf) buf = malloc((size_t)640 * 528 * 3 * 64);
+        int W = gpu_read_rgb(src & 0x3FF, (src >> 10) & 0x3FF, (wh & 0x3FF) + 1, ((wh >> 10) & 0x3FF) + 1, buf);
+        if (W) texpack_write_png(g_cap_png, W & 0xFFFF, W >> 16, buf);
+        g_cap_png_at = -1;
+    }
+    if (g_cap_end >= 0 && (long)g_copies >= g_cap_end) { fclose(g_dlf); g_dlf = stderr; g_dl_from = -1; g_cap_end = -1; fprintf(stderr, "[capture] done\n"); }
+}
 static void efb_copy(u32 v) {
     int to_xfb = (v >> 14) & 1, clear = (v >> 11) & 1;
     if (!to_xfb && g_render) efb_copy_to_texture(v);
@@ -691,6 +736,7 @@ static void efb_copy(u32 v) {
             v, bp[0x49], bp[0x4A], (bp[0x4B] & 0xFFFFFF) << 5, bp[0x4D] & 0x3FF, (unsigned long long)g_copies);
     }
     if (to_xfb) {
+        capture_frame_end();
         g_copies++;
         perf_title();
         if (g_render && g_copies % g_dump_every == 0) dump_frame();
@@ -779,6 +825,33 @@ static void collect_tri(const Out *a, const Out *b, const Out *c) {
     if (g_ntris + 3 > 3 * MAX_VERTS) return;
     g_tris[g_ntris++] = *a; g_tris[g_ntris++] = *b; g_tris[g_ntris++] = *c;
 }
+// Lines and points become screen-aligned quads (width / size from BP 0x22 in 1/6 pixel).
+static void offset_px(Out *o, float dx, float dy) {   // move a vertex by (dx, dy) EFB pixels
+    float sx = fabsf(S.vp[0]) > 1e-6f ? S.vp[0] : 320.f, sy = fabsf(S.vp[1]) > 1e-6f ? S.vp[1] : -240.f;
+    o->x += dx / sx * o->w; o->y += dy / sy * o->w;
+}
+static void line_quad(void (*tri)(const Out *, const Out *, const Out *), const Out *a, const Out *b) {
+    float hw = (float)(bp[0x22] & 0xFF) / 6.f * 0.5f; if (hw < 0.5f) hw = 0.5f;
+    float ax, ay, bx, by, z;
+    if (a->w <= 1e-6f || b->w <= 1e-6f) return;
+    to_screen(a, &ax, &ay, &z); to_screen(b, &bx, &by, &z);
+    float dx = bx - ax, dy = by - ay, l = sqrtf(dx * dx + dy * dy); if (l < 1e-6f) { dx = 1; dy = 0; l = 1; }
+    float px = -dy / l * hw, py = dx / l * hw;
+    Out q[4] = { *a, *a, *b, *b };
+    offset_px(&q[0], px, py); offset_px(&q[1], -px, -py); offset_px(&q[2], px, py); offset_px(&q[3], -px, -py);
+    int cull = S.cull; S.cull = 0;
+    tri(&q[0], &q[1], &q[2]); tri(&q[1], &q[3], &q[2]);
+    S.cull = cull;
+}
+static void point_quad(void (*tri)(const Out *, const Out *, const Out *), const Out *a) {
+    float h = (float)((bp[0x22] >> 8) & 0xFF) / 6.f * 0.5f; if (h < 0.5f) h = 0.5f;
+    if (a->w <= 1e-6f) return;
+    Out q[4] = { *a, *a, *a, *a };
+    offset_px(&q[0], -h, -h); offset_px(&q[1], h, -h); offset_px(&q[2], -h, h); offset_px(&q[3], h, h);
+    int cull = S.cull; S.cull = 0;
+    tri(&q[0], &q[1], &q[2]); tri(&q[1], &q[3], &q[2]);
+    S.cull = cull;
+}
 static void draw_prims(int prim, int vat, int n, u32 *p) {
     static Vtx *vin; static Out *vout;
     if (!vin) { vin = malloc(sizeof *vin * MAX_VERTS); vout = malloc(sizeof *vout * MAX_VERTS); g_tris = malloc(sizeof *g_tris * 3 * MAX_VERTS); }
@@ -796,29 +869,36 @@ static void draw_prims(int prim, int vat, int n, u32 *p) {
     case 2: for (int k = 0; k + 2 < n; k += 3) tri(&vout[k], &vout[k + 1], &vout[k + 2]); break;
     case 3: for (int k = 0; k + 2 < n; k++) { if (k & 1) tri(&vout[k + 1], &vout[k], &vout[k + 2]); else tri(&vout[k], &vout[k + 1], &vout[k + 2]); } break;
     case 4: for (int k = 1; k + 1 < n; k++) tri(&vout[0], &vout[k], &vout[k + 1]); break;
-    default: break;   // lines/points: not drawn yet
+    case 5: for (int k = 0; k + 1 < n; k += 2) line_quad(tri, &vout[k], &vout[k + 1]); break;
+    case 6: for (int k = 0; k + 1 < n; k++) line_quad(tri, &vout[k], &vout[k + 1]); break;
+    case 7: for (int k = 0; k < n; k++) point_quad(tri, &vout[k]); break;
+    default: break;
     }
     if (g_gpu && g_ntris) { gpu_draw(&S, g_tris, g_ntris); g_perf_draws++; }
-    static long dl_from = -2; if (dl_from == -2) dl_from = getenv("TTPC_DRAWLOG") ? atol(getenv("TTPC_DRAWLOG")) : -1;
+    long dl_from = dl_frame();
     if (dl_from >= 0 && (long)g_copies >= dl_from && (long)g_copies < dl_from + 2) {
         float X, Y, Z; to_screen(&vout[0], &X, &Y, &Z);
-        fprintf(stderr, "[draw f%llu] prim %d n %d tris %d | nst %d | v0 scr (%.0f,%.0f) z %.3f w %.2f c0 %.2f %.2f %.2f %.2f uv %.3f %.3f | z %X blend %X ac %06X cull %d sc %d,%d-%d,%d\n",
+        fprintf(g_dlf, "[draw f%llu] prim %d n %d tris %d | nst %d | v0 scr (%.0f,%.0f) z %.3f w %.2f c0 %.2f %.2f %.2f %.2f uv %.3f %.3f | z %X blend %X ac %06X cull %d sc %d,%d-%d,%d\n",
             (unsigned long long)g_copies, prim, n, g_ntris / 3, S.nst, X, Y, Z, vout[0].w, vout[0].col[0][0], vout[0].col[0][1], vout[0].col[0][2], vout[0].col[0][3],
             vout[0].uv[0][0], vout[0].uv[0][1], S.zm, S.bm, bp[0xF3], S.cull, S.sx0, S.sy0, S.sx1, S.sy1);
         { u32 m = (u32)vin[0].pnmtx * 4;
-          fprintf(stderr, "    pos %.3f %.3f %.3f pnmtx %d (vcd %08X vat %d %08X) | M %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f | P %.3f %.3f %.3f %.3f %.3f %.3f type %u\n",
+          fprintf(g_dlf, "    pos %.3f %.3f %.3f pnmtx %d (vcd %08X vat %d %08X) | M %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f | P %.3f %.3f %.3f %.3f %.3f %.3f type %u\n",
             vin[0].pos[0], vin[0].pos[1], vin[0].pos[2], vin[0].pnmtx, cp[0x50], vat, cp[0x70 + vat],
             xf_f(m), xf_f(m + 1), xf_f(m + 2), xf_f(m + 3), xf_f(m + 4), xf_f(m + 5), xf_f(m + 6), xf_f(m + 7), xf_f(m + 8), xf_f(m + 9), xf_f(m + 10), xf_f(m + 11),
             xf_f(0x1020), xf_f(0x1021), xf_f(0x1022), xf_f(0x1023), xf_f(0x1024), xf_f(0x1025), xfreg[0x26]); }
         for (int st = 0; st < S.nst; st++) {
             const Stage *g = &S.st[st]; int m = g->map;
-            fprintf(stderr, "    st%d map %d coord %d chan %d C[%d %d %d %d] b%d s%d c%d x%d d%d A[%d %d %d %d] d%d K %.2f %.2f %.2f %.2f KA %.2f",
+            fprintf(g_dlf, "    st%d map %d coord %d chan %d C[%d %d %d %d] b%d s%d c%d x%d d%d A[%d %d %d %d] d%d K %.2f %.2f %.2f %.2f KA %.2f",
                 st, m, g->coord, g->chan, g->csel[0], g->csel[1], g->csel[2], g->csel[3], g->cb, g->csub, g->cclamp, g->cscale, g->cdest,
                 g->asel[0], g->asel[1], g->asel[2], g->asel[3], g->adest, g->K[0], g->K[1], g->K[2], g->K[3], g->KA);
-            if (m >= 0 && S.tex[m].e) fprintf(stderr, " | tex %08X %dx%d fmt %d", S.tex[m].e->addr, S.tex[m].w, S.tex[m].h, (S.tex[m].e->img0 >> 20) & 15);
-            fprintf(stderr, "\n");
+            if (m >= 0 && S.tex[m].e) fprintf(g_dlf, " | tex %08X %dx%d fmt %d", S.tex[m].e->addr, S.tex[m].w, S.tex[m].h, (S.tex[m].e->img0 >> 20) & 15);
+            fprintf(g_dlf, "\n");
         }
-        fprintf(stderr, "    reg PREV %.2f %.2f %.2f %.2f C0 %.2f %.2f %.2f %.2f C1 %.2f %.2f %.2f %.2f\n", S.reg[0][0], S.reg[0][1], S.reg[0][2], S.reg[0][3],
+        fprintf(g_dlf, "    ind: iref %06X ss %06X %06X mtx %06X %06X %06X | %06X %06X %06X | %06X %06X %06X cmd", bp[0x27], bp[0x25], bp[0x26],
+            bp[0x06], bp[0x07], bp[0x08], bp[0x09], bp[0x0A], bp[0x0B], bp[0x0C], bp[0x0D], bp[0x0E]);
+        for (int st = 0; st < S.nst; st++) fprintf(g_dlf, " %06X", bp[0x10 + st] & 0xFFFFFF);
+        fprintf(g_dlf, " | genmode %06X\n", bp[0x00]);
+        fprintf(g_dlf, "    reg PREV %.2f %.2f %.2f %.2f C0 %.2f %.2f %.2f %.2f C1 %.2f %.2f %.2f %.2f\n", S.reg[0][0], S.reg[0][1], S.reg[0][2], S.reg[0][3],
             S.reg[1][0], S.reg[1][1], S.reg[1][2], S.reg[1][3], S.reg[2][0], S.reg[2][1], S.reg[2][2], S.reg[2][3]);
     }
 }
@@ -838,8 +918,8 @@ static u32 parse(u32 p, u32 end, int depth) {
             if (p + 5 > end) break;
             u32 h = V32(p + 1), n = (h >> 16) + 1, a = h & 0xFFFF;
             if (p + 5 + 4 * n > end) break;
-            { static long dl = -2; if (dl == -2) dl = getenv("TTPC_DRAWLOG") ? atol(getenv("TTPC_DRAWLOG")) : -1;
-              if (dl >= 0 && (long)g_copies == dl && a < 0x400) fprintf(stderr, "[xf] write %u words at %03X (first %08X)\n", n, a, V32(p + 5)); }
+            { long dl = dl_frame();
+              if (dl >= 0 && (long)g_copies == dl && a < 0x400) fprintf(g_dlf, "[xf] write %u words at %03X (first %08X)\n", n, a, V32(p + 5)); }
             for (u32 k = 0; k < n; k++) xf_write(a + k, V32(p + 5 + 4 * k));
             p += 5 + 4 * n; continue;
         }
@@ -848,19 +928,25 @@ static u32 parse(u32 p, u32 end, int depth) {
             u32 h = V32(p + 1), idx = h >> 16, len = ((h >> 12) & 15) + 1, a = h & 0xFFF, arr = 12 + ((op >> 3) & 3);
             u32 src = (cp[0xA0 + arr] & 0x3FFFFFFF) + idx * (cp[0xB0 + arr] & 0xFF);
             for (u32 k = 0; k < len; k++) xf_write(a + k, V32(0x80000000u | (src + 4 * k)));
-            static long dl = -2; if (dl == -2) dl = getenv("TTPC_DRAWLOG") ? atol(getenv("TTPC_DRAWLOG")) : -1;
+            long dl = dl_frame();
             if (dl >= 0 && (long)g_copies >= dl && (long)g_copies < dl + 1)
-                fprintf(stderr, "[xfidx] op %02X idx %u len %u addr %03X arr %u base %08X stride %u src %08X first %08X %08X %08X %08X\n",
+                fprintf(g_dlf, "[xfidx] op %02X idx %u len %u addr %03X arr %u base %08X stride %u src %08X first %08X %08X %08X %08X\n",
                         op, idx, len, a, arr, cp[0xA0 + arr], cp[0xB0 + arr], src, V32(0x80000000u | src), V32(0x80000000u | (src + 4)), V32(0x80000000u | (src + 8)), V32(0x80000000u | (src + 12)));
             p += 5; continue;
         }
-        if (op == 0x40) { if (p + 9 > end) break; run_display_list(0x80000000u | (V32(p + 1) & 0x1FFFFFFF), V32(p + 5), depth); p += 9; continue; }
+        if (op == 0x40) { if (p + 9 > end) break;
+            { long dl = dl_frame(); if (dl >= 0 && (long)g_copies >= dl && (long)g_copies < dl + 2) fprintf(g_dlf, "[dlcall] %08X size %u depth %d\n", V32(p + 1), V32(p + 5), depth); }
+            run_display_list(0x80000000u | (V32(p + 1) & 0x1FFFFFFF), V32(p + 5), depth); p += 9; continue; }
         if (op == 0x61) { if (p + 5 > end) break; bp_write(V32(p + 1)); p += 5; continue; }
         if (op >= 0x80 && op < 0xC0) {
             if (p + 3 > end) break;
             int n = V16(p + 1); u32 q = p + 3;
             g_last_op = op; g_last_n = (u32)n; g_last_at = p;
-            // vertices may still be arriving: measure the size with a dry run over a scratch copy
+            // The vertices may still be arriving (the CPU is mid-way through the primitive when an
+            // interrupt poll decodes the FIFO): only draw once all n vertices are there - otherwise the
+            // partial primitive was drawn again at every poll (thousands of times for a 42-vertex circle).
+            { u32 t = q; Vtx tmp; read_vertex(&t, op & 7, &tmp); u32 vsize = t - q;
+              if (q + (u64)vsize * (u32)n > end) { p = s; break; } }
             draw_prims((op >> 3) & 7, op & 7, n, &q);
             if (q > end) { p = s; break; }
             p = q; continue;

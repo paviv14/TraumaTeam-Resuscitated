@@ -101,3 +101,5 @@ void texpack_dump(u64 hash, int w, int h, int fmt, const u32 *px) {
     if (stbi_write_png(p, w, h, 4, rgba, w * 4)) g_texpack_dumped++;
     free(rgba);
 }
+
+int texpack_write_png(const char *path, int w, int h, const u8 *rgb) { return stbi_write_png(path, w, h, 3, rgb, w * 3); }

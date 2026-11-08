@@ -32,6 +32,11 @@ typedef struct {
     u32 zm, bm;
     int sx0, sy0, sx1, sy1, cull;
     float vp[6];
+    // indirect texturing
+    int nbump, is[4][4];          // per indirect stage: texmap, texcoord, scale s/t shift
+    u32 indcmd[16];               // BP 0x10+n per TEV stage
+    float im[6][4];               // 3 matrices x 2 rows: m0 m1 m2 (real values), scale exponent
+    float cs[8][2];               // texcoord scale (texels) per texcoord, from BP 0x30-0x3F
 } Setup;
 
 // GPU backend (gl.c). Coordinates are EFB pixels at 1x (640x528); the backend applies its scale.

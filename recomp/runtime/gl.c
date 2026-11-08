@@ -50,7 +50,7 @@ int g_gpu;
     X(void, GetProgramInfoLog, (GLuint, GLsizei, GLsizei *, GLchar *)) X(void, UseProgram, (GLuint)) \
     X(void, BindAttribLocation, (GLuint, GLuint, const GLchar *)) \
     X(GLint, GetUniformLocation, (GLuint, const GLchar *)) X(void, Uniform1i, (GLint, GLint)) \
-    X(void, Uniform1iv, (GLint, GLsizei, const GLint *)) X(void, Uniform4iv, (GLint, GLsizei, const GLint *)) \
+    X(void, Uniform1iv, (GLint, GLsizei, const GLint *)) X(void, Uniform2fv, (GLint, GLsizei, const GLfloat *)) X(void, Uniform4iv, (GLint, GLsizei, const GLint *)) \
     X(void, Uniform4fv, (GLint, GLsizei, const GLfloat *)) X(void, Uniform4f, (GLint, GLfloat, GLfloat, GLfloat, GLfloat)) X(void, Uniform1fv, (GLint, GLsizei, const GLfloat *))
 
 #define X(ret, name, args) static ret (APIENTRY *gl##name##_) args;
@@ -90,6 +90,7 @@ static const char *FS =
     "uniform vec4 uK[16]; uniform float uKA[16];\n"
     "uniform vec4 uReg[4];\n"
     "uniform ivec4 uAT; uniform int uAOp;  // alpha test: comp0, ref0, comp1, ref1; logic op\n"
+    "uniform int uNbump; uniform ivec4 uIS[4]; uniform int uIndCmd[16]; uniform vec4 uIM[6]; uniform vec2 uCS[8]; uniform vec2 uMS[8];\n"
     "uniform sampler2D uTex0, uTex1, uTex2, uTex3, uTex4, uTex5, uTex6, uTex7;\n"
     "out vec4 oColor;\n"
     "vec3 tc(int i) { if (i == 0) return vT0; if (i == 1) return vT1; if (i == 2) return vT2; if (i == 3) return vT3;\n"
@@ -107,16 +108,44 @@ static const char *FS =
     "  if (sel < 4) return R[sel].a; if (sel == 4) return T.a; if (sel == 5) return C.a; if (sel == 6) return KA; return 0.0; }\n"
     "bool cmpf(int c, int v, int r) { if (c == 0) return false; if (c == 1) return v < r; if (c == 2) return v == r;\n"
     "  if (c == 3) return v <= r; if (c == 4) return v > r; if (c == 5) return v != r; if (c == 6) return v >= r; return true; }\n"
+    "float wrapc(float x, int w) { if (w == 0) return x; if (w >= 6) return 0.0; float n = float(256 >> (w - 1)); return x - n * floor(x / n); }\n"
+    "vec2 coordt(int i) { vec3 t = tc(i); return t.xy / (t.z == 0.0 ? 1.0 : t.z) * uCS[i]; }   // in texels\n"
     "void main() {\n"
     "  const float bias_t[4] = float[4](0.0, 0.5, -0.5, 0.0); const float scale_t[4] = float[4](1.0, 2.0, 4.0, 0.5);\n"
     "  for (int i = 0; i < 4; i++) R[i] = uReg[i];\n"
     "  vec4 outc = vec4(0.0);\n"
+    "  ivec3 ind[4];\n"
+    "  for (int i = 0; i < 4; i++) { ind[i] = ivec3(0); if (i < uNbump) {\n"
+    "    ivec4 is = uIS[i]; vec2 u = coordt(is.y) / vec2(float(1 << is.z), float(1 << is.w));\n"
+    "    vec4 c = samp(is.x, u / uMS[is.x]); ind[i] = ivec3(round(c.a * 255.0), round(c.b * 255.0), round(c.g * 255.0)); } }\n"
+    "  vec2 prev = vec2(0.0);\n"
     "  for (int s = 0; s < uNst; s++) {\n"
     "    ivec4 st = uSt[s];\n"
-    "    vec4 T = vec4(1.0);\n"
-    "    if (st.z >= 0) { vec3 t = tc(st.w); T = sw(samp(st.z, t.xy / (t.z == 0.0 ? 1.0 : t.z)), uTsw[s]); }\n"
+    "    vec4 T = vec4(1.0); int cmd = uIndCmd[s]; int bump = 0;\n"
+    "    if (cmd == 0) {\n"
+    "      if (st.z >= 0) { vec3 t = tc(st.w); T = sw(samp(st.z, t.xy / (t.z == 0.0 ? 1.0 : t.z)), uTsw[s]); prev = coordt(st.w); }\n"
+    "    } else {   // indirect: offset this stage's texel coordinate by a matrix times the indirect texture value\n"
+    "      int bt = cmd & 3, fmt = (cmd >> 2) & 3, bi = (cmd >> 4) & 7, bs = (cmd >> 7) & 3, mid = (cmd >> 9) & 15;\n"
+    "      int wS = (cmd >> 13) & 7, wT = (cmd >> 16) & 7, addp = (cmd >> 20) & 1;\n"
+    "      ivec3 ic = ind[bt];\n"
+    "      if (bs != 0) { int v = ic[bs - 1]; bump = fmt == 0 ? (v & 0xF8) : fmt == 1 ? ((v << 3) & 0xF8) : fmt == 2 ? ((v << 4) & 0xF0) : ((v << 5) & 0xE0); }\n"
+    "      int msk = fmt == 0 ? 255 : fmt == 1 ? 31 : fmt == 2 ? 15 : 7; ic &= ivec3(msk);\n"
+    "      int bv = fmt == 0 ? -128 : 1;\n"
+    "      vec3 v = vec3(ic) + vec3((bi & 1) != 0 ? bv : 0, (bi & 2) != 0 ? bv : 0, (bi & 4) != 0 ? bv : 0);\n"
+    "      vec2 uv = st.w >= 0 ? coordt(st.w) : vec2(0.0);\n"
+    "      vec2 off = vec2(0.0); int mi = (mid & 3) - 1;\n"
+    "      if (mi >= 0) { float sc = exp2(uIM[2 * mi].w - 17.0);\n"
+    "        if ((mid >> 2) == 0) off = vec2(dot(uIM[2 * mi].xyz, v), dot(uIM[2 * mi + 1].xyz, v)) * sc;\n"
+    "        else if ((mid >> 2) == 1) off = uv * v.x / 256.0 * sc;\n"
+    "        else if ((mid >> 2) == 2) off = uv * v.y / 256.0 * sc; }\n"
+    "      vec2 tcd = vec2(wrapc(uv.x, wS), wrapc(uv.y, wT)) + off;\n"
+    "      if (addp != 0) tcd += prev;\n"
+    "      prev = tcd;\n"
+    "      if (st.z >= 0) T = sw(samp(st.z, tcd / uMS[st.z]), uTsw[s]);\n"
+    "    }\n"
     "    vec4 C = vec4(0.0);\n"
     "    if (uChan[s] == 0) C = sw(vC0, uRsw[s]); else if (uChan[s] == 1) C = sw(vC1, uRsw[s]);\n"
+    "    else if (uChan[s] == 5) C = vec4(float(bump) / 255.0); else if (uChan[s] == 6) C = vec4(float(bump | (bump >> 5)) / 255.0);\n"
     "    ivec4 cs = uCsel[s]; ivec4 co = uCop[s];\n"
     "    vec3 a = cin(cs.x, T, C, uK[s]), b = cin(cs.y, T, C, uK[s]), c = cin(cs.z, T, C, uK[s]), d = cin(cs.w, T, C, uK[s]);\n"
     "    vec3 l = a * (1.0 - c) + b * c;\n"
@@ -168,7 +197,7 @@ typedef struct { u32 dst; GLuint tex, fbo; int w, h, tw, th; } CopyTex;
 static CopyTex g_ct[64]; static int g_nct;
 static GLuint g_cprog, g_cvao; static GLint g_cu_rect, g_cu_fmt, g_cu_inten;
 static int g_scale = 1, g_W, g_H;
-static struct { GLint nst, csel, asel, cop, aop, st, rsw, tsw, chan, k, ka, reg, at, aop2; } U;
+static struct { GLint nst, csel, asel, cop, aop, st, rsw, tsw, chan, k, ka, reg, at, aop2, nbump, is, indcmd, im, cs, ms; } U;
 
 static GLuint compile(GLenum type, const char *src) {
     GLuint s = glCreateShader_(type); glShaderSource_(s, 1, &src, NULL); glCompileShader_(s);
@@ -196,6 +225,7 @@ int gpu_init(int scale) {
     LOC(nst, "uNst"); LOC(csel, "uCsel"); LOC(asel, "uAsel"); LOC(cop, "uCop"); LOC(aop, "uAop"); LOC(st, "uSt");
     LOC(rsw, "uRsw"); LOC(tsw, "uTsw"); LOC(chan, "uChan"); LOC(k, "uK"); LOC(ka, "uKA"); LOC(reg, "uReg");
     LOC(at, "uAT"); LOC(aop2, "uAOp");
+    LOC(nbump, "uNbump"); LOC(is, "uIS"); LOC(indcmd, "uIndCmd"); LOC(im, "uIM"); LOC(cs, "uCS"); LOC(ms, "uMS");
     for (int i = 0; i < 8; i++) { char n[8]; snprintf(n, sizeof n, "uTex%d", i); glUniform1i_(glGetUniformLocation_(g_prog, n), i); }
 
     glGenVertexArrays_(1, &g_vao); glBindVertexArray_(g_vao);
@@ -287,6 +317,17 @@ static void set_state(const Setup *s) {
     glUniform4iv_(U.st, n, st); glUniform4iv_(U.rsw, n, rsw); glUniform4iv_(U.tsw, n, tsw); glUniform1iv_(U.chan, n, chan);
     glUniform4fv_(U.k, n, k); glUniform1fv_(U.ka, n, ka); glUniform4fv_(U.reg, 4, reg);
     GLint at[4] = { s->ac_c0, s->ac_r0, s->ac_c1, s->ac_r1 }; glUniform4iv_(U.at, 1, at); glUniform1i_(U.aop2, s->ac_op);
+    {   // indirect texturing
+        GLint ic[16], is[16]; GLfloat ms[16];
+        int any = 0; for (int i = 0; i < n; i++) { ic[i] = (GLint)s->indcmd[i]; any |= ic[i]; }
+        glUniform1iv_(U.indcmd, n, ic);
+        if (any) {
+            for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) is[4 * i + j] = s->is[i][j];
+            for (int m = 0; m < 8; m++) { ms[2 * m] = s->tex[m].w > 0 ? (float)s->tex[m].w : 1.f; ms[2 * m + 1] = s->tex[m].h > 0 ? (float)s->tex[m].h : 1.f; }
+            glUniform1i_(U.nbump, s->nbump); glUniform4iv_(U.is, 4, is); glUniform4fv_(U.im, 6, &s->im[0][0]);
+            glUniform2fv_(U.cs, 8, &s->cs[0][0]); glUniform2fv_(U.ms, 8, ms);
+        } else glUniform1i_(U.nbump, 0);
+    }
     for (int m = 0; m < 8; m++) if (s->tex[m].e || s->tex[m].gl_copy) bind_texture(m, &s->tex[m]);
 
     // depth
@@ -438,50 +479,8 @@ int gpu_read_rgba(int x0, int y0, int w, int h, u32 *out) {
 }
 
 #else   // no SDL: no GPU backend
-// Copy an EFB rectangle (1x EFB pixels) into the GPU texture registered for `dst`.
-// ow/oh: the destination texture size in texels (after optional halving).
-int gpu_copy_to_texture(u32 dst, int x0, int y0, int w, int h, int ow, int oh, int fmt, int inten) {
-    dst &= 0x1FFFFFFF;
-    CopyTex *c = NULL;
-    for (int k = 0; k < g_nct; k++) if (g_ct[k].dst == dst) { c = &g_ct[k]; break; }
-    if (!c) { c = &g_ct[g_nct < 64 ? g_nct++ : (int)(dst >> 5) & 63]; memset(c, 0, sizeof *c); c->dst = dst; }
-    int tw = ow * g_scale, th = oh * g_scale;
-    if (!c->tex) { glGenTextures_(1, &c->tex); glGenFramebuffers_(1, &c->fbo); }
-    if (c->tw != tw || c->th != th) {
-        glBindTexture_(GL_TEXTURE_2D, c->tex);
-        glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
-        glBindFramebuffer_(GL_FRAMEBUFFER, c->fbo);
-        glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, c->tex, 0);
-        c->tw = tw; c->th = th;
-    }
-    c->w = ow; c->h = oh;
-    glBindFramebuffer_(GL_FRAMEBUFFER, c->fbo);
-    glViewport_(0, 0, tw, th);
-    glDisable_(GL_SCISSOR_TEST); glDisable_(GL_BLEND); glDisable_(GL_DEPTH_TEST);
-    glColorMask_(1, 1, 1, 1); glDepthMask_(GL_FALSE);
-    glUseProgram_(g_cprog); glBindVertexArray_(g_cvao);
-    glActiveTexture_(GL_TEXTURE0); glBindTexture_(GL_TEXTURE_2D, g_color);
-    glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);   // half-scale copies average texels
-    // source rect in EFB texture coordinates (the EFB is stored bottom-up): top row maps to v = 0 here
-    float u0 = (float)x0 / 640.f, uw = (float)w / 640.f;
-    float v0 = (float)(528 - y0) / 528.f, vh = -(float)h / 528.f;
-    glUniform4f_(g_cu_rect, u0, v0, uw, vh);
-    glUniform1i_(g_cu_fmt, fmt); glUniform1i_(g_cu_inten, inten);
-    glDrawArrays_(GL_TRIANGLE_STRIP, 0, 4);
-    glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    // back to normal drawing
-    glUseProgram_(g_prog); glBindVertexArray_(g_vao);
-    glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo); glViewport_(0, 0, g_W, g_H);
-    glEnable_(GL_SCISSOR_TEST);
-    return 1;
-}
-// GPU texture holding an EFB copy made to `addr` with size w x h, or 0.
-u32 gpu_copy_lookup(u32 addr, int w, int h) {
-    addr &= 0x1FFFFFFF;
-    for (int k = 0; k < g_nct; k++) if (g_ct[k].dst == addr && g_ct[k].w == w && g_ct[k].h == h) return g_ct[k].tex;
-    return 0;
-}
-
+int gpu_copy_to_texture(u32 dst, int x0, int y0, int w, int h, int ow, int oh, int fmt, int inten) { (void)dst; (void)x0; (void)y0; (void)w; (void)h; (void)ow; (void)oh; (void)fmt; (void)inten; return 0; }
+u32 gpu_copy_lookup(u32 addr, int w, int h) { (void)addr; (void)w; (void)h; return 0; }
 int gpu_read_rgba(int x0, int y0, int w, int h, u32 *out) { (void)x0; (void)y0; (void)w; (void)h; (void)out; return 0; }
 int gpu_init(int scale) { (void)scale; return 0; }
 void gpu_draw(const Setup *s, const Out *v, int n) { (void)s; (void)v; (void)n; }

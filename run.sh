@@ -2,7 +2,7 @@
 # run.sh <seconds> <frames-dir> <frame-every> <pointer x,y> <input script> [extra env...]
 # Starts from a copy of usersave/ (the user's NAND save) and records frames + log.
 cd ~/TraumaTeamRE
-rm -rf nand "$2" && cp -r usersave nand && mkdir -p "$2"
+rm -rf nand "$2" && cp -r ${TTPC_SAVEDIR:-usersave} nand && mkdir -p "$2"
 shift 0
 env TTPC_FRAMES="$2" TTPC_FRAME_EVERY="$3" TTPC_POINTER="$4" TTPC_INPUT="$5" TTPC_DISC=/root/disc/DATA "${@:6}" \
     timeout $(( $1 + 120 )) ${TTPC_BIN:-./build-hl/ttpc} ~/tt/orig/main.dol "$1" > "$2.log" 2>&1

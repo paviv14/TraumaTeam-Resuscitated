@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <time.h>
 
 enum {
     BTN_LEFT = 0x0001, BTN_RIGHT = 0x0002, BTN_DOWN = 0x0004, BTN_UP = 0x0008, BTN_PLUS = 0x0010,
@@ -73,9 +74,40 @@ static void parse_script(void) {
     }
 }
 
+// Input recording / replay. A recording lists, per controller read where anything changed:
+//   <read> <buttons hex> <pointer x> <pointer y> <pointer valid> <stick x> <stick y>
+// TTPC_RECORD=file writes one (Play.bat records every session into recordings/);
+// TTPC_REPLAY=file plays one back instead of the live mouse/keyboard/pad.
+typedef struct { u64 read; u32 hold; float px, py, sx, sy; int valid; } RecEv;
+static FILE *g_rec; static RecEv g_rep_state; static RecEv *g_rep; static int g_nrep, g_irep;
+static void rec_init(void) {
+    const char *r = getenv("TTPC_RECORD");
+    char auto_name[128];
+    if (r && !strcmp(r, "auto")) {   // recordings/session_YYYYMMDD_HHMMSS.txt
+        void host_mkdir(const char *path); host_mkdir("recordings");
+        time_t t = time(NULL); struct tm *tm = localtime(&t);
+        strftime(auto_name, sizeof auto_name, "recordings/session_%Y%m%d_%H%M%S.txt", tm); r = auto_name;
+    }
+    if (r && *r) { g_rec = fopen(r, "w"); if (g_rec) { fprintf(g_rec, "# Trauma Team input recording v1\n"); fprintf(stderr, "[input] recording to %s\n", r); } }
+    const char *p = getenv("TTPC_REPLAY");
+    if (p && *p) {
+        FILE *f = fopen(p, "r"); char line[256]; int cap = 0;
+        while (f && fgets(line, sizeof line, f)) {
+            if (line[0] == '#') continue;
+            RecEv e; unsigned long long rd; unsigned h;
+            if (sscanf(line, "%llu %x %f %f %d %f %f", &rd, &h, &e.px, &e.py, &e.valid, &e.sx, &e.sy) != 7) continue;
+            e.read = rd; e.hold = h;
+            if (g_nrep == cap) { cap = cap ? cap * 2 : 4096; g_rep = realloc(g_rep, sizeof *g_rep * cap); }
+            g_rep[g_nrep++] = e;
+        }
+        if (f) fclose(f);
+        fprintf(stderr, "[input] replaying %s (%d events)\n", p, g_nrep);
+    }
+}
+
 // Called once per retrace (after platform_poll): latch this frame's buttons and pointer.
 void wiimote_frame(void) {
-    static int init; if (!init) { init = 1; parse_script(); }
+    static int init; if (!init) { init = 1; parse_script(); rec_init(); }
     g_vi++;
     const Input *in = &g_input;
     u32 h = 0;
@@ -127,6 +159,22 @@ void f_8025F830(CPU *c) {
         h |= ev->mask;
         if (ev->stick) { g_sx = ev->sx; g_sy = ev->sy; }
         if (ev->has_ptr) { g_ppx = g_px; g_ppy = g_py; g_px = ev->px; g_py = ev->py; g_point_valid = 1; }
+    }
+    if (g_nrep) {   // replay: the recorded state at or before this read
+        while (g_irep < g_nrep && g_rep[g_irep].read <= g_reads) {
+            const RecEv *e = &g_rep[g_irep++];
+            g_rep_state = *e;
+        }
+        h = g_rep_state.hold; g_ppx = g_px; g_ppy = g_py;
+        g_px = g_rep_state.px; g_py = g_rep_state.py; g_point_valid = g_rep_state.valid; g_sx = g_rep_state.sx; g_sy = g_rep_state.sy;
+    }
+    if (g_rec) {
+        static u32 lh = 0xFFFFFFFF; static float lx, ly, lsx, lsy; static int lv;
+        if (h != lh || g_px != lx || g_py != ly || g_sx != lsx || g_sy != lsy || g_point_valid != lv) {
+            fprintf(g_rec, "%llu %X %.4f %.4f %d %.3f %.3f\n", (unsigned long long)g_reads, h, g_px, g_py, g_point_valid, g_sx, g_sy);
+            lh = h; lx = g_px; ly = g_py; lsx = g_sx; lsy = g_sy; lv = g_point_valid;
+            fflush(g_rec);
+        }
     }
     g_prev = g_hold; g_hold = h; g_trig = g_hold & ~g_prev; g_rel = g_prev & ~g_hold;
     if (dbg && (g_trig || g_reads % 600 == 0)) fprintf(stderr, "[pad] read %llu vi %llu hold %04X trig %04X\n", (unsigned long long)g_reads, (unsigned long long)g_vi, g_hold, g_trig);

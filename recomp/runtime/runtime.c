@@ -9,6 +9,7 @@
 u8 *g_mem;
 u8 g_lc[0x4000];
 static CPU g_cpu;
+CPU *g_cpu_dbg = &g_cpu;   // for debug instrumentation outside runtime.c
 u32 g_trace[256]; u32 g_trace_pos;
 u8 g_seen[0x340000 / 4];
 static void report_seen(void) {
@@ -301,6 +302,7 @@ static const char *find_disc(const char *exe) {
 }
 
 int main(int argc, char **argv) {
+    setvbuf(stderr, NULL, _IONBF, 0);   // the log survives a crash or a forced exit (Windows buffers redirected stderr)
     const char *disc = find_disc(argv[0]);
     char dolpath[1200];
     if (argc > 1) snprintf(dolpath, sizeof dolpath, "%s", argv[1]);
