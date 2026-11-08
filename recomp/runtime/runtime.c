@@ -45,8 +45,14 @@ static void on_segv(int sig) {
     static const char m[] = "CRASH (host stack overflow or bad pointer)\n"; write(2, m, sizeof m - 1);
     dump(&g_cpu); dump_trace(); report_seen(); rt_dump_threads(); _exit(3);
 }
-void gx_dump(void);
-static void on_alarm(int sig) { (void)sig; fprintf(stderr, "TIMEOUT\n"); dump_trace(); report_seen(); rt_dump_threads(); gx_dump(); _exit(2); }
+void gx_dump(void); void video_dump_stats(void);
+u32 g_wp = 1;
+void rt_wp_hit(u32 a, u32 v, int size) {
+    static int n; if (n++ > 20) return;
+    fprintf(stderr, "[wp] store%d %08X <- %08X | lr %08X\n", size * 8, a, v, g_cpu.lr); dump_trace();
+}
+__attribute__((constructor)) static void wp_init(void) { const char *e = getenv("TTPC_WP"); if (e) g_wp = (u32)strtoul(e, 0, 16) & ~3u; }
+static void on_alarm(int sig) { (void)sig; fprintf(stderr, "TIMEOUT\n"); dump_trace(); report_seen(); rt_dump_threads(); gx_dump(); video_dump_stats(); _exit(2); }
 static jmp_buf g_halt;
 static int g_trace_mmio = 1;
 static unsigned g_mmio_count;
@@ -261,7 +267,9 @@ int main(int argc, char **argv) {
     if (g_mem == MAP_FAILED) { perror("mmap"); return 1; }
     load_dol(argv[1]);
     setup_lowmem();
-    void disc_init(const char *root);
+    void disc_init(const char *root); void video_init(void); void ios_init(void);
+    ios_init();
+    video_init();
     disc_init(getenv("TTPC_DISC") ? getenv("TTPC_DISC") : "disc/DATA");
     CPU *c = &g_cpu;
     signal(SIGALRM, on_alarm); alarm(argc > 2 ? atoi(argv[2]) : 15);

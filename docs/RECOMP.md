@@ -105,6 +105,24 @@ Fixed along the way: dtk-missed switch tables (any data pointer into a function 
   (2) **input** - inject a virtual Wii Remote at the WPAD level so the game can be advanced past
   "press A"; (3) AX mixing for sound.
 
+## Status - milestone 6: renders the boot sequence to the main menu
+
+* **Software renderer** (`runtime/video.c`): decodes the GX FIFO (CP/XF/BP registers, vertex formats,
+  display lists), transforms, rasterizes with the TEV combiner, all GameCube/Wii texture formats incl.
+  palettes and CMPR, alpha test, blending, depth; EFB->XFB copies are saved as frames
+  (`TTPC_FRAMES=<dir> TTPC_FRAME_EVERY=N`). `TTPC_SCALE=S` renders at S x internal resolution
+  (6 = 3840x2880): geometry is sharp, the 2D art is still the original textures.
+* Runs natively through: wrist-strap safety screens -> NAND/save-data check (creates `save.dat`,
+  `banner.bin`) -> Atlus logo -> title -> **NEW GAME / CONTINUE main menu** with animated background.
+  2,422 functions.
+* Fix that got here: IOS replies now arrive after a short latency (200 us). The game stores an async
+  NAND call's return value *after* issuing it; a reply delivered before the call returned was
+  overwritten, so a missing save file looked like a failed close (-8) -> "error accessing Wii system
+  memory" screen.
+* Debug aid: build with `-DTTPC_WATCHPOINT`, run with `TTPC_WP=<addr>` to log every store to a word.
+* Next: real-time GPU backend (window, 4K, widescreen, texture filtering), input (virtual Wii Remote),
+  AX mixing, near-plane clipping/lighting.
+
 ## Roadmap to "opening sequence -> main menu in 4K"
 
 | # | Piece | Approach |

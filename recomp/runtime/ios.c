@@ -13,6 +13,8 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <time.h>
 
 #define IOS_ENOENT (-106)
 #define IOS_EEXIST (-105)
@@ -23,10 +25,22 @@ typedef struct { char path[64]; FILE *fp; int is_file; } Fd;
 static Fd g_fd[32];
 static int g_log = 1;
 static u32 g_cur_req, g_cur_cb;
-typedef struct { u32 req, cb; s32 result; } Pending;
+typedef struct { u32 req, cb; s32 result; u64 due; } Pending;
+// IOS answers take time on hardware (the request goes to the ARM coprocessor). Code relies on that: it
+// stores the async call's return value *after* issuing the request, so a reply delivered before the call
+// returns gets overwritten (seen as the save-data check failing). Replies wait at least this long.
+#define IOS_LATENCY_NS 200000ull
+static u64 now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (u64)t.tv_sec * 1000000000ull + t.tv_nsec; }
 static Pending g_pend[64]; static int g_npend;   // request being handled (for requests completed later)
 static void complete_later(u32 req, u32 cb, s32 result);
 const char *g_nand_root = "nand";  // host folder standing in for the Wii's internal storage
+
+// The system menu creates a title's data directory before the game first runs; games assume it exists.
+void ios_init(void) {
+    char p[512];
+    snprintf(p, sizeof p, "%s/title/00010000/53554f45/data/x", g_nand_root);
+    for (char *q = p + 1; *q; q++) if (*q == '/') { *q = 0; mkdir(p, 0755); *q = '/'; }
+}
 
 static void rd_str(u32 a, char *out, int max) {
     int k = 0; for (; k < max - 1; k++) { out[k] = (char)R8(a + k); if (!out[k]) break; } out[k] = 0;
@@ -77,26 +91,50 @@ static s32 dev_ioctl(Fd *d, u32 cmd, u32 in, u32 inl, u32 out, u32 outl) {
     if (!strcmp(d->path, "/dev/di")) return di_ioctl(cmd, in, inl, out, outl);
     if (!strcmp(d->path, "/dev/stm/eventhook")) return IOS_PENDING;  // fires only on reset/power button
     if (!strcmp(d->path, "/dev/fs")) {
-        char p[128], hp[512];
+        // ISFS ioctls: 1 Format, 2 GetStats, 3 CreateDir, 5 SetAttr, 6 GetAttr, 7 Delete, 8 Rename,
+        // 9 CreateFile, 13 Shutdown (4 ReadDir and 12 GetUsage are ioctlv). Create* input: owner u32,
+        // group u16, path[64] at +6, then owner/group/other permissions and attributes.
+        char p[128], p2[128], hp[512], hp2[512];
+        struct stat st;
         switch (cmd) {
-        case 0x03: case 0x04: /* CreateDir / SetAttr */
-            if (cmd == 0x03) { rd_str(in + 6, p, sizeof p); nand_host_path(p, hp, sizeof hp); mkdirs(hp); mkdir(hp, 0755); }
+        case 0x02:   /* GetStats: block size, free/used clusters, bad, reserved, free/used inodes */
+            if (outl >= 0x1C) { W32(out, 0x4000); W32(out + 4, 0x4000); W32(out + 8, 0x100); W32(out + 12, 0);
+                                W32(out + 16, 0); W32(out + 20, 0x4000); W32(out + 24, 0x100); }
             return 0;
-        case 0x06: /* GetAttr: out = owner u32, group u16, path[64], perms... */ {
-            rd_str(in, p, sizeof p); nand_host_path(p, hp, sizeof hp);
-            struct stat st; if (stat(hp, &st)) return IOS_ENOENT;
-            zero(out, outl); return 0;
-        }
-        case 0x07: /* Delete */ rd_str(in, p, sizeof p); nand_host_path(p, hp, sizeof hp); remove(hp); return 0;
-        case 0x08: /* Rename */ return 0;
-        case 0x09: /* CreateFile: owner u32, group u16, path[64] at +6, perms... */ {
+        case 0x03:   /* CreateDir */
             rd_str(in + 6, p, sizeof p); nand_host_path(p, hp, sizeof hp);
-            struct stat st; if (!stat(hp, &st)) return IOS_EEXIST;
-            mkdirs(hp); FILE *f = fopen(hp, "wb"); if (f) fclose(f); return 0;
+            if (!stat(hp, &st)) return IOS_EEXIST;
+            mkdirs(hp); mkdir(hp, 0755); return 0;
+        case 0x05: return 0;   /* SetAttr */
+        case 0x06:   /* GetAttr -> owner u32, group u16, path[64], owner/group/other perms, attributes */
+            rd_str(in, p, sizeof p); nand_host_path(p, hp, sizeof hp);
+            if (stat(hp, &st)) return IOS_ENOENT;
+            zero(out, outl);
+            if (outl >= 0x4A) { W32(out, 0x1000); W16(out + 4, 0x0001); wr_buf(out + 6, p, strlen(p));
+                                W8(out + 0x46, 3); W8(out + 0x47, 3); W8(out + 0x48, 1); }
+            return 0;
+        case 0x07:   /* Delete */
+            rd_str(in, p, sizeof p); nand_host_path(p, hp, sizeof hp);
+            if (stat(hp, &st)) return IOS_ENOENT;
+            remove(hp); return 0;
+        case 0x08:   /* Rename: old path[64], new path[64] */
+            rd_str(in, p, sizeof p); rd_str(in + 64, p2, sizeof p2);
+            nand_host_path(p, hp, sizeof hp); nand_host_path(p2, hp2, sizeof hp2);
+            if (stat(hp, &st)) return IOS_ENOENT;
+            mkdirs(hp2); rename(hp, hp2); return 0;
+        case 0x09:   /* CreateFile */
+            rd_str(in + 6, p, sizeof p); nand_host_path(p, hp, sizeof hp);
+            if (!stat(hp, &st)) return IOS_EEXIST;
+            mkdirs(hp); { FILE *f = fopen(hp, "wb"); if (f) fclose(f); } return 0;
+        case 0x0D: return 0;   /* Shutdown */
         }
-        case 0x0B: /* GetUsage */ zero(out, outl); return 0;
-        case 0x0C: /* Shutdown */ return 0;
-        }
+        if (g_log) fprintf(stderr, "[ios] /dev/fs ioctl 0x%X not handled\n", cmd);
+    }
+    // ioctl on an open NAND file: 11 = GetFileStats -> size u32, position u32
+    if (d->is_file && cmd == 0x0B) {
+        long pos = ftell(d->fp); fseek(d->fp, 0, SEEK_END); long size = ftell(d->fp); fseek(d->fp, pos, SEEK_SET);
+        if (outl >= 8) { W32(out, (u32)size); W32(out + 4, (u32)pos); }
+        return 0;
     }
     if (outl) zero(out, outl);
     return 0;
@@ -166,7 +204,24 @@ static s32 dev_ioctlv(Fd *d, u32 cmd, u32 nin, u32 nio, u32 vec) {
     }
     if (!strcmp(d->path, "/dev/di")) { fprintf(stderr, "[di] ioctlv 0x%X\n", cmd); return 1; }
     if (!strncmp(d->path, "/dev/usb/oh1/57e/305", 20)) return bt_ioctlv(cmd, nin, nio, v);
-    if (!strcmp(d->path, "/dev/fs") && cmd == 0x0C /* GetUsage */) { W32(v[1][0], 0); W32(v[2][0], 0); return 0; }
+    if (!strcmp(d->path, "/dev/fs") && (cmd == 0x04 || cmd == 0x0C)) {
+        char p[128], hp[512]; rd_str(v[0][0], p, sizeof p); nand_host_path(p, hp, sizeof hp);
+        DIR *dir = opendir(hp);
+        if (!dir) return IOS_ENOENT;
+        u32 count = 0, files = 0; char names[4096]; u32 nl = 0;
+        for (struct dirent *e; (e = readdir(dir)); ) {
+            if (e->d_name[0] == '.') continue;
+            count++; files++;
+            size_t L = strlen(e->d_name) + 1;
+            if (nl + L < sizeof names) { memcpy(names + nl, e->d_name, L); nl += L; }
+        }
+        closedir(dir);
+        if (cmd == 0x0C) { W32(v[nin][0], files * 2); W32(v[nin + 1][0], count + 1); return 0; }   // GetUsage
+        if (nin == 1) { W32(v[nin][0], count); return 0; }                                          // ReadDir: count
+        u32 maxn = R32(v[1][0]); if (count > maxn) count = maxn;                                    // ReadDir: names
+        wr_buf(v[nin][0], names, nl < v[nin][1] ? nl : v[nin][1]); W32(v[nin + 1][0], count);
+        return 0;
+    }
     for (u32 k = nin; k < nin + nio && k < 16; k++) if (v[k][1] < 0x10000) zero(v[k][0], v[k][1]);
     return 0;
 }
@@ -200,6 +255,7 @@ static s32 handle(u32 req) {
 
 void ios_service(CPU *c) {
     while (g_npend) {
+        if (now_ns() < g_pend[0].due) { g_irq_pending = 1; return; }   // not answered yet: poll again
         Pending p = g_pend[0];
         memmove(g_pend, g_pend + 1, --g_npend * sizeof *g_pend);
         CPU save = *c;
@@ -217,7 +273,7 @@ void ios_service(CPU *c) {
 
 static void complete_later(u32 req, u32 cb, s32 result) {
     if (!cb) return;   // a synchronous caller would be asleep: not used for pending requests here
-    if (g_npend < 64) { g_pend[g_npend++] = (Pending){ req, cb, result }; g_irq_pending = 1; }
+    if (g_npend < 64) { g_pend[g_npend++] = (Pending){ req, cb, result, now_ns() + IOS_LATENCY_NS }; g_irq_pending = 1; }
 }
 
 // __ios_Ipc2(request, callback): callback == 0 means synchronous (return the result).
@@ -230,7 +286,7 @@ void f_8024D110(CPU *c) {
     W32(req + 4, (u32)r);
     if (!cb) { c->r[3] = (u32)r; return; }
     if (g_npend == 64) { fprintf(stderr, "[ios] too many pending replies\n"); return; }
-    g_pend[g_npend++] = (Pending){ req, cb, r };
+    g_pend[g_npend++] = (Pending){ req, cb, r, now_ns() + IOS_LATENCY_NS };
     g_irq_pending = 1;
     c->r[3] = 0;
 }

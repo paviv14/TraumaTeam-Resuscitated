@@ -44,6 +44,7 @@ void rt_badaddr(u32 a, int write);
 #define BSWAP16(x) __builtin_bswap16(x)
 #define BSWAP32(x) __builtin_bswap32(x)
 #define LIKELY(x) __builtin_expect(!!(x), 1)
+#define UNLIKELY(x) __builtin_expect(!!(x), 0)
 
 static inline u8 *HOSTPTR(u32 a, int write) {
     if ((a >> 28) == 0xE) return g_lc + (a & 0x3FFF);
@@ -57,9 +58,15 @@ static inline int IS_MMIO(u32 a) { u32 p = a & 0x1FFFFFFF; return (p - 0x0C00000
 static inline u32 R32(u32 a) { if (IS_MMIO(a)) return mmio_read(a & 0x1FFFFFFF, 4); u32 v; memcpy(&v, HOSTPTR(a, 0), 4); return BSWAP32(v); }
 static inline u32 R16(u32 a) { if (IS_MMIO(a)) return mmio_read(a & 0x1FFFFFFF, 2); u16 v; memcpy(&v, HOSTPTR(a, 0), 2); return BSWAP16(v); }
 static inline u32 R8(u32 a)  { if (IS_MMIO(a)) return mmio_read(a & 0x1FFFFFFF, 1); return *HOSTPTR(a, 0); }
-static inline void W32(u32 a, u32 v) { if (IS_MMIO(a)) { mmio_write(a & 0x1FFFFFFF, v, 4); return; } v = BSWAP32(v); memcpy(HOSTPTR(a, 1), &v, 4); }
-static inline void W16(u32 a, u16 v) { if (IS_MMIO(a)) { mmio_write(a & 0x1FFFFFFF, v, 2); return; } v = BSWAP16(v); memcpy(HOSTPTR(a, 1), &v, 2); }
-static inline void W8(u32 a, u8 v)   { if (IS_MMIO(a)) { mmio_write(a & 0x1FFFFFFF, v, 1); return; } *HOSTPTR(a, 1) = v; }
+#ifdef TTPC_WATCHPOINT   // debug builds: report every store to one address (TTPC_WP=<hex>)
+extern u32 g_wp; void rt_wp_hit(u32 a, u32 v, int size);
+#define WPCHK(a, v, n) if (UNLIKELY(((a) & ~3u) == g_wp)) rt_wp_hit(a, v, n);
+#else
+#define WPCHK(a, v, n)
+#endif
+static inline void W32(u32 a, u32 v) { WPCHK(a, v, 4) if (IS_MMIO(a)) { mmio_write(a & 0x1FFFFFFF, v, 4); return; } v = BSWAP32(v); memcpy(HOSTPTR(a, 1), &v, 4); }
+static inline void W16(u32 a, u16 v) { WPCHK(a, v, 2) if (IS_MMIO(a)) { mmio_write(a & 0x1FFFFFFF, v, 2); return; } v = BSWAP16(v); memcpy(HOSTPTR(a, 1), &v, 2); }
+static inline void W8(u32 a, u8 v)   { WPCHK(a, v, 1) if (IS_MMIO(a)) { mmio_write(a & 0x1FFFFFFF, v, 1); return; } *HOSTPTR(a, 1) = v; }
 static inline float RF32(u32 a) { u32 v = R32(a); float f; memcpy(&f, &v, 4); return f; }
 static inline void WF32(u32 a, float f) { u32 v; memcpy(&v, &f, 4); W32(a, v); }
 static inline double RF64(u32 a) { u64 v = ((u64)R32(a) << 32) | R32(a + 4); double d; memcpy(&d, &v, 8); return d; }

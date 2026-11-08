@@ -58,8 +58,11 @@ static void store(u32 v, int size) {
     mmio_poke(0x0C003014, (wp & 0x08000000u) | a);
 }
 
+void video_fifo(u32 v, int size); void video_flush(void);
+int g_video_on = 1;   // TTPC_NOVIDEO=1 disables the decoder (set in video_init)
 void gx_fifo_write(u32 v, int size) {
     store(v, size);
+    if (g_video_on) video_fifo(v, size);
     if (size == 1) { g_bp_opcode = (v == 0x61); return; }
     if (size == 4 && g_bp_opcode) {
         u32 reg = v >> 24;
@@ -87,6 +90,7 @@ static s64 bp_position(void) {
 
 // Advance the GPU read position; called from rt_poll and when the breakpoint changes.
 void gx_tick(void) {
+    if (g_video_on) video_flush();                             // decode/render what has been submitted
     if (g_bp_hit) return;                                      // GPU halted at the breakpoint
     u64 target = g_written;
     int stop = 0;

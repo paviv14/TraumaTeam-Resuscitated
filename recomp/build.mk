@@ -2,7 +2,7 @@
 CC ?= gcc
 CFLAGS ?= -O1 -g0 -fno-strict-aliasing -fwrapv -w -Iruntime
 GEN := $(wildcard ../generated/*.c)
-OBJ := $(patsubst ../generated/%.c,../build/%.o,$(GEN)) ../build/runtime.o ../build/hle.o ../build/ios.o ../build/threads.o ../build/dsp.o ../build/gx.o ../build/disc.o
+OBJ := $(patsubst ../generated/%.c,../build/%.o,$(GEN)) ../build/runtime.o ../build/hle.o ../build/ios.o ../build/threads.o ../build/dsp.o ../build/gx.o ../build/disc.o ../build/video.o
 
 ../build/ttpc: $(OBJ)
 	$(CC) -o $@ $^ -lm
@@ -38,3 +38,7 @@ OBJ := $(patsubst ../generated/%.c,../build/%.o,$(GEN)) ../build/runtime.o ../bu
 ../build/disc.o: runtime/disc.c runtime/cpu.h
 	@mkdir -p ../build
 	$(CC) -O2 -g -Wall -Wno-unused -c $< -o $@
+
+../build/video.o: runtime/video.c runtime/cpu.h
+	@mkdir -p ../build
+	$(CC) -O2 -g -Wall -Wno-unused -Wno-misleading-indentation -c $< -o $@
