@@ -573,8 +573,73 @@ static void dump_frame(void) {
     }
     fclose(f);
 }
+// EFB -> texture copy: the copied rectangle (optionally 2x2 box-downscaled) is encoded into guest
+// memory in the requested texture format, block-tiled like real texture data, so later draws (and the
+// CPU) see it exactly as on hardware. BP 0x52 fields: bit 9 half scale, bit 15 intensity (YUV luma),
+// bits 3-6 target format (fmt = tp >> 1 | (tp & 1) << 3). BP 0x4B dest >> 5, BP 0x4D row stride / 32.
+static void efb_copy_to_texture(u32 v) {
+    u32 src = bp[0x49], wh = bp[0x4A];
+    int x0 = src & 0x3FF, y0 = (src >> 10) & 0x3FF, w = (wh & 0x3FF) + 1, h = ((wh >> 10) & 0x3FF) + 1;
+    int tp = (v >> 3) & 15, fmt = (tp >> 1) | ((tp & 1) << 3), half = (v >> 9) & 1, inten = (v >> 15) & 1;
+    u32 dst = (bp[0x4B] & 0xFFFFFF) << 5, stride = (bp[0x4D] & 0x3FF) << 5;
+    if (x0 + w > 640) w = 640 - x0; if (y0 + h > 528) h = 528 - y0;
+    if (w <= 0 || h <= 0) return;
+    static u32 pix[640 * 528];                    // copied rect at native resolution, R<<24|G<<16|B<<8|A
+    if (g_gpu) { if (!gpu_read_rgba(x0, y0, w, h, pix)) return; }
+    else for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+        long sx = (long)(x0 + x) * g_scale, sy = (long)(y0 + y) * g_scale;
+        pix[y * w + x] = efb_c[sy * EW + sx];
+    }
+    int ow = half ? w / 2 : w, oh = half ? h / 2 : h;
+    if (half) for (int y = 0; y < oh; y++) for (int x = 0; x < ow; x++) {
+        u32 a = pix[2 * y * w + 2 * x], b = pix[2 * y * w + 2 * x + 1], c = pix[(2 * y + 1) * w + 2 * x], d = pix[(2 * y + 1) * w + 2 * x + 1];
+        u32 o = 0;
+        for (int sh = 0; sh < 32; sh += 8) o |= ((((a >> sh) & 255) + ((b >> sh) & 255) + ((c >> sh) & 255) + ((d >> sh) & 255) + 2) / 4) << sh;
+        pix[y * ow + x] = o;   // in place: row y reads rows 2y, 2y+1 >= y, already-written cells are behind
+    }
+    int bw, bh, bsz;
+    switch (fmt) {
+    case 0: case 2: bw = 8; bh = fmt == 0 ? 8 : 4; bsz = 32; break;      // 4-bit
+    case 1: case 7: case 8: case 9: case 10: bw = 8; bh = 4; bsz = 32; break;   // 8-bit
+    case 6: bw = 4; bh = 4; bsz = 64; break;                            // RGBA8 (two 32-byte halves)
+    default: bw = 4; bh = 4; bsz = 32; break;                           // 16-bit
+    }
+    int bpr = (ow + bw - 1) / bw;
+    if (!stride) stride = (u32)bpr * bsz;
+    u32 base = dst & 0x1FFFFFFF;
+    for (int y = 0; y < oh; y++) for (int x = 0; x < ow; x++) {
+        u32 c = pix[y * ow + x];
+        u32 R = c >> 24, G = (c >> 16) & 255, B = (c >> 8) & 255, A = c & 255;
+        u32 Y = (u32)(0.257f * R + 0.504f * G + 0.098f * B + 16.5f); if (Y > 255) Y = 255;
+        u32 I = inten ? Y : R;
+        int bx = x / bw, by = y / bh, ix = x % bw, iy = y % bh;
+        u32 blk = base + (u32)by * stride + (u32)bx * bsz;
+        if (blk + bsz > 0x01800000u && !(blk >= 0x10000000u && blk + bsz <= 0x14000000u)) continue;
+        u8 *m = g_mem + blk;
+        switch (fmt) {
+        case 0: { u8 *q = m + iy * 4 + ix / 2; u8 n = (u8)(I >> 4); *q = (ix & 1) ? (*q & 0xF0) | n : (*q & 0x0F) | (n << 4); break; }
+        case 2: { u8 *q = m + iy * 8 + ix; *q = (u8)((A >> 4) << 4 | (I >> 4)); break; }   // IA4 (8 wide)
+        case 1: case 8: m[iy * 8 + ix] = (u8)I; break;
+        case 7: m[iy * 8 + ix] = (u8)A; break;
+        case 9: m[iy * 8 + ix] = (u8)G; break;
+        case 10: m[iy * 8 + ix] = (u8)B; break;
+        case 3: m[(iy * 4 + ix) * 2] = (u8)A; m[(iy * 4 + ix) * 2 + 1] = (u8)I; break;   // IA8
+        case 11: m[(iy * 4 + ix) * 2] = (u8)G; m[(iy * 4 + ix) * 2 + 1] = (u8)R; break;  // RG8
+        case 12: m[(iy * 4 + ix) * 2] = (u8)B; m[(iy * 4 + ix) * 2 + 1] = (u8)G; break;  // GB8
+        case 4: { u16 p = (u16)((R >> 3) << 11 | (G >> 2) << 5 | (B >> 3)); m[(iy * 4 + ix) * 2] = p >> 8; m[(iy * 4 + ix) * 2 + 1] = (u8)p; break; }
+        case 5: { u16 p = A >= 0xE0 ? (u16)(0x8000 | (R >> 3) << 10 | (G >> 3) << 5 | (B >> 3))
+                                    : (u16)((A >> 5) << 12 | (R >> 4) << 8 | (G >> 4) << 4 | (B >> 4));
+                  m[(iy * 4 + ix) * 2] = p >> 8; m[(iy * 4 + ix) * 2 + 1] = (u8)p; break; }
+        case 6: { int o = (iy * 4 + ix) * 2; m[o] = (u8)A; m[o + 1] = (u8)R; m[32 + o] = (u8)G; m[32 + o + 1] = (u8)B; break; }
+        default: break;
+        }
+    }
+    static int logged; if (!logged++) fprintf(stderr, "[video] EFB->texture copies active (first: %dx%d -> %dx%d fmt %d at %08X)\n", w, h, ow, oh, fmt, dst);
+}
+
 static void efb_copy(u32 v) {
     int to_xfb = (v >> 14) & 1, clear = (v >> 11) & 1;
+    if (!to_xfb && g_render) efb_copy_to_texture(v);
     if (!to_xfb && getenv("TTPC_COPYLOG")) {
         static int n; if (n++ < 40) fprintf(stderr, "[efbcopy] tex copy v=%06X src %06X wh %06X dst %08X stride %u frame %llu\n",
             v, bp[0x49], bp[0x4A], (bp[0x4B] & 0xFFFFFF) << 5, bp[0x4D] & 0x3FF, (unsigned long long)g_copies);
@@ -679,6 +744,28 @@ static void draw_prims(int prim, int vat, int n, u32 *p) {
     default: break;   // lines/points: not drawn yet
     }
     if (g_gpu && g_ntris) gpu_draw(&S, g_tris, g_ntris);
+    static long dl_from = -2; if (dl_from == -2) dl_from = getenv("TTPC_DRAWLOG") ? atol(getenv("TTPC_DRAWLOG")) : -1;
+    if (dl_from >= 0 && (long)g_copies >= dl_from && (long)g_copies < dl_from + 2) {
+        float X, Y, Z; to_screen(&vout[0], &X, &Y, &Z);
+        fprintf(stderr, "[draw f%llu] prim %d n %d tris %d | nst %d | v0 scr (%.0f,%.0f) z %.3f w %.2f c0 %.2f %.2f %.2f %.2f uv %.3f %.3f | z %X blend %X ac %06X cull %d sc %d,%d-%d,%d\n",
+            (unsigned long long)g_copies, prim, n, g_ntris / 3, S.nst, X, Y, Z, vout[0].w, vout[0].col[0][0], vout[0].col[0][1], vout[0].col[0][2], vout[0].col[0][3],
+            vout[0].uv[0][0], vout[0].uv[0][1], S.zm, S.bm, bp[0xF3], S.cull, S.sx0, S.sy0, S.sx1, S.sy1);
+        { u32 m = (u32)vin[0].pnmtx * 4;
+          fprintf(stderr, "    pos %.3f %.3f %.3f pnmtx %d (vcd %08X vat %d %08X) | M %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f / %.3f %.3f %.3f %.3f | P %.3f %.3f %.3f %.3f %.3f %.3f type %u\n",
+            vin[0].pos[0], vin[0].pos[1], vin[0].pos[2], vin[0].pnmtx, cp[0x50], vat, cp[0x70 + vat],
+            xf_f(m), xf_f(m + 1), xf_f(m + 2), xf_f(m + 3), xf_f(m + 4), xf_f(m + 5), xf_f(m + 6), xf_f(m + 7), xf_f(m + 8), xf_f(m + 9), xf_f(m + 10), xf_f(m + 11),
+            xf_f(0x1020), xf_f(0x1021), xf_f(0x1022), xf_f(0x1023), xf_f(0x1024), xf_f(0x1025), xfreg[0x26]); }
+        for (int st = 0; st < S.nst; st++) {
+            const Stage *g = &S.st[st]; int m = g->map;
+            fprintf(stderr, "    st%d map %d coord %d chan %d C[%d %d %d %d] b%d s%d c%d x%d d%d A[%d %d %d %d] d%d K %.2f %.2f %.2f %.2f KA %.2f",
+                st, m, g->coord, g->chan, g->csel[0], g->csel[1], g->csel[2], g->csel[3], g->cb, g->csub, g->cclamp, g->cscale, g->cdest,
+                g->asel[0], g->asel[1], g->asel[2], g->asel[3], g->adest, g->K[0], g->K[1], g->K[2], g->K[3], g->KA);
+            if (m >= 0 && S.tex[m].e) fprintf(stderr, " | tex %08X %dx%d fmt %d", S.tex[m].e->addr, S.tex[m].w, S.tex[m].h, (S.tex[m].e->img0 >> 20) & 15);
+            fprintf(stderr, "\n");
+        }
+        fprintf(stderr, "    reg PREV %.2f %.2f %.2f %.2f C0 %.2f %.2f %.2f %.2f C1 %.2f %.2f %.2f %.2f\n", S.reg[0][0], S.reg[0][1], S.reg[0][2], S.reg[0][3],
+            S.reg[1][0], S.reg[1][1], S.reg[1][2], S.reg[1][3], S.reg[2][0], S.reg[2][1], S.reg[2][2], S.reg[2][3]);
+    }
 }
 
 // Parse commands from guest memory [p, end). Returns bytes consumed (stops at an incomplete command).
@@ -695,6 +782,8 @@ static u32 parse(u32 p, u32 end, int depth) {
             if (p + 5 > end) break;
             u32 h = V32(p + 1), n = (h >> 16) + 1, a = h & 0xFFFF;
             if (p + 5 + 4 * n > end) break;
+            { static long dl = -2; if (dl == -2) dl = getenv("TTPC_DRAWLOG") ? atol(getenv("TTPC_DRAWLOG")) : -1;
+              if (dl >= 0 && (long)g_copies == dl && a < 0x400) fprintf(stderr, "[xf] write %u words at %03X (first %08X)\n", n, a, V32(p + 5)); }
             for (u32 k = 0; k < n; k++) xf_write(a + k, V32(p + 5 + 4 * k));
             p += 5 + 4 * n; continue;
         }
@@ -703,6 +792,10 @@ static u32 parse(u32 p, u32 end, int depth) {
             u32 h = V32(p + 1), idx = h >> 16, len = ((h >> 12) & 15) + 1, a = h & 0xFFF, arr = 12 + ((op >> 3) & 3);
             u32 src = (cp[0xA0 + arr] & 0x3FFFFFFF) + idx * (cp[0xB0 + arr] & 0xFF);
             for (u32 k = 0; k < len; k++) xf_write(a + k, V32(0x80000000u | (src + 4 * k)));
+            static long dl = -2; if (dl == -2) dl = getenv("TTPC_DRAWLOG") ? atol(getenv("TTPC_DRAWLOG")) : -1;
+            if (dl >= 0 && (long)g_copies >= dl && (long)g_copies < dl + 1)
+                fprintf(stderr, "[xfidx] op %02X idx %u len %u addr %03X arr %u base %08X stride %u src %08X first %08X %08X %08X %08X\n",
+                        op, idx, len, a, arr, cp[0xA0 + arr], cp[0xB0 + arr], src, V32(0x80000000u | src), V32(0x80000000u | (src + 4)), V32(0x80000000u | (src + 8)), V32(0x80000000u | (src + 12)));
             p += 5; continue;
         }
         if (op == 0x40) { if (p + 9 > end) break; run_display_list(0x80000000u | (V32(p + 1) & 0x1FFFFFFF), V32(p + 5), depth); p += 9; continue; }

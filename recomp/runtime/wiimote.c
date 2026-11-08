@@ -79,7 +79,7 @@ void wiimote_frame(void) {
     g_prev = g_hold; g_hold = h;
     g_trig = g_hold & ~g_prev; g_rel = g_prev & ~g_hold;
     g_ppx = g_px; g_ppy = g_py;
-    if (g_window_open) {
+    if (g_window_open && !getenv("TTPC_POINTER")) {
         g_px = in->mouse_x * 2.f - 1.f; g_py = in->mouse_y * 2.f - 1.f;
         g_point_valid = in->mouse_in && fabsf(g_px) <= 1.05f && fabsf(g_py) <= 1.05f;
     } else {   // headless: aim at TTPC_POINTER="x,y" (-1..1), default the centre

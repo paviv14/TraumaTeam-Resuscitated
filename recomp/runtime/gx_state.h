@@ -38,5 +38,6 @@ int  gpu_init(int scale);                       // after the window's GL context
 void gpu_draw(const Setup *s, const Out *tris, int nverts);   // triangle list, already culled
 void gpu_clear(int x0, int y0, int w, int h, u32 rgba, float z, int color, int alpha, int depth);
 void gpu_present(int x0, int y0, int w, int h);  // EFB rect -> window, then swap
+int  gpu_read_rgba(int x0, int y0, int w, int h, u32 *out);  // native-res R<<24|G<<16|B<<8|A, top row first
 int  gpu_read_rgb(int x0, int y0, int w, int h, u8 *out);   // for frame dumps (top row first)
 extern int g_gpu;

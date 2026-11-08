@@ -322,7 +322,27 @@ int gpu_read_rgb(int x0, int y0, int w, int h, u8 *out) {
     return W | H << 16;
 }
 
+int gpu_read_rgba(int x0, int y0, int w, int h, u32 *out) {
+    int W = w * g_scale, H = h * g_scale;
+    static u8 *tmp; static size_t cap;
+    size_t need = (size_t)W * H * 4; if (cap < need) { free(tmp); tmp = malloc(need); cap = need; }
+    glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_fbo);
+    glReadPixels_(x0 * g_scale, (528 - y0 - h) * g_scale, W, H, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+    glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo);
+    int s = g_scale, n = s * s;
+    for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {   // box-filter down to native resolution
+        u32 acc[4] = { 0, 0, 0, 0 };
+        for (int dy = 0; dy < s; dy++) for (int dx = 0; dx < s; dx++) {
+            const u8 *p = tmp + ((size_t)(H - 1 - (y * s + dy)) * W + x * s + dx) * 4;
+            for (int k = 0; k < 4; k++) acc[k] += p[k];
+        }
+        out[y * w + x] = (acc[0] / n) << 24 | (acc[1] / n) << 16 | (acc[2] / n) << 8 | (acc[3] / n);
+    }
+    return 1;
+}
+
 #else   // no SDL: no GPU backend
+int gpu_read_rgba(int x0, int y0, int w, int h, u32 *out) { (void)x0; (void)y0; (void)w; (void)h; (void)out; return 0; }
 int gpu_init(int scale) { (void)scale; return 0; }
 void gpu_draw(const Setup *s, const Out *v, int n) { (void)s; (void)v; (void)n; }
 void gpu_clear(int x0, int y0, int w, int h, u32 c, float z, int color, int alpha, int depth) { (void)x0; (void)y0; (void)w; (void)h; (void)c; (void)z; (void)color; (void)alpha; (void)depth; }

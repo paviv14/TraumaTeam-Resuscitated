@@ -42,12 +42,18 @@ static void on_crash(void) {
     dump(&g_cpu); dump_trace(); report_seen(); rt_dump_threads();
 }
 void gx_dump(void); void video_dump_stats(void);
-u32 g_wp = 1;
+u32 g_wp = 0xFFFFFFFFu, g_wp_len = 0;   // TTPC_WP=<phys addr>[,<len>]
 void rt_wp_hit(u32 a, u32 v, int size) {
-    static int n; if (n++ > 20) return;
-    fprintf(stderr, "[wp] store%d %08X <- %08X | lr %08X\n", size * 8, a, v, g_cpu.lr); dump_trace();
+    static u64 t0, after; static int init;
+    if (!init) { init = 1; t0 = host_now_ns(); after = getenv("TTPC_WP_AFTER") ? (u64)atoi(getenv("TTPC_WP_AFTER")) * 1000000000ull : 0; }
+    if (host_now_ns() - t0 < after) return;
+    static int n; if (n++ > 3000) return;
+    fprintf(stderr, "[wp] store%d %08X <- %08X | lr %08X fn %08X\n", size * 8, a, v, g_cpu.lr, g_trace[(g_trace_pos - 1) & 255]);
 }
-__attribute__((constructor)) static void wp_init(void) { const char *e = getenv("TTPC_WP"); if (e) g_wp = (u32)strtoul(e, 0, 16) & ~3u; }
+__attribute__((constructor)) static void wp_init(void) {
+    const char *e = getenv("TTPC_WP"); if (!e) return;
+    char *q; g_wp = (u32)strtoul(e, &q, 16) & 0x1FFFFFFFu; g_wp_len = *q == ',' ? (u32)strtoul(q + 1, 0, 16) : 4;
+}
 static void on_timeout(void) { fprintf(stderr, "TIMEOUT\n"); dump_trace(); report_seen(); rt_dump_threads(); gx_dump(); video_dump_stats(); fflush(stderr); if (getenv("TTPC_GMON")) exit(2); _Exit(2); }
 static int g_trace_mmio = 1;
 static unsigned g_mmio_count;
@@ -112,7 +118,23 @@ u32 rt_mfspr(CPU *c, int spr) {
     case 268: case 269: return rt_mftb(c, spr);
     }
     if (spr >= 912 && spr <= 919) return c->gqr[spr - 912];
+    if (spr == 920) return c->spr[920] & ~0x0F000000u;   // HID2: DMA queue length always 0 (DMAs are instant)
     return c->spr[spr & 1023];
+}
+// Locked-cache DMA (DMAU = SPR 922, DMAL = SPR 923). Writing DMAL with the trigger bit moves
+// (LEN_U << 2 | LEN_L) 32-byte lines (0 = 128) between main memory and the 16 KB locked cache;
+// bit 4 (LD) = load into the cache, else store to memory. NW4R G3D computes its matrices in the
+// locked cache and stores them this way - without it, every model is drawn with zero matrices.
+static void lc_dma(CPU *c, u32 dmal) {
+    u32 dmau = c->spr[922];
+    u32 mem = dmau & 0xFFFFFFE0u, lc = dmal & 0xFFFFFFE0u;
+    u32 lines = ((dmau & 0x1F) << 2) | ((dmal >> 2) & 3); if (!lines) lines = 128;
+    int load = (dmal >> 4) & 1;
+    for (u32 k = 0; k < lines * 32; k += 4) {
+        u8 *l = g_lc + ((lc + k) & 0x3FFF);
+        if (load) { u32 v = R32(mem + k); l[0] = v >> 24; l[1] = v >> 16; l[2] = v >> 8; l[3] = v; }
+        else W32(mem + k, (u32)l[0] << 24 | (u32)l[1] << 16 | (u32)l[2] << 8 | l[3]);
+    }
 }
 void rt_mtspr(CPU *c, int spr, u32 v) {
     switch (spr) {
@@ -122,6 +144,7 @@ void rt_mtspr(CPU *c, int spr, u32 v) {
     case 22: rt_set_dec(v); return;
     }
     if (spr >= 912 && spr <= 919) { c->gqr[spr - 912] = v; return; }
+    if (spr == 923) { if (v & 2) lc_dma(c, v); c->spr[923] = v & ~2u; return; }   // trigger bit clears when done
     c->spr[spr & 1023] = v;
 }
 u32 rt_mftb(CPU *c, int which) {

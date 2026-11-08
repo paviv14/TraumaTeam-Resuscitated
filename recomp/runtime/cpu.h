@@ -59,8 +59,8 @@ static inline u32 R32(u32 a) { if (IS_MMIO(a)) return mmio_read(a & 0x1FFFFFFF, 
 static inline u32 R16(u32 a) { if (IS_MMIO(a)) return mmio_read(a & 0x1FFFFFFF, 2); u16 v; memcpy(&v, HOSTPTR(a, 0), 2); return BSWAP16(v); }
 static inline u32 R8(u32 a)  { if (IS_MMIO(a)) return mmio_read(a & 0x1FFFFFFF, 1); return *HOSTPTR(a, 0); }
 #ifdef TTPC_WATCHPOINT   // debug builds: report every store to one address (TTPC_WP=<hex>)
-extern u32 g_wp; void rt_wp_hit(u32 a, u32 v, int size);
-#define WPCHK(a, v, n) if (UNLIKELY(((a) & ~3u) == g_wp)) rt_wp_hit(a, v, n);
+extern u32 g_wp, g_wp_len; void rt_wp_hit(u32 a, u32 v, int size);
+#define WPCHK(a, v, n) if (UNLIKELY((((a) & 0x1FFFFFFFu) - g_wp) < g_wp_len)) rt_wp_hit(a, v, n);
 #else
 #define WPCHK(a, v, n)
 #endif
