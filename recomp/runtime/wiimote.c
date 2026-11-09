@@ -19,7 +19,8 @@
 //   1, 2 = 1/2 buttons, +/- (or P/M) = Plus/Minus, Esc/H = Home
 // Game controller (platform.c): left stick = Nunchuk stick, right stick = pointer (RB recentres),
 //   A = A, B / RT = B, LT = Z, LB = C, D-pad, X/Y = 1/2, Start/Back = +/-, Guide = Home
-// Push the Remote toward the screen (endoscope etc.): mouse wheel up / R / Tab, or the right-stick click.
+// Push the Remote toward the screen (endoscope etc.): mouse wheel up / R / Tab, or the right-stick click;
+// pull it back: mouse wheel down / V.
 //
 // TTPC_INPUT scripts presses for headless tests: "600+10:A;900+5:A,B;1200+60:right"
 //   = from the game's 600th controller read (~ game frame) hold A for 10 reads, etc. Names: A B 1 2 plus minus home up down left right C Z.
@@ -36,7 +37,7 @@ enum {
     BTN_LEFT = 0x0001, BTN_RIGHT = 0x0002, BTN_DOWN = 0x0004, BTN_UP = 0x0008, BTN_PLUS = 0x0010,
     BTN_2 = 0x0100, BTN_1 = 0x0200, BTN_B = 0x0400, BTN_A = 0x0800, BTN_MINUS = 0x1000,
     BTN_Z = 0x2000, BTN_C = 0x4000, BTN_HOME = 0x8000,
-    PUSH_FLAG = 0x40000000,   // internal: the push gesture (not a KPAD button bit)
+    PUSH_FLAG = 0x40000000, PULL_FLAG = 0x20000000,   // internal: push / pull gestures (not KPAD button bits)
 };
 
 static u32 g_hold, g_prev, g_trig, g_rel, g_host_hold;
@@ -51,7 +52,7 @@ static ScriptEv g_script[4096]; static int g_nscript;
 static u32 name_mask(const char *s, int n) {
     static const struct { const char *n; u32 m; } t[] = {
         {"A",BTN_A},{"B",BTN_B},{"1",BTN_1},{"2",BTN_2},{"plus",BTN_PLUS},{"minus",BTN_MINUS},{"home",BTN_HOME},
-        {"up",BTN_UP},{"down",BTN_DOWN},{"left",BTN_LEFT},{"right",BTN_RIGHT},{"C",BTN_C},{"Z",BTN_Z},{"push",PUSH_FLAG} };
+        {"up",BTN_UP},{"down",BTN_DOWN},{"left",BTN_LEFT},{"right",BTN_RIGHT},{"C",BTN_C},{"Z",BTN_Z},{"push",PUSH_FLAG},{"pull",PULL_FLAG} };
     for (unsigned k = 0; k < sizeof t / sizeof *t; k++) if ((int)strlen(t[k].n) == n && !strncmp(s, t[k].n, n)) return t[k].m;
     fprintf(stderr, "[wiimote] unknown button '%.*s' in TTPC_INPUT\n", n, s);
     return 0;
@@ -121,6 +122,7 @@ void wiimote_frame(void) {
     if (in->home) h |= BTN_HOME;   if (in->one) h |= BTN_1;   if (in->two) h |= BTN_2;
     if (in->c) h |= BTN_C;         if (in->z) h |= BTN_Z;
     if (in->push) h |= PUSH_FLAG;
+    if (in->pull) h |= PULL_FLAG;
     g_host_hold = h;
     g_ppx = g_px; g_ppy = g_py;
     if (g_window_open && !getenv("TTPC_POINTER")) {
@@ -139,23 +141,23 @@ void wiimote_frame(void) {
     }
 }
 
-// "Push" (thrust the Remote toward the screen, e.g. to advance the endoscope while holding A+B):
-// a short motion played over ~15 reads - accelerate forward, coast, brake - seen by the game both in
-// the accelerometer (z = the Remote's pointing axis) and as the sensor-bar distance shrinking.
-static float g_dist = 1.5f, g_dist_prev = 1.5f; static int g_push_t = -1;
-static void push_motion(int pushing, float *acc_z) {
-    static const int LEN = 15;
-    if (g_push_t < 0 && pushing) g_push_t = 0;
-    *acc_z = 0.f;
+// "Push" / "pull" (move the Remote toward / away from the screen, e.g. the endoscope while holding A+B):
+// a steady motion while the input is held - the sensor-bar distance changes smoothly and the
+// accelerometer shows a gentle thrust along z (the Remote's pointing axis). No braking spike and no
+// drifting back afterwards: both read as moving the other way. The distance resets only once A and B
+// are both released (out of the gesture).
+static float g_dist = 1.5f, g_dist_prev = 1.5f;
+static void push_motion(int dir, u32 hold, float *acc_z) {
+    static float v;   // current speed in m per read, eased toward the target
+    float target = dir * 0.008f;
+    v += (target - v) * 0.35f;
+    if (fabsf(v) < 1e-5f) v = 0;
     g_dist_prev = g_dist;
-    if (g_push_t >= 0) {
-        int t = g_push_t++;
-        if (t < 5) *acc_z = -1.5f; else if (t >= 10) *acc_z = 1.5f;      // KPAD acc reads the opposite of the motion
-        float v = t < 5 ? (t + 1) / 5.f : t < 10 ? 1.f : (LEN - t - 1) / 5.f;   // 0..1 speed profile
-        g_dist -= v * 0.012f;
-        if (g_push_t >= LEN) g_push_t = pushing ? 0 : -1;               // held: keep pushing
-    } else if (g_dist < 1.5f) { g_dist += 0.01f; if (g_dist > 1.5f) g_dist = 1.5f; }   // drift back to rest
-    if (g_dist < 0.6f) g_dist = 0.6f;
+    g_dist -= v;
+    if (g_dist < 0.5f) g_dist = 0.5f; if (g_dist > 2.5f) g_dist = 2.5f;
+    *acc_z = -(target - v) * 60.f - v * 20.f;   // KPAD acc reads opposite to the motion; small and smooth
+    if (*acc_z > 0.6f) *acc_z = 0.6f; if (*acc_z < -0.6f) *acc_z = -0.6f;
+    if (!dir && !(hold & (BTN_A | BTN_B)) && v == 0) g_dist = g_dist_prev = 1.5f;
 }
 
 static void wf(u32 a, float f) { u32 v; memcpy(&v, &f, 4); W32(a, v); }
@@ -198,7 +200,7 @@ void f_8025F830(CPU *c) {
             fflush(g_rec);
         }
     }
-    float acc_z; push_motion((h & PUSH_FLAG) != 0, &acc_z); h &= ~PUSH_FLAG;
+    float acc_z; push_motion((h & PUSH_FLAG) ? 1 : (h & PULL_FLAG) ? -1 : 0, h, &acc_z); h &= ~(PUSH_FLAG | PULL_FLAG);
     g_prev = g_hold; g_hold = h; g_trig = g_hold & ~g_prev; g_rel = g_prev & ~g_hold;
     if (dbg && (g_trig || g_reads % 600 == 0)) fprintf(stderr, "[pad] read %llu vi %llu hold %04X trig %04X\n", (unsigned long long)g_reads, (unsigned long long)g_vi, g_hold, g_trig);
     for (u32 k = 0; k < 0xB0; k += 4) W32(buf + k, 0);
