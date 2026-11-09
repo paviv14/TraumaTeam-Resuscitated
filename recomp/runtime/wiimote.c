@@ -19,6 +19,7 @@
 //   1, 2 = 1/2 buttons, +/- (or P/M) = Plus/Minus, Esc/H = Home
 // Game controller (platform.c): left stick = Nunchuk stick, right stick = pointer (RB recentres),
 //   A = A, B / RT = B, LT = Z, LB = C, D-pad, X/Y = 1/2, Start/Back = +/-, Guide = Home
+// Push the Remote toward the screen (endoscope etc.): mouse wheel up / R / Tab, or the right-stick click.
 //
 // TTPC_INPUT scripts presses for headless tests: "600+10:A;900+5:A,B;1200+60:right"
 //   = from the game's 600th controller read (~ game frame) hold A for 10 reads, etc. Names: A B 1 2 plus minus home up down left right C Z.
@@ -35,6 +36,7 @@ enum {
     BTN_LEFT = 0x0001, BTN_RIGHT = 0x0002, BTN_DOWN = 0x0004, BTN_UP = 0x0008, BTN_PLUS = 0x0010,
     BTN_2 = 0x0100, BTN_1 = 0x0200, BTN_B = 0x0400, BTN_A = 0x0800, BTN_MINUS = 0x1000,
     BTN_Z = 0x2000, BTN_C = 0x4000, BTN_HOME = 0x8000,
+    PUSH_FLAG = 0x40000000,   // internal: the push gesture (not a KPAD button bit)
 };
 
 static u32 g_hold, g_prev, g_trig, g_rel, g_host_hold;
@@ -49,7 +51,7 @@ static ScriptEv g_script[4096]; static int g_nscript;
 static u32 name_mask(const char *s, int n) {
     static const struct { const char *n; u32 m; } t[] = {
         {"A",BTN_A},{"B",BTN_B},{"1",BTN_1},{"2",BTN_2},{"plus",BTN_PLUS},{"minus",BTN_MINUS},{"home",BTN_HOME},
-        {"up",BTN_UP},{"down",BTN_DOWN},{"left",BTN_LEFT},{"right",BTN_RIGHT},{"C",BTN_C},{"Z",BTN_Z} };
+        {"up",BTN_UP},{"down",BTN_DOWN},{"left",BTN_LEFT},{"right",BTN_RIGHT},{"C",BTN_C},{"Z",BTN_Z},{"push",PUSH_FLAG} };
     for (unsigned k = 0; k < sizeof t / sizeof *t; k++) if ((int)strlen(t[k].n) == n && !strncmp(s, t[k].n, n)) return t[k].m;
     fprintf(stderr, "[wiimote] unknown button '%.*s' in TTPC_INPUT\n", n, s);
     return 0;
@@ -118,6 +120,7 @@ void wiimote_frame(void) {
     if (in->plus) h |= BTN_PLUS;   if (in->minus) h |= BTN_MINUS;
     if (in->home) h |= BTN_HOME;   if (in->one) h |= BTN_1;   if (in->two) h |= BTN_2;
     if (in->c) h |= BTN_C;         if (in->z) h |= BTN_Z;
+    if (in->push) h |= PUSH_FLAG;
     g_host_hold = h;
     g_ppx = g_px; g_ppy = g_py;
     if (g_window_open && !getenv("TTPC_POINTER")) {
@@ -134,6 +137,25 @@ void wiimote_frame(void) {
         g_sy = (float)(in->stick_up - in->stick_down);
         if (g_sx && g_sy) { g_sx *= 0.7071f; g_sy *= 0.7071f; }
     }
+}
+
+// "Push" (thrust the Remote toward the screen, e.g. to advance the endoscope while holding A+B):
+// a short motion played over ~15 reads - accelerate forward, coast, brake - seen by the game both in
+// the accelerometer (z = the Remote's pointing axis) and as the sensor-bar distance shrinking.
+static float g_dist = 1.5f, g_dist_prev = 1.5f; static int g_push_t = -1;
+static void push_motion(int pushing, float *acc_z) {
+    static const int LEN = 15;
+    if (g_push_t < 0 && pushing) g_push_t = 0;
+    *acc_z = 0.f;
+    g_dist_prev = g_dist;
+    if (g_push_t >= 0) {
+        int t = g_push_t++;
+        if (t < 5) *acc_z = -1.5f; else if (t >= 10) *acc_z = 1.5f;      // KPAD acc reads the opposite of the motion
+        float v = t < 5 ? (t + 1) / 5.f : t < 10 ? 1.f : (LEN - t - 1) / 5.f;   // 0..1 speed profile
+        g_dist -= v * 0.012f;
+        if (g_push_t >= LEN) g_push_t = pushing ? 0 : -1;               // held: keep pushing
+    } else if (g_dist < 1.5f) { g_dist += 0.01f; if (g_dist > 1.5f) g_dist = 1.5f; }   // drift back to rest
+    if (g_dist < 0.6f) g_dist = 0.6f;
 }
 
 static void wf(u32 a, float f) { u32 v; memcpy(&v, &f, 4); W32(a, v); }
@@ -176,16 +198,22 @@ void f_8025F830(CPU *c) {
             fflush(g_rec);
         }
     }
+    float acc_z; push_motion((h & PUSH_FLAG) != 0, &acc_z); h &= ~PUSH_FLAG;
     g_prev = g_hold; g_hold = h; g_trig = g_hold & ~g_prev; g_rel = g_prev & ~g_hold;
     if (dbg && (g_trig || g_reads % 600 == 0)) fprintf(stderr, "[pad] read %llu vi %llu hold %04X trig %04X\n", (unsigned long long)g_reads, (unsigned long long)g_vi, g_hold, g_trig);
     for (u32 k = 0; k < 0xB0; k += 4) W32(buf + k, 0);
     W32(buf + 0x00, g_hold); W32(buf + 0x04, g_trig); W32(buf + 0x08, g_rel);
-    wf(buf + 0x0C, 0.f); wf(buf + 0x10, -1.f); wf(buf + 0x14, 0.f); wf(buf + 0x18, 1.f);   // held level, pointing at the TV
+    {   // held level, pointing at the TV (plus any push motion along z)
+        static float last_z;
+        wf(buf + 0x0C, 0.f); wf(buf + 0x10, -1.f); wf(buf + 0x14, acc_z);
+        wf(buf + 0x18, sqrtf(1.f + acc_z * acc_z)); wf(buf + 0x1C, fabsf(acc_z - last_z)); last_z = acc_z;
+    }
     wf(buf + 0x20, g_px); wf(buf + 0x24, g_py);
     float vx = g_px - g_ppx, vy = g_py - g_ppy;
     wf(buf + 0x28, vx); wf(buf + 0x2C, vy); wf(buf + 0x30, sqrtf(vx * vx + vy * vy));
     wf(buf + 0x34, 1.f); wf(buf + 0x38, 0.f);       // horizon: no roll
-    wf(buf + 0x48, 1.5f);                            // distance to the sensor bar (m)
+    wf(buf + 0x48, g_dist);                          // distance to the sensor bar (m)
+    wf(buf + 0x4C, g_dist - g_dist_prev); wf(buf + 0x50, fabsf(g_dist - g_dist_prev));
     wf(buf + 0x54, 1.f); wf(buf + 0x58, 0.f);       // acc_vertical
     W8(buf + 0x5C, 1);                               // dev_type: Wii Remote + Nunchuk
     W8(buf + 0x5D, 0);                               // wpad_err: OK

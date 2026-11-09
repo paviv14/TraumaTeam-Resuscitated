@@ -9,6 +9,7 @@ typedef struct {
     int up, down, left, right, a, b, plus, minus, home, one, two, c, z;   // Wii Remote / Nunchuk buttons
     int stick_up, stick_down, stick_left, stick_right;                    // Nunchuk stick (digital, keys)
     float nx, ny; int has_analog;                                         // Nunchuk stick (analog, pad)
+    int push;                 // thrust the Remote toward the screen (wheel up / R / right-stick click)
 } Input;
 extern Input g_input;
 extern int g_window_open;

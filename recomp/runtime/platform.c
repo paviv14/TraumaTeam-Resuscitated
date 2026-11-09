@@ -145,6 +145,7 @@ static float axis(SDL_GameControllerAxis a) {
 }
 
 void platform_set_title(const char *t) { if (g_win) SDL_SetWindowTitle(g_win, t); }
+static int g_wheel_push;
 void platform_poll(void) {
     if (!g_window_open) return;
     SDL_Event e;
@@ -156,6 +157,7 @@ void platform_poll(void) {
             for (int i = 0; i < SDL_NumJoysticks(); i++) pad_open(i);
         }
         if (e.type == SDL_MOUSEMOTION) g_pointer_pad = 0;
+        if (e.type == SDL_MOUSEWHEEL && e.wheel.y > 0) g_wheel_push = 12;   // one notch = one push (held ~0.2 s)
         if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F9 && !e.key.repeat) { void video_capture_request(void); video_capture_request(); }
         if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F11) {
             u32 fs = SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN_DESKTOP;
@@ -191,6 +193,7 @@ void platform_poll(void) {
     g_input.home = KEY(ESCAPE) || KEY(H);
     g_input.one = KEY(1);  g_input.two = KEY(2);
     g_input.c = KEY(C) || KEY(Q);  g_input.z = KEY(E) || KEY(F);   // Nunchuk buttons
+    g_input.push = KEY(R) || KEY(TAB) || g_wheel_push > 0; if (g_wheel_push > 0) g_wheel_push--;
 #undef KEY
     g_input.nx = g_input.ny = 0; g_input.has_analog = 0;
     if (g_pad) {
@@ -198,7 +201,7 @@ void platform_poll(void) {
         g_input.a |= PB(A);                     g_input.b |= PB(B) || axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 0.3f;
         g_input.z |= axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 0.3f;   g_input.c |= PB(LEFTSHOULDER);
         g_input.up |= PB(DPAD_UP); g_input.down |= PB(DPAD_DOWN); g_input.left |= PB(DPAD_LEFT); g_input.right |= PB(DPAD_RIGHT);
-        g_input.one |= PB(X); g_input.two |= PB(Y);
+        g_input.one |= PB(X); g_input.two |= PB(Y); g_input.push |= PB(RIGHTSTICK);
         g_input.plus |= PB(START); g_input.minus |= PB(BACK); g_input.home |= PB(GUIDE);
         // left stick = Nunchuk stick (y up)
         g_input.nx = axis(SDL_CONTROLLER_AXIS_LEFTX); g_input.ny = -axis(SDL_CONTROLLER_AXIS_LEFTY);
