@@ -89,6 +89,7 @@ void platform_audio_pause(int pause) { if (g_audio) { SDL_PauseAudioDevice(g_aud
 int platform_init(void) {
     if (getenv("TTPC_HEADLESS")) return 0;
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");   // full-resolution window with Windows display scaling
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "[platform] no display (%s): running headless\n", SDL_GetError());
         return 0;

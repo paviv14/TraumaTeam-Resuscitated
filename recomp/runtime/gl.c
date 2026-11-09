@@ -389,10 +389,11 @@ int g_view_x, g_view_y, g_view_w, g_view_h;   // where the picture sits in the w
 // Display options (set by the options menu, menu.c)
 int g_disp_stretch, g_disp_sharp;
 static GLuint g_last_fbo, g_last_tex; static int g_last_w, g_last_h;   // the last displayed picture
-static void view_rect(int ww, int wh) {   // fit the picture into the window (4:3, or stretched)
-    int vw = ww, vh = ww * 3 / 4;
-    if (vh > wh) { vh = wh; vw = wh * 4 / 3; }
-    if (g_disp_stretch) { vw = ww; vh = wh; }
+static void view_rect(int ww, int wh) {   // fit the picture into the window: 4:3, 16:9, or stretched to fill
+    int ax = g_disp_stretch == 1 ? 16 : 4, ay = g_disp_stretch == 1 ? 9 : 3;
+    int vw = ww, vh = (int)((long long)ww * ay / ax);
+    if (vh > wh) { vh = wh; vw = (int)((long long)wh * ax / ay); }
+    if (g_disp_stretch == 2) { vw = ww; vh = wh; }
     g_view_x = (ww - vw) / 2; g_view_y = (wh - vh) / 2; g_view_w = vw; g_view_h = vh;
 }
 void gpu_present(int x0, int y0, int w, int h) {

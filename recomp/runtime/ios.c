@@ -60,12 +60,47 @@ static void mkdirs(const char *path) {
     for (char *q = tmp + 1; *q; q++) if (*q == '/') { *q = 0; host_mkdir(tmp); *q = '/'; }
 }
 
+// The Wii's system settings file. The game reads the console's TV aspect setting (IPL.AR: 0 = 4:3,
+// 1 = 16:9) from it at boot and lays out its 3D and 2D for that shape, so the aspect option sets it here.
+#include "platform.h"
+static void sysconf_set_aspect(const char *hp) {
+    int wide = g_cfg.stretch == 1 || (getenv("TTPC_WIDE") && atoi(getenv("TTPC_WIDE")));
+    u8 d[0x4000]; FILE *f = fopen(hp, "rb");
+    if (!f) return;
+    size_t n = fread(d, 1, sizeof d, f); fclose(f);
+    if (n != sizeof d || memcmp(d, "SCv0", 4)) return;
+    int cnt = d[4] << 8 | d[5];
+    #define OFS(i) (d[6 + 2 * (i)] << 8 | d[7 + 2 * (i)])
+    for (int i = 0; i < cnt; i++) {          // already there: just set the value
+        int o = OFS(i), nl = (d[o] & 0x1F) + 1;
+        if (nl == 6 && !memcmp(d + o + 1, "IPL.AR", 6)) {
+            if (d[o + 7] == wide) return;
+            d[o + 7] = wide; goto write;
+        }
+    }
+    {   // add a one-byte entry (type 3 = byte); the offset table grows by one, shifting the entries by 2
+        int end = OFS(cnt), first = OFS(0), add = 2 + 8;
+        if (end + add > 0x4000 - 4) return;
+        memmove(d + first + 2, d + first, end - first);
+        for (int i = 0; i <= cnt; i++) { int o = OFS(i) + 2; d[6 + 2 * i] = o >> 8; d[7 + 2 * i] = o; }
+        int o = end + 2;
+        d[o] = 0x60 | 5; memcpy(d + o + 1, "IPL.AR", 6); d[o + 7] = wide;
+        cnt++; d[4] = cnt >> 8; d[5] = cnt;
+        int e = o + 8; d[6 + 2 * cnt] = e >> 8; d[7 + 2 * cnt] = e;
+    }
+    #undef OFS
+write:
+    if ((f = fopen(hp, "wb"))) { fwrite(d, 1, sizeof d, f); fclose(f); }
+    fprintf(stderr, "[nand] SYSCONF aspect set to %s\n", wide ? "16:9" : "4:3");
+}
+
 static int open_fd(const char *path, int mode) {
     int fd;
     for (fd = 0; fd < 32 && g_fd[fd].path[0]; fd++) ;
     if (fd == 32) return -22;
     if (path[0] == '/' && strncmp(path, "/dev/", 5) != 0) {  // a NAND file
         char hp[512]; nand_host_path(path, hp, sizeof hp);
+        if (!strcmp(path, "/shared2/sys/SYSCONF")) sysconf_set_aspect(hp);
         FILE *f = fopen(hp, mode & 2 ? "r+b" : "rb");
         if (!f) return IOS_ENOENT;
         g_fd[fd].fp = f; g_fd[fd].is_file = 1;
