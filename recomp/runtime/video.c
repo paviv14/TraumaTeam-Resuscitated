@@ -1071,8 +1071,10 @@ void video_flush(void) {                    // decode every complete command buf
 }
 // Once a second: "Trauma Team - 60 fps | GPU 4.1 ms" in the window title.
 static void perf_title(void) {
-    static u64 t_last, frames, gx_last;
+    static u64 t_last, frames, gx_last, t_prev, worst;
     u64 now = host_now_ns(); frames++;
+    if (t_prev && now - t_prev > worst) worst = now - t_prev;   // longest gap between two frames (hitches)
+    t_prev = now;
     if (!t_last) { t_last = now; gx_last = g_gx_ns; frames = 0; return; }
     if (now - t_last < 1000000000ull) return;
     double secs = (now - t_last) / 1e9, fps = frames / secs;
@@ -1081,7 +1083,8 @@ static void perf_title(void) {
     char b[160]; snprintf(b, sizeof b, "Trauma Team - %.0f fps | frame %.1f ms: graphics %.1f ms, game %.1f ms", fps, frame_ms, gx, frame_ms - gx > 0 ? frame_ms - gx : 0);
     platform_set_title(b);
     static int log = -1; if (log < 0) log = getenv("TTPC_PERFLOG") != NULL;
-    if (log) { fprintf(stderr, "[perf] frame %llu: %s, %.0f draws/frame\n", (unsigned long long)g_copies, b, g_perf_draws / (double)(frames ? frames : 1)); g_perf_draws = 0; }
+    if (log) { fprintf(stderr, "[perf] frame %llu: %s, %.0f draws/frame, worst frame %.1f ms\n", (unsigned long long)g_copies, b, g_perf_draws / (double)(frames ? frames : 1), worst / 1e6); g_perf_draws = 0; }
+    worst = 0;
     t_last = now; frames = 0; gx_last = g_gx_ns;
 }
 void video_dump_stats(void) {

@@ -92,24 +92,35 @@ int platform_init(void) {
     if (zoom < 1) zoom = 1;
     // OpenGL (GPU rendering) unless TTPC_SOFTWARE=1 or it is unavailable.
     if (!getenv("TTPC_SOFTWARE")) {
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3); SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
-        SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-        SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-        g_win = SDL_CreateWindow("Trauma Team (native)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-                                 640 * zoom, 480 * zoom, SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
-        if (g_win && (g_glctx = SDL_GL_CreateContext(g_win))) {
-            SDL_GL_SetSwapInterval(0);   // the game paces itself to the 60 Hz retrace
-            settings_load();
-            if (gpu_init(g_cfg.scale)) {
-                settings_apply();
-                SDL_ShowCursor(SDL_DISABLE);
-                g_window_open = 1;
-                return 1;
+        // Creating the GPU context can fail transiently on Windows (driver still starting, the window
+        // landing on a display without the GPU, a remote/streaming session): retry a few times before
+        // falling back to the much slower software renderer.
+        for (int attempt = 0; attempt < 5; attempt++) {
+            if (attempt) { fprintf(stderr, "[platform] OpenGL context attempt %d failed, retrying\n", attempt); SDL_Delay(400); }
+            SDL_GL_ResetAttributes();
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3); SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+            SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+            SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+            SDL_GL_SetAttribute(SDL_GL_ACCELERATED_VISUAL, 1);   // never the Windows generic (GDI) OpenGL 1.1
+            g_win = SDL_CreateWindow("Trauma Team (native)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                     640 * zoom, 480 * zoom, SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
+            if (g_win && (g_glctx = SDL_GL_CreateContext(g_win)) && SDL_GL_MakeCurrent(g_win, g_glctx) == 0) {
+                SDL_GL_SetSwapInterval(0);   // the game paces itself to the 60 Hz retrace
+                settings_load();
+                if (gpu_init(g_cfg.scale)) {
+                    settings_apply();
+                    SDL_ShowCursor(SDL_DISABLE);
+                    g_window_open = 1;
+                    return 1;
+                }
             }
-            SDL_GL_DeleteContext(g_glctx); g_glctx = NULL;
+            if (g_glctx) { SDL_GL_DeleteContext(g_glctx); g_glctx = NULL; }
+            if (g_win) { SDL_DestroyWindow(g_win); g_win = NULL; }
         }
         fprintf(stderr, "[platform] OpenGL 3.3 unavailable (%s): using the software renderer\n", SDL_GetError());
-        if (g_win) SDL_DestroyWindow(g_win);
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "Trauma Team",
+            "Could not start GPU rendering (OpenGL 3.3), so the game will run with the slow software renderer.\n\n"
+            "Restarting the game usually fixes this. If it keeps happening, update the graphics driver.", NULL);
     }
     g_win = SDL_CreateWindow("Trauma Team (native, software)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                              640 * zoom, 480 * zoom, SDL_WINDOW_RESIZABLE);
