@@ -256,7 +256,7 @@ static void transform(const Vtx *v, Out *o) {
             float r[3]; u32 m = (u32)v->texmtx[t] * 4;
             mtx_apply(m, in, r, stq ? 3 : 2);
             if (!stq) r[2] = 1.f;
-            if (xfreg[0x18] & 1) {   // dual texture transform: optional normalize, then post-matrix (XF 0x500 + 4 * index)
+            if (xfreg[0x12] & 1) {   // dual texture transform (XF 0x1012): optional normalize, then post-matrix (XF 0x500 + 4 * index)
                 u32 pm = xfreg[0x50 + t];
                 if ((pm >> 8) & 1) { float l = sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]); if (l > 0) { r[0] /= l; r[1] /= l; r[2] /= l; } }
                 float q[3]; mtx_apply(0x500 + 4 * (pm & 63), r, q, 3);
