@@ -78,7 +78,8 @@ static float read_comp(u32 *a, int fmt, int frac) {
     case 3: v = (s16)V16(*a); *a += 2; break;
     default: { u32 b = V32(*a); *a += 4; memcpy(&v, &b, 4); return v; }
     }
-    return ldexpf(v, -frac);
+    static float inv[32]; if (!inv[0]) for (int k = 0; k < 32; k++) inv[k] = 1.f / (float)(1u << k);
+    return v * inv[frac & 31];
 }
 static void read_color(u32 *a, int fmt, float out[4]) {
     u32 r = 255, g = 255, b = 255, al = 255;
@@ -954,19 +955,33 @@ static void point_quad(void (*tri)(const Out *, const Out *, const Out *), const
     tri(&q[0], &q[1], &q[2]); tri(&q[1], &q[3], &q[2]);
     S.cull = cull;
 }
+// where graphics time goes (TTPC_PERFLOG): vertex reading, draw setup + textures, transform, assembly, GL
+u64 g_pt_read, g_pt_setup, g_pt_xform, g_pt_asm, g_pt_gl, g_pt_verts, g_pt_calls;
 static void draw_prims(int prim, int vat, int n, u32 *p) {
     static Vtx *vin; static Out *vout;
+    static int bench = -1; if (bench < 0) bench = getenv("TTPC_BENCH") != NULL;   // headless: run the CPU side of the GPU path
     if (!vin) { vin = malloc(sizeof *vin * MAX_VERTS); vout = malloc(sizeof *vout * MAX_VERTS); g_tris = malloc(sizeof *g_tris * 3 * MAX_VERTS); }
-    for (int k = 0; k < n; k++) { memset(&vin[k], 0, sizeof vin[k]); read_vertex(p, vat, &vin[k]); }
+    u64 t0 = host_now_ns();
+    if (n >= 512) {   // every vertex has the same size in the stream: decode them in parallel
+        u32 q0 = *p; memset(&vin[0], 0, sizeof vin[0]); read_vertex(p, vat, &vin[0]);
+        u32 vsize = *p - q0;
+        #pragma omp parallel for schedule(static)
+        for (int k = 1; k < n; k++) { u32 q = q0 + (u32)k * vsize; memset(&vin[k], 0, sizeof vin[k]); read_vertex(&q, vat, &vin[k]); }
+        *p = q0 + (u32)n * vsize;
+    } else
+        for (int k = 0; k < n; k++) { memset(&vin[k], 0, sizeof vin[k]); read_vertex(p, vat, &vin[k]); }
+    u64 t1 = host_now_ns(); g_pt_read += t1 - t0; g_pt_verts += n; g_pt_calls++;
     g_video_draws++;
     static int dumping = -1; if (dumping < 0) { const char *d = getenv("TTPC_DUMP_TEXTURES"); dumping = d && *d && strcmp(d, "0"); }
-    if (!g_render && !dumping) return;
+    if (!g_render && !dumping && !bench) return;
     setup_draw();                     // also decodes (and, when dumping, saves) the draw's textures
-    if (!g_render) return;
+    u64 t2 = host_now_ns(); g_pt_setup += t2 - t1;
+    if (!g_render && !bench) return;
     lights_load();
     #pragma omp parallel for schedule(static) if (n >= 512)
     for (int k = 0; k < n; k++) transform(&vin[k], &vout[k]);
-    void (*tri)(const Out *, const Out *, const Out *) = g_gpu ? collect_tri : draw_tri;
+    u64 t3 = host_now_ns(); g_pt_xform += t3 - t2;
+    void (*tri)(const Out *, const Out *, const Out *) = (g_gpu || bench) ? collect_tri : draw_tri;
     g_ntris = 0;
     switch (prim) {
     case 0: case 1: for (int k = 0; k + 3 < n; k += 4) { tri(&vout[k], &vout[k + 1], &vout[k + 2]); tri(&vout[k], &vout[k + 2], &vout[k + 3]); } break;
@@ -978,7 +993,9 @@ static void draw_prims(int prim, int vat, int n, u32 *p) {
     case 7: for (int k = 0; k < n; k++) point_quad(tri, &vout[k]); break;
     default: break;
     }
+    u64 t4 = host_now_ns(); g_pt_asm += t4 - t3;
     if (g_gpu && g_ntris) { gpu_draw(&S, g_tris, g_ntris); g_perf_draws++; }
+    g_pt_gl += host_now_ns() - t4;
     long dl_from = dl_frame();
     if (dl_from >= 0 && (long)g_copies >= dl_from && (long)g_copies < dl_from + 2) {
         float X, Y, Z; to_screen(&vout[0], &X, &Y, &Z);
@@ -1093,7 +1110,10 @@ static void perf_title(void) {
     char b[160]; snprintf(b, sizeof b, "Trauma Team - %.0f fps | frame %.1f ms: graphics %.1f ms, game %.1f ms", fps, frame_ms, gx, frame_ms - gx > 0 ? frame_ms - gx : 0);
     platform_set_title(b);
     static int log = -1; if (log < 0) log = getenv("TTPC_PERFLOG") != NULL;
-    if (log) { fprintf(stderr, "[perf] frame %llu: %s, %.0f draws/frame, worst frame %.1f ms\n", (unsigned long long)g_copies, b, g_perf_draws / (double)(frames ? frames : 1), worst / 1e6); g_perf_draws = 0; }
+    if (log) { double fr = frames ? frames : 1;
+        fprintf(stderr, "[perf] frame %llu: %s, %.0f draws/frame, worst frame %.1f ms | %.0f prims %.0f verts | read %.1f setup %.1f xform %.1f asm %.1f gl %.1f ms\n", (unsigned long long)g_copies, b, g_perf_draws / fr, worst / 1e6,
+                g_pt_calls / fr, g_pt_verts / fr, g_pt_read / 1e6 / fr, g_pt_setup / 1e6 / fr, g_pt_xform / 1e6 / fr, g_pt_asm / 1e6 / fr, g_pt_gl / 1e6 / fr);
+        g_perf_draws = 0; g_pt_read = g_pt_setup = g_pt_xform = g_pt_asm = g_pt_gl = g_pt_verts = g_pt_calls = 0; }
     worst = 0;
     t_last = now; frames = 0; gx_last = g_gx_ns;
 }
