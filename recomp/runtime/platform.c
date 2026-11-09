@@ -43,6 +43,11 @@ void platform_audio_push(const s16 *lr, int frames, int rate) {
 
 #ifdef TTPC_SDL
 #include <SDL2/SDL.h>
+#ifdef _WIN32
+// Ask hybrid-graphics drivers for the discrete GPU (NVIDIA Optimus / AMD switchable graphics).
+__declspec(dllexport) unsigned long NvOptimusEnablement = 1;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+#endif
 
 #include "gx_state.h"
 SDL_Window *g_sdl_window;
@@ -95,16 +100,29 @@ int platform_init(void) {
         // Creating the GPU context can fail transiently on Windows (driver still starting, the window
         // landing on a display without the GPU, a remote/streaming session): retry a few times before
         // falling back to the much slower software renderer.
-        for (int attempt = 0; attempt < 5; attempt++) {
-            if (attempt) { fprintf(stderr, "[platform] OpenGL context attempt %d failed, retrying\n", attempt); SDL_Delay(400); }
+        int ndisp = SDL_GetNumVideoDisplays(); if (ndisp < 1) ndisp = 1;
+        for (int attempt = 0; attempt < 5 + ndisp; attempt++) {
+            if (attempt) { fprintf(stderr, "[platform] OpenGL context attempt %d failed, retrying\n", attempt); SDL_Delay(300); }
+            // after a few tries on the main display, try each display in turn (a virtual display, e.g. one
+            // made for game streaming, may have no OpenGL driver)
+            int disp = attempt < 4 ? 0 : (attempt - 4) % ndisp;
             SDL_GL_ResetAttributes();
             SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3); SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
             SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
             SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
             SDL_GL_SetAttribute(SDL_GL_ACCELERATED_VISUAL, 1);   // never the Windows generic (GDI) OpenGL 1.1
-            g_win = SDL_CreateWindow("Trauma Team (native)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            g_win = SDL_CreateWindow("Trauma Team (native)", SDL_WINDOWPOS_CENTERED_DISPLAY(disp), SDL_WINDOWPOS_CENTERED_DISPLAY(disp),
                                      640 * zoom, 480 * zoom, SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
-            if (g_win && (g_glctx = SDL_GL_CreateContext(g_win)) && SDL_GL_MakeCurrent(g_win, g_glctx) == 0) {
+            if (!g_win) fprintf(stderr, "[platform] window: %s\n", SDL_GetError());
+            else if (!(g_glctx = SDL_GL_CreateContext(g_win))) fprintf(stderr, "[platform] OpenGL context: %s\n", SDL_GetError());
+            else if (SDL_GL_MakeCurrent(g_win, g_glctx) != 0) fprintf(stderr, "[platform] make current: %s\n", SDL_GetError());
+            else {
+                typedef const unsigned char *(SDLCALL *GetStr)(unsigned);
+                GetStr gs = (GetStr)SDL_GL_GetProcAddress("glGetString");
+                if (gs) fprintf(stderr, "[platform] display %d (%s): OpenGL %s | %s | %s\n", disp, SDL_GetDisplayName(disp),
+                                (const char *)gs(0x1F02), (const char *)gs(0x1F00), (const char *)gs(0x1F01));   // version, vendor, renderer
+            }
+            if (g_win && g_glctx && SDL_GL_GetCurrentContext() == g_glctx) {
                 SDL_GL_SetSwapInterval(0);   // the game paces itself to the 60 Hz retrace
                 settings_load();
                 if (gpu_init(g_cfg.scale)) {
