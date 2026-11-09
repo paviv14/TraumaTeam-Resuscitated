@@ -100,4 +100,12 @@ def pak_entries(d):
         csize = struct.unpack_from('<I', d, p + 0xFC)[0]
         yield name, d, p + 0x100, csize
         p += 0x100 + csize
-        p = (p + 3) & ~3 if p < len(d) and d[p] == 0 else p
+        # entries are padded (zeros or junk); alignment varies between paks
+        def _ok(o):
+            raw = d[o:o + 0xFC].split(b'\0')[0]
+            return len(raw) > 2 and all(32 <= c < 127 for c in raw) and b'.' in raw
+        for al in (4, 0x20, 0x40):
+            q = (p + al - 1) & ~(al - 1)
+            if q + 0x100 <= len(d) and _ok(q): p = q; break
+        else:
+            break

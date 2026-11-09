@@ -131,7 +131,7 @@ class Out:
         self.n += 1
 
 def do_tpx(path, rel, out):
-    d = open(path, 'rb').read()
+    d = path if isinstance(path, (bytes, bytearray)) else open(path, 'rb').read()
     for idx, off, size, name in tpx_entries(d):
         if off + 16 > len(d) or be('I', d, off)[0] != 0x0020AF30: continue
         for k, im in enumerate(tpl_images(d, off)):
@@ -207,6 +207,7 @@ def main():
     src, dst = sys.argv[1], sys.argv[2]
     out = Out(dst)
     files = sorted(os.path.join(r, f) for r, _, fs in os.walk(src) for f in fs)
+    if len(sys.argv) > 3: files = [f for f in files if f.lower().endswith(sys.argv[3])]
     for i, p in enumerate(files):
         rel = os.path.relpath(p, src)
         ext = p.rsplit('.', 1)[-1].lower()
@@ -220,6 +221,8 @@ def main():
                 for name, dd, off, cs in pak_entries(d):
                     if dd[off] != 0x10: continue
                     x = lz10(dd, off)
+                    if name.lower().endswith('.tpx') and x[:4] == b'\x20\x06\x09\x12':
+                        do_tpx(x, os.path.join(rel, os.path.basename(name)), out); continue
                     if b'TEX0' in x: do_tex0(x, os.path.join(rel, os.path.basename(name)), out)
                     if b'\x00\x20\xaf\x30' in x: do_tpl_blobs(x, os.path.join(rel, os.path.basename(name)), out)
             else:
