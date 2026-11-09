@@ -51,7 +51,9 @@ int g_gpu;
     X(void, BindAttribLocation, (GLuint, GLuint, const GLchar *)) \
     X(GLint, GetUniformLocation, (GLuint, const GLchar *)) X(void, Uniform1i, (GLint, GLint)) \
     X(void, Uniform1iv, (GLint, GLsizei, const GLint *)) X(void, Uniform2fv, (GLint, GLsizei, const GLfloat *)) X(void, Uniform4iv, (GLint, GLsizei, const GLint *)) \
-    X(void, Uniform4fv, (GLint, GLsizei, const GLfloat *)) X(void, Uniform4f, (GLint, GLfloat, GLfloat, GLfloat, GLfloat)) X(void, Uniform1fv, (GLint, GLsizei, const GLfloat *))
+    X(void, Uniform4fv, (GLint, GLsizei, const GLfloat *)) X(void, Uniform4f, (GLint, GLfloat, GLfloat, GLfloat, GLfloat)) X(void, Uniform1fv, (GLint, GLsizei, const GLfloat *)) \
+    X(void, GenQueries, (GLsizei, GLuint *)) X(void, BeginQuery, (GLenum, GLuint)) X(void, EndQuery, (GLenum)) \
+    X(void, GetQueryObjectiv, (GLuint, GLenum, GLint *)) X(void, GetQueryObjectui64v, (GLuint, GLenum, unsigned long long *))
 
 #define X(ret, name, args) static ret (APIENTRY *gl##name##_) args;
 GLFUNCS
@@ -90,7 +92,8 @@ static const char *FS =
     "uniform vec4 uK[16]; uniform float uKA[16];\n"
     "uniform vec4 uReg[4];\n"
     "uniform ivec4 uAT; uniform int uAOp;  // alpha test: comp0, ref0, comp1, ref1; logic op\n"
-    "uniform int uNbump; uniform ivec4 uIS[4]; uniform int uIndCmd[16]; uniform vec4 uIM[6]; uniform vec2 uCS[8]; uniform vec2 uMS[8];\n"
+    "uniform int uNbump; uniform ivec4 uIS[4]; uniform int uIndCmd[16];\n"
+    "uniform vec4 uIM[6]; uniform vec2 uCS[8]; uniform vec2 uMS[8];\n"
     "uniform sampler2D uTex0, uTex1, uTex2, uTex3, uTex4, uTex5, uTex6, uTex7;\n"
     "out vec4 oColor;\n"
     "vec3 tc(int i) { if (i == 0) return vT0; if (i == 1) return vT1; if (i == 2) return vT2; if (i == 3) return vT3;\n"
@@ -199,6 +202,22 @@ static GLuint g_cprog, g_cvao; static GLint g_cu_rect, g_cu_fmt, g_cu_inten;
 static int g_scale = 1, g_W, g_H;
 static struct { GLint nst, csel, asel, cop, aop, st, rsw, tsw, chan, k, ka, reg, at, aop2, nbump, is, indcmd, im, cs, ms; } U;
 
+// ---------------------------------------------------------------- per-configuration shaders
+// The uber shader above reads the whole TEV setup from uniforms, so every pixel walks the general
+// case (dynamic loops, indexed register files). For each TEV/alpha-test configuration the game uses we
+// also build a copy of it with those integer settings baked in as constants: the compiler then unrolls
+// and folds it down to the few instructions that configuration needs. Building happens in the
+// background where the driver supports it (KHR/ARB_parallel_shader_compile); until a program is ready,
+// and for at most a few new programs per frame otherwise, draws use the uber shader.
+typedef struct { GLint k, ka, reg, im, cs, ms; } FU;   // float uniforms (per program)
+#define CFG_INTS (1 + 7 * 64 + 16 + 16 + 5 + 1 + 16)
+typedef struct { int used, state; u64 key; int cfg[CFG_INTS]; GLuint prog; FU u; } Spec;   // state 1 building, 2 ready, 3 failed
+static Spec *g_spec; static int g_nspec, g_spec_cap = 4096;
+static int g_par_compile, g_spec_budget, g_spec_off;
+static GLuint g_vs_obj;
+static FU g_uber_fu;
+extern u64 g_pf_spec_built, g_pf_spec_draws, g_pf_uber_draws;
+
 static GLuint compile(GLenum type, const char *src) {
     GLuint s = glCreateShader_(type); glShaderSource_(s, 1, &src, NULL); glCompileShader_(s);
     GLint ok; glGetShaderiv_(s, GL_COMPILE_STATUS, &ok);
@@ -214,6 +233,7 @@ int gpu_init(int scale) {
     g_scale = scale < 1 ? 1 : scale; g_W = 640 * g_scale; g_H = 528 * g_scale;
     GLuint vs = compile(GL_VERTEX_SHADER, VS), fs = compile(GL_FRAGMENT_SHADER, FS);
     if (!vs || !fs) return 0;
+    g_vs_obj = vs;
     g_prog = glCreateProgram_(); glAttachShader_(g_prog, vs); glAttachShader_(g_prog, fs);
     static const char *attr[] = { "aPos", "aC0", "aC1", "aT0", "aT1", "aT2", "aT3", "aT4", "aT5", "aT6", "aT7" };
     for (int i = 0; i < 11; i++) glBindAttribLocation_(g_prog, i, attr[i]);
@@ -227,6 +247,17 @@ int gpu_init(int scale) {
     LOC(at, "uAT"); LOC(aop2, "uAOp");
     LOC(nbump, "uNbump"); LOC(is, "uIS"); LOC(indcmd, "uIndCmd"); LOC(im, "uIM"); LOC(cs, "uCS"); LOC(ms, "uMS");
     for (int i = 0; i < 8; i++) { char n[8]; snprintf(n, sizeof n, "uTex%d", i); glUniform1i_(glGetUniformLocation_(g_prog, n), i); }
+    g_uber_fu = (FU){ U.k, U.ka, U.reg, U.im, U.cs, U.ms };
+    g_par_compile = SDL_GL_ExtensionSupported("GL_KHR_parallel_shader_compile") || SDL_GL_ExtensionSupported("GL_ARB_parallel_shader_compile");
+    {   // let the driver use several threads for background builds
+        typedef void (APIENTRY *MaxThr)(GLuint);
+        MaxThr f = (MaxThr)SDL_GL_GetProcAddress("glMaxShaderCompilerThreadsKHR");
+        if (!f) f = (MaxThr)SDL_GL_GetProcAddress("glMaxShaderCompilerThreadsARB");
+        if (f) f(0xFFFFFFFFu);
+    }
+    g_spec_off = getenv("TTPC_UBER") != NULL;
+    g_spec = calloc((size_t)g_spec_cap, sizeof *g_spec);
+    fprintf(stderr, "[gl] per-configuration shaders %s (background builds %s)\n", g_spec_off ? "off" : "on", g_par_compile ? "yes" : "no");
 
     glGenVertexArrays_(1, &g_vao); glBindVertexArray_(g_vao);
     glGenBuffers_(1, &g_vbo); glBindBuffer_(GL_ARRAY_BUFFER, g_vbo);
@@ -300,6 +331,82 @@ static void bind_texture(int unit, const TexV *t) {
 }
 
 // ---------------------------------------------------------------- state
+static void spec_source(const int *c, char *out, size_t cap) {
+    // FS with the integer uniforms replaced by constants
+    size_t o = 0;
+    #define P(...) (o += (size_t)snprintf(out + o, o < cap ? cap - o : 0, __VA_ARGS__))
+    const char *p = FS, *nl = strchr(p, '\n');
+    P("%.*s\n#pragma optionNV(unroll all)\n", (int)(nl - p), p); p = nl + 1;   // #version line
+    const int *q = c;
+    int nst = *q++;
+    P("const int uNst = %d;\n", nst);
+    static const char *arr[6] = { "uCsel", "uAsel", "uCop", "uAop", "uSt", "uRsw" };
+    for (int a = 0; a < 7; a++) {
+        P("const ivec4 %s[16] = ivec4[16](", a < 6 ? arr[a] : "uTsw");
+        for (int i = 0; i < 16; i++, q += 4) P("%sivec4(%d,%d,%d,%d)", i ? "," : "", q[0], q[1], q[2], q[3]);
+        P(");\n");
+    }
+    P("const int uChan[16] = int[16]("); for (int i = 0; i < 16; i++) P("%s%d", i ? "," : "", *q++); P(");\n");
+    P("const int uIndCmd[16] = int[16]("); for (int i = 0; i < 16; i++) P("%s%d", i ? "," : "", *q++); P(");\n");
+    P("const ivec4 uAT = ivec4(%d,%d,%d,%d);\n", q[0], q[1], q[2], q[3]); q += 4;
+    P("const int uAOp = %d;\n", *q++);
+    P("const int uNbump = %d;\n", *q++);
+    P("const ivec4 uIS[4] = ivec4[4]("); for (int i = 0; i < 4; i++, q += 4) P("%sivec4(%d,%d,%d,%d)", i ? "," : "", q[0], q[1], q[2], q[3]); P(");\n");
+    while (*p) {   // the rest, minus the integer uniform declarations
+        nl = strchr(p, '\n'); int len = nl ? (int)(nl - p) + 1 : (int)strlen(p);
+        if (strncmp(p, "uniform int", 11) && strncmp(p, "uniform ivec4", 13)) P("%.*s", len, p);
+        p += len;
+    }
+    #undef P
+}
+static int spec_ready(Spec *e) {   // finish a program whose build has completed
+    if (e->state != 1) return e->state == 2;
+    if (g_par_compile) { GLint done = 0; glGetProgramiv_(e->prog, 0x91B1 /* GL_COMPLETION_STATUS */, &done); if (!done) return 0; }
+    GLint ok = 0; glGetProgramiv_(e->prog, GL_LINK_STATUS, &ok);
+    if (!ok) {
+        char log[2048]; glGetProgramInfoLog_(e->prog, sizeof log, NULL, log);
+        static int nerr; if (nerr++ < 3) fprintf(stderr, "[gl] specialised shader failed: %s\n", log);
+        e->state = 3; return 0;
+    }
+    glUseProgram_(e->prog);
+    for (int i = 0; i < 8; i++) { char n[8]; snprintf(n, sizeof n, "uTex%d", i); glUniform1i_(glGetUniformLocation_(e->prog, n), i); }
+    e->u = (FU){ glGetUniformLocation_(e->prog, "uK"), glGetUniformLocation_(e->prog, "uKA"), glGetUniformLocation_(e->prog, "uReg"),
+                 glGetUniformLocation_(e->prog, "uIM"), glGetUniformLocation_(e->prog, "uCS"), glGetUniformLocation_(e->prog, "uMS") };
+    e->state = 2; g_pf_spec_built++;
+    return 1;
+}
+// The program for this configuration if it is ready (0: use the uber shader).
+static GLuint spec_program(const int *cfg, FU *fu) {
+    if (g_spec_off || !g_spec) return 0;
+    u64 h = 1469598103934665603ull;
+    for (int i = 0; i < CFG_INTS; i++) { h ^= (u32)cfg[i]; h *= 1099511628211ull; }
+    int i = (int)(h % (u64)g_spec_cap);
+    for (int probe = 0; probe < g_spec_cap; probe++, i = (i + 1) % g_spec_cap) {
+        Spec *e = &g_spec[i];
+        if (!e->used) {
+            if (g_nspec >= g_spec_cap * 3 / 4) return 0;   // table full: stay on the uber shader
+            if (!g_par_compile && g_spec_budget <= 0) return 0;   // a few synchronous builds per frame at most
+            g_spec_budget--;
+            e->used = 1; e->key = h; memcpy(e->cfg, cfg, sizeof e->cfg); g_nspec++;
+            static char src[65536]; spec_source(cfg, src, sizeof src);
+            GLuint fs = glCreateShader_(GL_FRAGMENT_SHADER); const char *sp = src;
+            glShaderSource_(fs, 1, &sp, NULL); glCompileShader_(fs);
+            e->prog = glCreateProgram_(); glAttachShader_(e->prog, g_vs_obj); glAttachShader_(e->prog, fs);
+            static const char *attr[] = { "aPos", "aC0", "aC1", "aT0", "aT1", "aT2", "aT3", "aT4", "aT5", "aT6", "aT7" };
+            for (int a = 0; a < 11; a++) glBindAttribLocation_(e->prog, a, attr[a]);
+            glLinkProgram_(e->prog);
+            e->state = 1;
+            if (!spec_ready(e)) return 0;
+            *fu = e->u; return e->prog;
+        }
+        if (e->key == h && !memcmp(e->cfg, cfg, sizeof e->cfg)) {
+            if (!spec_ready(e)) return 0;
+            *fu = e->u; return e->prog;
+        }
+    }
+    return 0;
+}
+
 static void set_state(const Setup *s) {
     GLint csel[64], asel[64], cop[64], aop[64], st[64], rsw[64], tsw[64], chan[16]; GLfloat k[64], ka[16], reg[16];
     for (int i = 0; i < s->nst; i++) {
@@ -312,6 +419,32 @@ static void set_state(const Setup *s) {
     }
     for (int r = 0; r < 4; r++) for (int j = 0; j < 4; j++) reg[4 * r + j] = s->reg[r][j];
     int n = s->nst;
+    // the integer configuration (layout must match spec_source)
+    static int cfg[CFG_INTS]; memset(cfg, 0, sizeof cfg);
+    {   int *q = cfg; *q++ = n;
+        const GLint *arrs[7] = { csel, asel, cop, aop, st, rsw, tsw };
+        for (int a = 0; a < 7; a++) { memcpy(q, arrs[a], sizeof(GLint) * 4 * n); q += 64; }
+        memcpy(q, chan, sizeof(GLint) * n); q += 16;
+        for (int i = 0; i < n; i++) q[i] = (GLint)s->indcmd[i]; q += 16;
+        *q++ = s->ac_c0; *q++ = s->ac_r0; *q++ = s->ac_c1; *q++ = s->ac_r1; *q++ = s->ac_op;
+        int any = 0; for (int i = 0; i < n; i++) any |= s->indcmd[i];
+        *q++ = any ? s->nbump : 0;
+        if (any) for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) *q++ = s->is[i][j];
+    }
+    FU fu; GLuint sp = spec_program(cfg, &fu);
+    if (sp) {   // specialised: only the float settings are uniforms
+        glUseProgram_(sp); g_pf_spec_draws++;
+        glUniform4fv_(fu.k, n, k); glUniform1fv_(fu.ka, n, ka); glUniform4fv_(fu.reg, 4, reg);
+        int any = 0; for (int i = 0; i < n; i++) any |= s->indcmd[i];
+        if (any) {
+            GLfloat ms[16];
+            for (int m = 0; m < 8; m++) { ms[2 * m] = s->tex[m].w > 0 ? (float)s->tex[m].w : 1.f; ms[2 * m + 1] = s->tex[m].h > 0 ? (float)s->tex[m].h : 1.f; }
+            glUniform4fv_(fu.im, 6, &s->im[0][0]); glUniform2fv_(fu.cs, 8, &s->cs[0][0]); glUniform2fv_(fu.ms, 8, ms);
+        }
+        for (int m = 0; m < 8; m++) if (s->tex[m].e || s->tex[m].gl_copy) bind_texture(m, &s->tex[m]);
+        goto fixed_function;
+    }
+    glUseProgram_(g_prog); g_pf_uber_draws++;
     glUniform1i_(U.nst, n);
     glUniform4iv_(U.csel, n, csel); glUniform4iv_(U.asel, n, asel); glUniform4iv_(U.cop, n, cop); glUniform4iv_(U.aop, n, aop);
     glUniform4iv_(U.st, n, st); glUniform4iv_(U.rsw, n, rsw); glUniform4iv_(U.tsw, n, tsw); glUniform1iv_(U.chan, n, chan);
@@ -330,6 +463,7 @@ static void set_state(const Setup *s) {
     }
     for (int m = 0; m < 8; m++) if (s->tex[m].e || s->tex[m].gl_copy) bind_texture(m, &s->tex[m]);
 
+fixed_function:
     // depth
     static const GLenum zf[8] = { GL_NEVER, GL_LESS, GL_EQUAL, GL_LEQUAL, GL_GREATER, GL_NOTEQUAL, GL_GEQUAL, GL_ALWAYS };
     if (s->zm & 1) { glEnable_(GL_DEPTH_TEST); glDepthFunc_(zf[(s->zm >> 1) & 7]); glDepthMask_((s->zm & 16) ? GL_TRUE : GL_FALSE); }
@@ -371,7 +505,13 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
     glViewport_(0, 0, g_W, g_H);
     set_state(s);
     glBufferData_(GL_ARRAY_BUFFER, (GLsizeiptr)n * sizeof(GV), buf, GL_STREAM_DRAW);
+    static int od = -1; static GLuint oq; if (od < 0) { od = getenv("TTPC_OVERDRAW") != NULL; if (od) glGenQueries_(1, &oq); }
+    if (od) glBeginQuery_(0x8914 /* GL_SAMPLES_PASSED */, oq);
     glDrawArrays_(GL_TRIANGLES, 0, n);
+    if (od) { glEndQuery_(0x8914); GLint r = 0; glGetQueryObjectiv_(oq, 0x8866, &r);
+        extern u64 g_pf_frags; g_pf_frags += (u64)r;
+        if (getenv("TTPC_OVERDRAW")[0] == '2' && r > 50000 * g_scale * g_scale)
+            fprintf(stderr, "[od] draw %d verts nst %d tex0 %dx%d bm %X: %.2f screens\n", n, s->nst, s->tex[0].w, s->tex[0].h, s->bm, r / (double)(g_W * g_H)); }
 }
 
 void gpu_clear(int x0, int y0, int w, int h, u32 c, float z, int color, int alpha, int depth) {
@@ -396,6 +536,25 @@ static void view_rect(int ww, int wh) {   // fit the picture into the window: 4:
     if (g_disp_stretch == 2) { vw = ww; vh = wh; }
     g_view_x = (ww - vw) / 2; g_view_y = (wh - vh) / 2; g_view_w = vw; g_view_h = vh;
 }
+// perf (TTPC_PERFLOG): GPU time per frame from timer queries, time blocked in SwapWindow, EFB copies
+extern u64 g_pf_gpu_ns, g_pf_gpu_frames, g_pf_swap_ns, g_pf_copies, g_pf_copy_allocs;
+u64 host_now_ns(void);
+static GLuint g_tq[4]; static int g_tq_n, g_tq_active;
+static void gpu_timer_frame(void) {
+    if (!g_tq[0]) { glGenQueries_(4, g_tq); }
+    if (g_tq_active) glEndQuery_(0x88BF);   // GL_TIME_ELAPSED
+    // collect finished queries (oldest first) without waiting
+    static int head;
+    while (head < g_tq_n) {
+        GLuint q = g_tq[head & 3]; GLint ready = 0;
+        glGetQueryObjectiv_(q, 0x8867 /* GL_QUERY_RESULT_AVAILABLE */, &ready);
+        if (!ready) break;
+        unsigned long long ns = 0; glGetQueryObjectui64v_(q, 0x8866 /* GL_QUERY_RESULT */, &ns);
+        g_pf_gpu_ns += ns; g_pf_gpu_frames++; head++;
+    }
+    if (g_tq_n - head < 4) { glBeginQuery_(0x88BF, g_tq[g_tq_n & 3]); g_tq_n++; g_tq_active = 1; }
+    else g_tq_active = 0;
+}
 void gpu_present(int x0, int y0, int w, int h) {
     int ww, wh; SDL_GL_GetDrawableSize(g_sdl_window, &ww, &wh);
     view_rect(ww, wh);
@@ -419,9 +578,14 @@ void gpu_present(int x0, int y0, int w, int h) {
     glClearColor_(0, 0, 0, 1); glColorMask_(1, 1, 1, 1); glClear_(GL_COLOR_BUFFER_BIT);
     glBlitFramebuffer_(0, 0, lw, lh, g_view_x, wh - g_view_y - vh, g_view_x + vw, wh - g_view_y, GL_COLOR_BUFFER_BIT, g_disp_sharp ? GL_NEAREST : GL_LINEAR);
     glEnable_(GL_SCISSOR_TEST);
+    if (g_tq_active) { glEndQuery_(0x88BF); g_tq_active = 0; }
+    u64 ts = host_now_ns();
     SDL_GL_SwapWindow(g_sdl_window);
+    g_pf_swap_ns += host_now_ns() - ts;
+    gpu_timer_frame();
+    g_spec_budget = 4;
     glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo);
-    GLenum err = glGetError_(); static int nerr;
+    static int nframes; GLenum err = nframes++ < 600 ? glGetError_() : 0; static int nerr;   // glGetError stalls threaded drivers: early frames only
     if (err && nerr++ < 10) fprintf(stderr, "[gl] error 0x%04X\n", err);
 }
 
@@ -557,8 +721,10 @@ int gpu_copy_to_texture(u32 dst, int x0, int y0, int w, int h, int ow, int oh, i
     for (int k = 0; k < g_nct; k++) if (g_ct[k].dst == dst) { c = &g_ct[k]; break; }
     if (!c) { c = &g_ct[g_nct < 64 ? g_nct++ : (int)(dst >> 5) & 63]; memset(c, 0, sizeof *c); c->dst = dst; }
     int tw = ow * g_scale, th = oh * g_scale;
+    g_pf_copies++;
     if (!c->tex) { glGenTextures_(1, &c->tex); glGenFramebuffers_(1, &c->fbo); }
     if (c->tw != tw || c->th != th) {
+        g_pf_copy_allocs++;
         glBindTexture_(GL_TEXTURE_2D, c->tex);
         glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
         glBindFramebuffer_(GL_FRAMEBUFFER, c->fbo);
