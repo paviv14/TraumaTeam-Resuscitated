@@ -221,6 +221,7 @@ void platform_poll(void) {
     g_input.c = KEY(C) || KEY(Q);  g_input.z = KEY(E) || KEY(F);   // Nunchuk buttons
     g_input.push = KEY(R) || KEY(TAB) || g_wheel_push > 0; if (g_wheel_push > 0) g_wheel_push--;
     g_input.pull = KEY(V) || g_wheel_pull > 0; if (g_wheel_pull > 0) g_wheel_pull--;
+    g_input.swing = KEY(G) || g_input.mmb;
 #undef KEY
     g_input.nx = g_input.ny = 0; g_input.has_analog = 0;
     if (g_pad) {
@@ -228,7 +229,7 @@ void platform_poll(void) {
         g_input.a |= PB(A);                     g_input.b |= PB(B) || axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 0.3f;
         g_input.z |= axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 0.3f;   g_input.c |= PB(LEFTSHOULDER);
         g_input.up |= PB(DPAD_UP); g_input.down |= PB(DPAD_DOWN); g_input.left |= PB(DPAD_LEFT); g_input.right |= PB(DPAD_RIGHT);
-        g_input.one |= PB(X); g_input.two |= PB(Y); g_input.push |= PB(RIGHTSTICK);
+        g_input.one |= PB(X); g_input.two |= PB(Y); g_input.push |= PB(RIGHTSTICK); g_input.swing |= PB(LEFTSTICK);
         g_input.plus |= PB(START); g_input.minus |= PB(BACK); g_input.home |= PB(GUIDE);
         // left stick = Nunchuk stick (y up)
         g_input.nx = axis(SDL_CONTROLLER_AXIS_LEFTX); g_input.ny = -axis(SDL_CONTROLLER_AXIS_LEFTY);

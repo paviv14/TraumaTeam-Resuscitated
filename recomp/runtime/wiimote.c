@@ -21,6 +21,7 @@
 //   A = A, B / RT = B, LT = Z, LB = C, D-pad, X/Y = 1/2, Start/Back = +/-, Guide = Home
 // Push the Remote toward the screen (endoscope etc.): mouse wheel up / R / Tab, or the right-stick click;
 // pull it back: mouse wheel down / V.
+// Swing both down hard (CPR compressions): middle mouse button / G, or the left-stick click.
 //
 // TTPC_INPUT scripts presses for headless tests: "600+10:A;900+5:A,B;1200+60:right"
 //   = from the game's 600th controller read (~ game frame) hold A for 10 reads, etc. Names: A B 1 2 plus minus home up down left right C Z.
@@ -37,7 +38,7 @@ enum {
     BTN_LEFT = 0x0001, BTN_RIGHT = 0x0002, BTN_DOWN = 0x0004, BTN_UP = 0x0008, BTN_PLUS = 0x0010,
     BTN_2 = 0x0100, BTN_1 = 0x0200, BTN_B = 0x0400, BTN_A = 0x0800, BTN_MINUS = 0x1000,
     BTN_Z = 0x2000, BTN_C = 0x4000, BTN_HOME = 0x8000,
-    PUSH_FLAG = 0x40000000, PULL_FLAG = 0x20000000,   // internal: push / pull gestures (not KPAD button bits)
+    PUSH_FLAG = 0x40000000, PULL_FLAG = 0x20000000, SWING_FLAG = 0x10000000,   // internal: push / pull gestures (not KPAD button bits)
 };
 
 static u32 g_hold, g_prev, g_trig, g_rel, g_host_hold;
@@ -52,7 +53,7 @@ static ScriptEv g_script[4096]; static int g_nscript;
 static u32 name_mask(const char *s, int n) {
     static const struct { const char *n; u32 m; } t[] = {
         {"A",BTN_A},{"B",BTN_B},{"1",BTN_1},{"2",BTN_2},{"plus",BTN_PLUS},{"minus",BTN_MINUS},{"home",BTN_HOME},
-        {"up",BTN_UP},{"down",BTN_DOWN},{"left",BTN_LEFT},{"right",BTN_RIGHT},{"C",BTN_C},{"Z",BTN_Z},{"push",PUSH_FLAG},{"pull",PULL_FLAG} };
+        {"up",BTN_UP},{"down",BTN_DOWN},{"left",BTN_LEFT},{"right",BTN_RIGHT},{"C",BTN_C},{"Z",BTN_Z},{"push",PUSH_FLAG},{"pull",PULL_FLAG},{"swing",SWING_FLAG} };
     for (unsigned k = 0; k < sizeof t / sizeof *t; k++) if ((int)strlen(t[k].n) == n && !strncmp(s, t[k].n, n)) return t[k].m;
     fprintf(stderr, "[wiimote] unknown button '%.*s' in TTPC_INPUT\n", n, s);
     return 0;
@@ -123,6 +124,7 @@ void wiimote_frame(void) {
     if (in->c) h |= BTN_C;         if (in->z) h |= BTN_Z;
     if (in->push) h |= PUSH_FLAG;
     if (in->pull) h |= PULL_FLAG;
+    if (in->swing) h |= SWING_FLAG;
     g_host_hold = h;
     g_ppx = g_px; g_ppy = g_py;
     if (g_window_open && !getenv("TTPC_POINTER")) {
@@ -158,6 +160,21 @@ static void push_motion(int dir, u32 hold, float *acc_z) {
     *acc_z = -(target - v) * 60.f - v * 20.f;   // KPAD acc reads opposite to the motion; small and smooth
     if (*acc_z > 0.6f) *acc_z = 0.6f; if (*acc_z < -0.6f) *acc_z = -0.6f;
     if (!dir && !(hold & (BTN_A | BTN_B)) && v == 0) g_dist = g_dist_prev = 1.5f;
+}
+
+// "Swing": bring the Remote (and Nunchuk) down hard and stop - a chest compression in CPR. The
+// accelerometers (in g, KPAD reads the opposite of the motion) see a short drop toward free fall,
+// then the hard stop: a spike of several g, then settle. One press = one swing; held, it repeats.
+static int g_swing_t = -1;
+static float swing_motion(int held) {
+    static const float Y[] = { -0.6f, -0.2f, -0.1f, -3.6f, -3.0f, -1.8f, -1.2f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f };
+    static int was;
+    if (g_swing_t < 0 && held && !was) g_swing_t = 0;
+    was = held;
+    if (g_swing_t < 0) return -1.f;
+    float y = Y[g_swing_t++];
+    if (g_swing_t >= (int)(sizeof Y / sizeof Y[0])) { g_swing_t = held ? 0 : -1; }
+    return y;
 }
 
 static void wf(u32 a, float f) { u32 v; memcpy(&v, &f, 4); W32(a, v); }
@@ -200,15 +217,17 @@ void f_8025F830(CPU *c) {
             fflush(g_rec);
         }
     }
-    float acc_z; push_motion((h & PUSH_FLAG) ? 1 : (h & PULL_FLAG) ? -1 : 0, h, &acc_z); h &= ~(PUSH_FLAG | PULL_FLAG);
+    float acc_z; push_motion((h & PUSH_FLAG) ? 1 : (h & PULL_FLAG) ? -1 : 0, h, &acc_z);
+    float acc_y = swing_motion((h & SWING_FLAG) != 0);
+    h &= ~(PUSH_FLAG | PULL_FLAG | SWING_FLAG);
     g_prev = g_hold; g_hold = h; g_trig = g_hold & ~g_prev; g_rel = g_prev & ~g_hold;
     if (dbg && (g_trig || g_reads % 600 == 0)) fprintf(stderr, "[pad] read %llu vi %llu hold %04X trig %04X\n", (unsigned long long)g_reads, (unsigned long long)g_vi, g_hold, g_trig);
     for (u32 k = 0; k < 0xB0; k += 4) W32(buf + k, 0);
     W32(buf + 0x00, g_hold); W32(buf + 0x04, g_trig); W32(buf + 0x08, g_rel);
     {   // held level, pointing at the TV (plus any push motion along z)
-        static float last_z;
-        wf(buf + 0x0C, 0.f); wf(buf + 0x10, -1.f); wf(buf + 0x14, acc_z);
-        wf(buf + 0x18, sqrtf(1.f + acc_z * acc_z)); wf(buf + 0x1C, fabsf(acc_z - last_z)); last_z = acc_z;
+        static float last_z, last_y = -1.f;
+        wf(buf + 0x0C, 0.f); wf(buf + 0x10, acc_y); wf(buf + 0x14, acc_z);
+        wf(buf + 0x18, sqrtf(acc_y * acc_y + acc_z * acc_z)); wf(buf + 0x1C, fabsf(acc_z - last_z) + fabsf(acc_y - last_y)); last_z = acc_z; last_y = acc_y;
     }
     wf(buf + 0x20, g_px); wf(buf + 0x24, g_py);
     float vx = g_px - g_ppx, vy = g_py - g_ppy;
@@ -222,7 +241,10 @@ void f_8025F830(CPU *c) {
     W8(buf + 0x5E, g_point_valid ? 2 : 0);           // pointer seen (2 = both sensor bar dots)
     W8(buf + 0x5F, 5);                               // data format: Nunchuk + accelerometer + pointer
     wf(buf + 0x60, g_sx); wf(buf + 0x64, g_sy);     // Nunchuk stick
-    wf(buf + 0x68, 0.f); wf(buf + 0x6C, -1.f); wf(buf + 0x70, 0.f); wf(buf + 0x74, 1.f);
+    {   // Nunchuk accelerometer: follows the Remote's swing (both hands come down together in CPR)
+        static float last_ny = -1.f;
+        wf(buf + 0x68, 0.f); wf(buf + 0x6C, acc_y); wf(buf + 0x70, 0.f); wf(buf + 0x74, fabsf(acc_y)); wf(buf + 0x78, fabsf(acc_y - last_ny)); last_ny = acc_y;
+    }
     if (err) W32(err, 0);
     c->r[3] = 1;
 }

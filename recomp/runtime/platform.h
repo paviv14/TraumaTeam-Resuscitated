@@ -10,6 +10,7 @@ typedef struct {
     int stick_up, stick_down, stick_left, stick_right;                    // Nunchuk stick (digital, keys)
     float nx, ny; int has_analog;                                         // Nunchuk stick (analog, pad)
     int push, pull;           // move the Remote toward / away from the screen (wheel, R / V, right-stick click)
+    int swing;                // swing the Remote (and Nunchuk) down hard: CPR compressions (middle mouse, G, left-stick click)
 } Input;
 extern Input g_input;
 

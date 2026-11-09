@@ -167,55 +167,63 @@ static void mtx_apply(u32 base, const float in[3], float out[3], int rows) {
 // Lights at XF 0x600 + 16 * i: +3 colour, +4..6 cos attenuation, +7..9 distance attenuation,
 // +10..12 position, +13..15 direction (or half-angle for specular).
 static void unpack_rgba(u32 c, float o[4]) { o[0] = (c >> 24) / 255.f; o[1] = ((c >> 16) & 255) / 255.f; o[2] = ((c >> 8) & 255) / 255.f; o[3] = (c & 255) / 255.f; }
-static float light_one(u32 ctl, int i, int comp, const float pos[3], const float n[3]) {
-    u32 L = 0x600 + 16 * i;
-    float lp[3] = { xf_f(L + 10), xf_f(L + 11), xf_f(L + 12) }, ld[3] = { xf_f(L + 13), xf_f(L + 14), xf_f(L + 15) };
-    float ca[3] = { xf_f(L + 4), xf_f(L + 5), xf_f(L + 6) }, da[3] = { xf_f(L + 7), xf_f(L + 8), xf_f(L + 9) };
-    float col[4]; unpack_rgba(xfmem[L + 3], col);
+typedef struct { float pos[3], dir[3], ca[3], da[3], col[4]; } Light;
+static Light g_light[8];
+static void lights_load(void) {   // decode the light registers once per draw (not per vertex)
+    for (int i = 0; i < 8; i++) {
+        u32 L = 0x600 + 16 * i; Light *l = &g_light[i];
+        for (int k = 0; k < 3; k++) { l->ca[k] = xf_f(L + 4 + k); l->da[k] = xf_f(L + 7 + k); l->pos[k] = xf_f(L + 10 + k); l->dir[k] = xf_f(L + 13 + k); }
+        unpack_rgba(xfmem[L + 3], l->col);
+    }
+}
+// attenuation x diffuse factor of one light for a channel control word
+static float light_factor(u32 ctl, const Light *l, const float pos[3], const float n[3]) {
     float dir[3], attn = 1.f;
     if ((ctl >> 9) & 1) {
         if ((ctl >> 10) & 1) {   // spot / distance attenuation
-            dir[0] = lp[0] - pos[0]; dir[1] = lp[1] - pos[1]; dir[2] = lp[2] - pos[2];
+            dir[0] = l->pos[0] - pos[0]; dir[1] = l->pos[1] - pos[1]; dir[2] = l->pos[2] - pos[2];
             float d2 = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2], d = sqrtf(d2);
-            if (d > 0) { dir[0] /= d; dir[1] /= d; dir[2] /= d; }
-            float c = dir[0] * ld[0] + dir[1] * ld[1] + dir[2] * ld[2]; if (c < 0) c = 0;
-            float num = ca[0] + ca[1] * c + ca[2] * c * c; if (num < 0) num = 0;
-            float den = da[0] + da[1] * d + da[2] * d2;
+            if (d > 0) { float r = 1.f / d; dir[0] *= r; dir[1] *= r; dir[2] *= r; }
+            float c = dir[0] * l->dir[0] + dir[1] * l->dir[1] + dir[2] * l->dir[2]; if (c < 0) c = 0;
+            float num = l->ca[0] + l->ca[1] * c + l->ca[2] * c * c; if (num < 0) num = 0;
+            float den = l->da[0] + l->da[1] * d + l->da[2] * d2;
             attn = den != 0 ? num / den : 0;
         } else {                 // specular: light position = direction, direction = half-angle vector
-            float l = sqrtf(lp[0] * lp[0] + lp[1] * lp[1] + lp[2] * lp[2]);
-            for (int k = 0; k < 3; k++) dir[k] = l > 0 ? lp[k] / l : 0;
+            float len = sqrtf(l->pos[0] * l->pos[0] + l->pos[1] * l->pos[1] + l->pos[2] * l->pos[2]);
+            for (int k = 0; k < 3; k++) dir[k] = len > 0 ? l->pos[k] / len : 0;
             float nl = n[0] * dir[0] + n[1] * dir[1] + n[2] * dir[2];
-            float c = nl >= 0 ? n[0] * ld[0] + n[1] * ld[1] + n[2] * ld[2] : 0; if (c < 0) c = 0;
-            float num = ca[0] + ca[1] * c + ca[2] * c * c; if (num < 0) num = 0;
-            float den = da[0] + da[1] * c + da[2] * c * c;
+            float c = nl >= 0 ? n[0] * l->dir[0] + n[1] * l->dir[1] + n[2] * l->dir[2] : 0; if (c < 0) c = 0;
+            float num = l->ca[0] + l->ca[1] * c + l->ca[2] * c * c; if (num < 0) num = 0;
+            float den = l->da[0] + l->da[1] * c + l->da[2] * c * c;
             attn = den != 0 ? num / den : 0;
         }
     } else {
-        dir[0] = lp[0] - pos[0]; dir[1] = lp[1] - pos[1]; dir[2] = lp[2] - pos[2];
+        dir[0] = l->pos[0] - pos[0]; dir[1] = l->pos[1] - pos[1]; dir[2] = l->pos[2] - pos[2];
         float d = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
-        if (d > 0) { dir[0] /= d; dir[1] /= d; dir[2] /= d; }
+        if (d > 0) { float r = 1.f / d; dir[0] *= r; dir[1] *= r; dir[2] *= r; }
     }
     float diff = 1.f;
     int df = (ctl >> 7) & 3;
     if (df) { diff = dir[0] * n[0] + dir[1] * n[1] + dir[2] * n[2]; if (df == 2 && diff < 0) diff = 0; }
-    return attn * diff * col[comp];
+    return attn * diff;
 }
-static float chan_value(u32 ctl, u32 matreg, u32 ambreg, const float vc[4], int comp, const float pos[3], const float n[3]) {
+// channel value for components [c0, c1)
+static void chan_value(u32 ctl, u32 matreg, u32 ambreg, const float vc[4], int c0, int c1, const float pos[3], const float n[3], float out[4]) {
     float m[4], a[4]; unpack_rgba(matreg, m); unpack_rgba(ambreg, a);
-    float mat = (ctl & 1) ? vc[comp] : m[comp];
-    if (!((ctl >> 1) & 1)) return mat;
-    float amb = ((ctl >> 6) & 1) ? vc[comp] : a[comp];
-    float lit = amb;
+    float lit[4];
+    for (int k = c0; k < c1; k++) { out[k] = (ctl & 1) ? vc[k] : m[k]; lit[k] = ((ctl >> 6) & 1) ? vc[k] : a[k]; }
+    if (!((ctl >> 1) & 1)) return;
     u32 mask = ((ctl >> 2) & 15) | (((ctl >> 11) & 15) << 4);
-    for (int i = 0; i < 8; i++) if (mask & (1u << i)) lit += light_one(ctl, i, comp, pos, n);
-    if (lit < 0) lit = 0; if (lit > 1) lit = 1;
-    return mat * lit;
+    for (int i = 0; i < 8; i++) if (mask & (1u << i)) {
+        float f = light_factor(ctl, &g_light[i], pos, n);
+        for (int k = c0; k < c1; k++) lit[k] += f * g_light[i].col[k];
+    }
+    for (int k = c0; k < c1; k++) { float L = lit[k] < 0 ? 0 : lit[k] > 1 ? 1 : lit[k]; out[k] *= L; }
 }
 static void light_color(const Vtx *v, int ch, const float pos[3], const float n[3], float out[4]) {
     u32 cc = xfreg[0x0E + ch], ac = xfreg[0x10 + ch], mat = xfreg[0x0C + ch], amb = xfreg[0x0A + ch];
-    for (int k = 0; k < 3; k++) out[k] = chan_value(cc, mat, amb, v->col[ch], k, pos, n);
-    out[3] = chan_value(ac, mat, amb, v->col[ch], 3, pos, n);
+    chan_value(cc, mat, amb, v->col[ch], 0, 3, pos, n, out);
+    chan_value(ac, mat, amb, v->col[ch], 3, 4, pos, n, out);
 }
 static void transform(const Vtx *v, Out *o) {
     float p[3]; mtx_apply((u32)v->pnmtx * 4, v->pos, p, 3);
@@ -955,6 +963,8 @@ static void draw_prims(int prim, int vat, int n, u32 *p) {
     if (!g_render && !dumping) return;
     setup_draw();                     // also decodes (and, when dumping, saves) the draw's textures
     if (!g_render) return;
+    lights_load();
+    #pragma omp parallel for schedule(static) if (n >= 512)
     for (int k = 0; k < n; k++) transform(&vin[k], &vout[k]);
     void (*tri)(const Out *, const Out *, const Out *) = g_gpu ? collect_tri : draw_tri;
     g_ntris = 0;
