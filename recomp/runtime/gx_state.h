@@ -14,6 +14,8 @@ typedef struct {
     u64 hash, data_hash; u32 version;
     u32 gl_tex, gl_version;            // owned by the GPU backend
     const u8 *hi; int hw, hh;          // replacement from a texture pack (RGBA bytes), or NULL
+    int fmt;
+    u64 partner;                       // dual-palette image: hash of the other half last paired with
 } TexEntry;
 
 typedef struct { TexEntry *e; const u32 *px; int w, h, ws, wt, linear; u32 gl_copy; } TexV;

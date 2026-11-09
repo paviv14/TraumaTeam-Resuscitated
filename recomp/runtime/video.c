@@ -299,6 +299,8 @@ static void konst_value(int stage, int alpha, float out[4]) {
 static TexEntry g_tcache[1024];
 static u64 g_st_decodes, g_st_decoded_px;
 const u8 *texpack_lookup(u64 hash, int *w, int *h); void texpack_dump(u64 hash, int w, int h, int fmt, const u32 *px);
+const u8 *texpack_lookup_half(u64 key, int which, int *w, int *h);
+u64 texpack_pair_key(u64 a, u64 b);
 static u32 g_copy_dst[32]; static int g_ncopy;     // recent EFB->texture destinations
 static int is_copy_target(u32 a) { a &= 0x1FFFFFFF; for (int k = 0; k < g_ncopy; k++) if (g_copy_dst[k] == a) return 1; return 0; }
 static u32 g_tgen = 1;               // bumped when cached textures need revalidation
@@ -350,11 +352,12 @@ static TexEntry *tex_decode(const Tex *t, u32 img0, u32 tlutreg) {
     g_st_decodes++; g_st_decoded_px += n;
     if (getenv("TTPC_TEXLOG") && !fresh) fprintf(stderr, "[tex] re-decode %08X %dx%d fmt %d (frame %llu)\n", t->addr, t->w, t->h, t->fmt, (unsigned long long)g_copies);
     e->addr = t->addr; e->img0 = img0; e->tlut = tlutreg; e->w = t->w; e->h = t->h; e->hash = h; e->version++;
+    e->fmt = t->fmt; e->partner = 0;
     // texture packs: render-target textures (EFB copies) are excluded - their content changes
     e->hi = NULL;
     if (!is_copy_target(t->addr)) {
         e->hi = texpack_lookup(h, &e->hw, &e->hh);
-        texpack_dump(h, t->w, t->h, t->fmt, e->px);
+        if (!pal) texpack_dump(h, t->w, t->h, t->fmt, e->px);   // paletted ones: see resolve_pairs()
     }
     return e;
 }
@@ -362,6 +365,39 @@ static TexEntry *tex_decode(const Tex *t, u32 img0, u32 tlutreg) {
 // ---------------------------------------------------------------- per-draw pipeline state
 // Everything the pixel loop (or the GPU) needs, decoded from BP registers once per draw call.
 static Setup S;
+
+// Trauma Team stores its 2D art as CI4/CI8 images with TWO IA8 palettes: the same texels are bound to
+// two texture maps, palette A giving red (intensity) + green (alpha), palette B blue + alpha, and the
+// TEV stages put the channels together. For texture packs such a pair is one full-colour image, keyed
+// by texpack_pair_key(hash A, hash B); a replacement is split back into the two halves on upload.
+static void resolve_pairs(int nmaps_used) {
+    int order[8], n = 0;   // maps in the order the stages first use them
+    for (int s = 0; s < S.nst; s++) { int m = S.st[s].map; if (m < 0 || !S.tex[m].e) continue;
+        int seen = 0; for (int k = 0; k < n; k++) seen |= order[k] == m; if (!seen) order[n++] = m; }
+    int paired[8] = { 0 };
+    for (int i = 0; i < n; i++) for (int j = i + 1; j < n; j++) {
+        TexEntry *a = S.tex[order[i]].e, *b = S.tex[order[j]].e;
+        if (a == b || a->addr != b->addr || a->w != b->w || a->h != b->h || a->fmt < 8 || a->fmt > 9 || b->fmt != a->fmt) continue;
+        paired[order[i]] = paired[order[j]] = 1;
+        if (a->partner == b->hash && b->partner == a->hash) continue;   // already resolved
+        a->partner = b->hash; b->partner = a->hash;
+        u64 k = texpack_pair_key(a->hash, b->hash); int w, h;
+        TexEntry *A = a, *B = b;
+        if (!texpack_lookup(k, &w, &h)) { u64 k2 = texpack_pair_key(b->hash, a->hash); if (texpack_lookup(k2, &w, &h)) { k = k2; A = b; B = a; } }
+        const u8 *ha = texpack_lookup_half(k, 0, &A->hw, &A->hh), *hb = texpack_lookup_half(k, 1, &B->hw, &B->hh);
+        if (ha && hb) { A->hi = ha; B->hi = hb; A->version++; B->version++; }
+        else {   // dump the combined image (A = the map the first stage samples)
+            static u32 *buf; static size_t cap; size_t np = (size_t)a->w * a->h;
+            if (cap < np) { free(buf); buf = malloc(np * 4); cap = np; }
+            for (size_t q = 0; q < np; q++) { u32 ca = a->px[q], cb = b->px[q];
+                buf[q] = (ca & 0xFF000000u) | ((ca & 0xFF) << 16) | ((cb >> 16) & 0xFF00) | (cb & 0xFF); }
+            if (!is_copy_target(a->addr)) texpack_dump(k, a->w, a->h, a->fmt, buf);
+        }
+    }
+    for (int k = 0; k < n; k++) { int m = order[k]; TexEntry *e = S.tex[m].e;   // single paletted textures
+        if (!paired[m] && e->fmt >= 8 && e->fmt <= 10 && !is_copy_target(e->addr)) texpack_dump(e->hash, e->w, e->h, e->fmt, e->px); }
+    (void)nmaps_used;
+}
 
 static void setup_draw(void) {
     S.nst = ((bp[0x00] >> 10) & 15) + 1;
@@ -431,6 +467,7 @@ static void setup_draw(void) {
         S.tex[m].w = t.w; S.tex[m].h = t.h; S.tex[m].ws = t.wrap_s; S.tex[m].wt = t.wrap_t;
         S.tex[m].linear = (mode0 >> 4) & 1;                       // magnification filter
     }
+    resolve_pairs(0);
     u32 ac = bp[0xF3];
     S.ac_r0 = ac & 255; S.ac_r1 = (ac >> 8) & 255; S.ac_c0 = (ac >> 16) & 7; S.ac_c1 = (ac >> 19) & 7; S.ac_op = (ac >> 22) & 3;
     S.zm = bp[0x40]; S.bm = bp[0x41];

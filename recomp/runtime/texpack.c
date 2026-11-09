@@ -25,7 +25,7 @@
 
 void host_mkdir(const char *path);
 
-typedef struct { u64 hash; char *path; u8 *rgba; int w, h, tried; } Repl;
+typedef struct { u64 hash; char *path; u8 *rgba; int w, h, tried; u8 *half[2]; } Repl;
 static Repl *g_repl; static int g_nrepl, g_caprepl;
 static char g_dump_dir[512]; static int g_dump = -1;
 static u64 *g_dumped; static int g_ndumped, g_capdumped;
@@ -48,7 +48,7 @@ static void scan(const char *dir, int depth) {
         if (n < 4 || (strcmp(e->d_name + n - 4, ".png") && strcmp(e->d_name + n - 4, ".PNG"))) continue;
         if (!parse_hash(e->d_name, &h)) continue;
         if (g_nrepl == g_caprepl) { g_caprepl = g_caprepl ? g_caprepl * 2 : 256; g_repl = realloc(g_repl, sizeof *g_repl * g_caprepl); }
-        g_repl[g_nrepl++] = (Repl){ h, strdup(p), NULL, 0, 0, 0 };
+        g_repl[g_nrepl++] = (Repl){ h, strdup(p), NULL, 0, 0, 0, { NULL, NULL } };
     }
     closedir(d);
 }
@@ -85,6 +85,31 @@ const u8 *texpack_lookup(u64 hash, int *w, int *h) {
         }
         if (!r->rgba) return NULL;
         *w = r->w; *h = r->h; return r->rgba;
+    }
+    return NULL;
+}
+
+// Key of a dual-palette image (see resolve_pairs in video.c): A = red/green half, B = blue/alpha half.
+u64 texpack_pair_key(u64 a, u64 b) {
+    u64 k = a ^ (b * 0x9E3779B97F4A7C15ull);
+    k ^= k >> 31; k *= 0xBF58476D1CE4E5B9ull; k ^= k >> 29;
+    return k;
+}
+// One half of a full-colour replacement, in the form the game's TEV stages expect from that map:
+// which 0 -> (R, R, R, G), which 1 -> (B, B, B, A) - an IA8 texel is (I, I, I, A).
+const u8 *texpack_lookup_half(u64 key, int which, int *w, int *h) {
+    if (!texpack_lookup(key, w, h)) return NULL;
+    for (int k = 0; k < g_nrepl; k++) {
+        Repl *r = &g_repl[k];
+        if (r->hash != key || !r->rgba) continue;
+        if (!r->half[which]) {
+            size_t n = (size_t)r->w * r->h; u8 *o = malloc(n * 4);
+            for (size_t i = 0; i < n; i++) { const u8 *p = r->rgba + 4 * i;
+                u8 c = which ? p[2] : p[0], a = which ? p[3] : p[1];
+                o[4 * i] = o[4 * i + 1] = o[4 * i + 2] = c; o[4 * i + 3] = a; }
+            r->half[which] = o;
+        }
+        return r->half[which];
     }
     return NULL;
 }
