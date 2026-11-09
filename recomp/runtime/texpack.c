@@ -74,7 +74,9 @@ void texpack_init(void) {
 }
 
 // Replacement for a texture hash: RGBA bytes (loaded on first use), or NULL.
+#include "platform.h"
 const u8 *texpack_lookup(u64 hash, int *w, int *h) {
+    if (!g_cfg.textures) return NULL;
     for (int k = 0; k < g_nrepl; k++) {
         Repl *r = &g_repl[k];
         if (r->hash != hash) continue;

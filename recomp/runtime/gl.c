@@ -386,23 +386,156 @@ void gpu_clear(int x0, int y0, int w, int h, u32 c, float z, int color, int alph
 
 extern SDL_Window *g_sdl_window;
 int g_view_x, g_view_y, g_view_w, g_view_h;   // where the picture sits in the window (for the mouse)
-void gpu_present(int x0, int y0, int w, int h) {
-    int ww, wh; SDL_GL_GetDrawableSize(g_sdl_window, &ww, &wh);
-    // fit a 4:3 picture into the window
+// Display options (set by the options menu, menu.c)
+int g_disp_stretch, g_disp_sharp;
+static GLuint g_last_fbo, g_last_tex; static int g_last_w, g_last_h;   // the last displayed picture
+static void view_rect(int ww, int wh) {   // fit the picture into the window (4:3, or stretched)
     int vw = ww, vh = ww * 3 / 4;
     if (vh > wh) { vh = wh; vw = wh * 4 / 3; }
+    if (g_disp_stretch) { vw = ww; vh = wh; }
     g_view_x = (ww - vw) / 2; g_view_y = (wh - vh) / 2; g_view_w = vw; g_view_h = vh;
-    glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_fbo);
-    glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, 0);
+}
+void gpu_present(int x0, int y0, int w, int h) {
+    int ww, wh; SDL_GL_GetDrawableSize(g_sdl_window, &ww, &wh);
+    view_rect(ww, wh);
+    int vw = g_view_w, vh = g_view_h;
+    // keep a copy of the displayed picture (the options menu shows it, paused, behind itself)
+    int lw = w * g_scale, lh = h * g_scale;
+    if (!g_last_fbo) { glGenFramebuffers_(1, &g_last_fbo); glGenTextures_(1, &g_last_tex); }
+    if (lw != g_last_w || lh != g_last_h) {
+        glBindTexture_(GL_TEXTURE_2D, g_last_tex);
+        glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, lw, lh, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        glBindFramebuffer_(GL_FRAMEBUFFER, g_last_fbo);
+        glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_last_tex, 0);
+        g_last_w = lw; g_last_h = lh;
+    }
     glDisable_(GL_SCISSOR_TEST);
+    glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_fbo); glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, g_last_fbo);
+    glBlitFramebuffer_(x0 * g_scale, (528 - y0 - h) * g_scale, (x0 + w) * g_scale, (528 - y0) * g_scale, 0, 0, lw, lh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_last_fbo);
+    glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, 0);
     glClearColor_(0, 0, 0, 1); glColorMask_(1, 1, 1, 1); glClear_(GL_COLOR_BUFFER_BIT);
-    glBlitFramebuffer_(x0 * g_scale, (528 - y0 - h) * g_scale, (x0 + w) * g_scale, (528 - y0) * g_scale,
-                       g_view_x, wh - g_view_y - vh, g_view_x + vw, wh - g_view_y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    glBlitFramebuffer_(0, 0, lw, lh, g_view_x, wh - g_view_y - vh, g_view_x + vw, wh - g_view_y, GL_COLOR_BUFFER_BIT, g_disp_sharp ? GL_NEAREST : GL_LINEAR);
     glEnable_(GL_SCISSOR_TEST);
     SDL_GL_SwapWindow(g_sdl_window);
     glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo);
     GLenum err = glGetError_(); static int nerr;
     if (err && nerr++ < 10) fprintf(stderr, "[gl] error 0x%04X\n", err);
+}
+
+// Change the internal resolution (EFB scale) while running.
+int gpu_get_scale(void) { return g_scale; }
+void gpu_set_scale(int scale) {
+    if (scale < 1) scale = 1; if (scale > 8) scale = 8;
+    if (scale == g_scale) return;
+    g_scale = scale; g_W = 640 * scale; g_H = 528 * scale;
+    glBindTexture_(GL_TEXTURE_2D, g_color);
+    glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, g_W, g_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glBindRenderbuffer_(GL_RENDERBUFFER, g_depth);
+    glRenderbufferStorage_(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, g_W, g_H);
+    glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo);
+    glDisable_(GL_SCISSOR_TEST); glViewport_(0, 0, g_W, g_H);
+    glClearColor_(0, 0, 0, 0); glClearDepth_(1.0); glColorMask_(1, 1, 1, 1); glDepthMask_(GL_TRUE); glClear_(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable_(GL_SCISSOR_TEST);
+    fprintf(stderr, "[gl] internal resolution %dx%d\n", g_W, g_H);
+}
+
+// ---------------------------------------------------------------- overlay (options menu)
+#include "font_atlas.h"
+static const char *OVS =
+    "#version 330 core\n"
+    "layout(location = 0) in vec2 aPos; layout(location = 1) in vec2 aUV; layout(location = 2) in vec4 aCol;\n"
+    "uniform vec2 uScreen; out vec2 vUV; out vec4 vCol;\n"
+    "void main() { vUV = aUV; vCol = aCol; gl_Position = vec4(aPos.x / uScreen.x * 2.0 - 1.0, 1.0 - aPos.y / uScreen.y * 2.0, 0.0, 1.0); }\n";
+static const char *OFS =
+    "#version 330 core\n"
+    "uniform sampler2D uTex; uniform int uMode; in vec2 vUV; in vec4 vCol; out vec4 o;\n"
+    "void main() { if (uMode == 0) o = vCol; else if (uMode == 1) o = vec4(vCol.rgb, vCol.a * texture(uTex, vUV).r);\n"
+    "  else o = vec4(texture(uTex, vUV).rgb * vCol.rgb, 1.0); }\n";
+typedef struct { float x, y, u, v, r, g, b, a; } OV;
+static GLuint g_oprog, g_ovao, g_ovbo, g_ofont; static GLint g_ou_screen, g_ou_mode;
+static OV g_ov[6 * 4096]; static int g_nov, g_omode = -1; static int g_ow, g_oh;
+static int overlay_init(void) {
+    if (g_oprog) return 1;
+    GLuint v = compile(GL_VERTEX_SHADER, OVS), f = compile(GL_FRAGMENT_SHADER, OFS);
+    if (!v || !f) return 0;
+    g_oprog = glCreateProgram_(); glAttachShader_(g_oprog, v); glAttachShader_(g_oprog, f); glLinkProgram_(g_oprog);
+    g_ou_screen = glGetUniformLocation_(g_oprog, "uScreen"); g_ou_mode = glGetUniformLocation_(g_oprog, "uMode");
+    glUseProgram_(g_oprog); glUniform1i_(glGetUniformLocation_(g_oprog, "uTex"), 0);
+    glGenVertexArrays_(1, &g_ovao); glBindVertexArray_(g_ovao);
+    glGenBuffers_(1, &g_ovbo); glBindBuffer_(GL_ARRAY_BUFFER, g_ovbo);
+    glVertexAttribPointer_(0, 2, GL_FLOAT, GL_FALSE, sizeof(OV), (void *)0);
+    glVertexAttribPointer_(1, 2, GL_FLOAT, GL_FALSE, sizeof(OV), (void *)8);
+    glVertexAttribPointer_(2, 4, GL_FLOAT, GL_FALSE, sizeof(OV), (void *)16);
+    for (int i = 0; i < 3; i++) glEnableVertexAttribArray_(i);
+    glGenTextures_(1, &g_ofont); glBindTexture_(GL_TEXTURE_2D, g_ofont);
+    glPixelStorei_(GL_UNPACK_ALIGNMENT, 1);
+    glTexImage2D_(GL_TEXTURE_2D, 0, GL_R8, FONT_W, FONT_H, 0, GL_RED, GL_UNSIGNED_BYTE, g_font_px);
+    glPixelStorei_(GL_UNPACK_ALIGNMENT, 4);
+    glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glUseProgram_(g_prog); glBindVertexArray_(g_vao); glBindBuffer_(GL_ARRAY_BUFFER, g_vbo);
+    return 1;
+}
+static void ov_flush(void) {
+    if (!g_nov) return;
+    glBindBuffer_(GL_ARRAY_BUFFER, g_ovbo);
+    glBufferData_(GL_ARRAY_BUFFER, (GLsizeiptr)(sizeof(OV) * g_nov), g_ov, GL_STREAM_DRAW);
+    glUniform1i_(g_ou_mode, g_omode);
+    glActiveTexture_(GL_TEXTURE0); glBindTexture_(GL_TEXTURE_2D, g_omode == 1 ? g_ofont : g_last_tex);
+    glDrawArrays_(GL_TRIANGLES, 0, g_nov);
+    g_nov = 0;
+}
+static void ov_quad(int mode, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, const float c[4]) {
+    if (mode != g_omode) { ov_flush(); g_omode = mode; }
+    if (g_nov + 6 > (int)(sizeof g_ov / sizeof g_ov[0])) ov_flush();
+    OV q[4] = { { x0, y0, u0, v0, c[0], c[1], c[2], c[3] }, { x1, y0, u1, v0, c[0], c[1], c[2], c[3] },
+                { x0, y1, u0, v1, c[0], c[1], c[2], c[3] }, { x1, y1, u1, v1, c[0], c[1], c[2], c[3] } };
+    g_ov[g_nov++] = q[0]; g_ov[g_nov++] = q[1]; g_ov[g_nov++] = q[2];
+    g_ov[g_nov++] = q[1]; g_ov[g_nov++] = q[3]; g_ov[g_nov++] = q[2];
+}
+// Start an overlay frame: the last game picture (dimmed by `dim`) fills the window as usual.
+int gpu_overlay_begin(int *w, int *h, float dim) {
+    if (!overlay_init()) return 0;
+    int ww, wh; SDL_GL_GetDrawableSize(g_sdl_window, &ww, &wh); g_ow = ww; g_oh = wh;
+    view_rect(ww, wh);
+    glBindFramebuffer_(GL_FRAMEBUFFER, 0); glViewport_(0, 0, ww, wh);
+    glDisable_(GL_SCISSOR_TEST); glDisable_(GL_DEPTH_TEST); glDisable_(GL_CULL_FACE);
+    glColorMask_(1, 1, 1, 1); glClearColor_(0, 0, 0, 1); glClear_(GL_COLOR_BUFFER_BIT);
+    glEnable_(GL_BLEND); glBlendEquation_(GL_FUNC_ADD); glBlendFunc_(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram_(g_oprog); glBindVertexArray_(g_ovao);
+    GLfloat sc[2] = { (float)ww, (float)wh }; glUniform2fv_(g_ou_screen, 1, sc);
+    g_omode = -1; g_nov = 0;
+    if (g_last_tex) { float c[4] = { 1 - dim, 1 - dim, 1 - dim, 1 };
+        ov_quad(2, (float)g_view_x, (float)g_view_y, (float)(g_view_x + g_view_w), (float)(g_view_y + g_view_h), 0, 1, 1, 0, c); }
+    *w = ww; *h = wh;
+    return 1;
+}
+void gpu_overlay_rect(float x, float y, float w, float h, const float rgba[4]) { ov_quad(0, x, y, x + w, y + h, 0, 0, 0, 0, rgba); }
+// Text at (x, y) = top-left, `px` = line height in pixels. Returns the width drawn.
+float gpu_overlay_text(float x, float y, float px, const char *s, const float rgba[4]) {
+    float k = px / FONT_LINE, x0 = x;
+    for (; *s; s++) {
+        int c = (unsigned char)*s; if (c < 32 || c > 126) c = '?';
+        const short *g = g_font_glyph[c - 32];
+        if (c != ' ') ov_quad(1, x + g[4] * k, y, x + (g[4] + g[2]) * k, y + g[3] * k,
+                              (float)g[0] / FONT_W, (float)g[1] / FONT_H, (float)(g[0] + g[2]) / FONT_W, (float)(g[1] + g[3]) / FONT_H, rgba);
+        x += g[5] * k;
+    }
+    return x - x0;
+}
+float gpu_overlay_text_width(float px, const char *s) {
+    float k = px / FONT_LINE, w = 0;
+    for (; *s; s++) { int c = (unsigned char)*s; if (c < 32 || c > 126) c = '?'; w += g_font_glyph[c - 32][5] * k; }
+    return w;
+}
+void gpu_overlay_end(void) {
+    ov_flush();
+    SDL_GL_SwapWindow(g_sdl_window);
+    // back to the game's state
+    glDisable_(GL_BLEND); glUseProgram_(g_prog); glBindVertexArray_(g_vao);
+    glBindBuffer_(GL_ARRAY_BUFFER, g_vbo);   // gpu_draw uploads into the bound buffer
+    glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo); glViewport_(0, 0, g_W, g_H); glEnable_(GL_SCISSOR_TEST);
 }
 
 int gpu_read_rgb(int x0, int y0, int w, int h, u8 *out) {
@@ -483,6 +616,14 @@ int gpu_copy_to_texture(u32 dst, int x0, int y0, int w, int h, int ow, int oh, i
 u32 gpu_copy_lookup(u32 addr, int w, int h) { (void)addr; (void)w; (void)h; return 0; }
 int gpu_read_rgba(int x0, int y0, int w, int h, u32 *out) { (void)x0; (void)y0; (void)w; (void)h; (void)out; return 0; }
 int gpu_init(int scale) { (void)scale; return 0; }
+int g_disp_stretch, g_disp_sharp;
+int gpu_get_scale(void) { return 1; }
+void gpu_set_scale(int scale) { (void)scale; }
+int gpu_overlay_begin(int *w, int *h, float dim) { (void)w; (void)h; (void)dim; return 0; }
+void gpu_overlay_rect(float x, float y, float w, float h, const float rgba[4]) { (void)x; (void)y; (void)w; (void)h; (void)rgba; }
+float gpu_overlay_text(float x, float y, float px, const char *s, const float rgba[4]) { (void)x; (void)y; (void)px; (void)s; (void)rgba; return 0; }
+float gpu_overlay_text_width(float px, const char *s) { (void)px; (void)s; return 0; }
+void gpu_overlay_end(void) {}
 void gpu_draw(const Setup *s, const Out *v, int n) { (void)s; (void)v; (void)n; }
 void gpu_clear(int x0, int y0, int w, int h, u32 c, float z, int color, int alpha, int depth) { (void)x0; (void)y0; (void)w; (void)h; (void)c; (void)z; (void)color; (void)alpha; (void)depth; }
 void gpu_present(int x0, int y0, int w, int h) { (void)x0; (void)y0; (void)w; (void)h; }

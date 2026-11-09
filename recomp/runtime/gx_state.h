@@ -51,3 +51,12 @@ u32  gpu_copy_lookup(u32 addr, int w, int h);   // GPU texture of an EFB copy, o
 int  gpu_read_rgba(int x0, int y0, int w, int h, u32 *out);  // native-res R<<24|G<<16|B<<8|A, top row first
 int  gpu_read_rgb(int x0, int y0, int w, int h, u8 *out);   // for frame dumps (top row first)
 extern int g_gpu;
+// display options and the overlay used by the options menu (menu.c)
+extern int g_disp_stretch, g_disp_sharp;
+int  gpu_get_scale(void);
+void gpu_set_scale(int scale);
+int  gpu_overlay_begin(int *w, int *h, float dim);
+void gpu_overlay_rect(float x, float y, float w, float h, const float rgba[4]);
+float gpu_overlay_text(float x, float y, float px, const char *s, const float rgba[4]);
+float gpu_overlay_text_width(float px, const char *s);
+void gpu_overlay_end(void);

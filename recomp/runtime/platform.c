@@ -70,8 +70,16 @@ static void sdl_audio_push(const s16 *lr, int frames, int rate) {
     }
     // keep latency bounded: if more than ~120 ms is queued (host clock drift), drop this buffer
     if (SDL_GetQueuedAudioSize(g_audio) > (u32)rate * 4 * 120 / 1000) return;
+    if (g_cfg.volume < 100) {   // volume setting
+        static s16 *buf; static int cap;
+        if (cap < frames * 2) { free(buf); buf = malloc(sizeof(s16) * frames * 2); cap = frames * 2; }
+        for (int i = 0; i < frames * 2; i++) buf[i] = (s16)(lr[i] * g_cfg.volume / 100);
+        lr = buf;
+    }
     SDL_QueueAudio(g_audio, lr, (u32)frames * 4);
 }
+
+void platform_audio_pause(int pause) { if (g_audio) { SDL_PauseAudioDevice(g_audio, pause); if (pause) SDL_ClearQueuedAudio(g_audio); } }
 
 int platform_init(void) {
     if (getenv("TTPC_HEADLESS")) return 0;
@@ -91,8 +99,9 @@ int platform_init(void) {
                                  640 * zoom, 480 * zoom, SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
         if (g_win && (g_glctx = SDL_GL_CreateContext(g_win))) {
             SDL_GL_SetSwapInterval(0);   // the game paces itself to the 60 Hz retrace
-            int scale = getenv("TTPC_SCALE") ? atoi(getenv("TTPC_SCALE")) : 1;
-            if (gpu_init(scale)) {
+            settings_load();
+            if (gpu_init(g_cfg.scale)) {
+                settings_apply();
                 SDL_ShowCursor(SDL_DISABLE);
                 g_window_open = 1;
                 return 1;
@@ -160,8 +169,13 @@ void platform_poll(void) {
         if (e.type == SDL_MOUSEWHEEL && e.wheel.y > 0) { g_wheel_push = 8; g_wheel_pull = 0; }   // each notch keeps the motion going ~0.13 s
         if (e.type == SDL_MOUSEWHEEL && e.wheel.y < 0) { g_wheel_pull = 8; g_wheel_push = 0; }
         if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F9 && !e.key.repeat) { void video_capture_request(void); video_capture_request(); }
+        if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F1 && !e.key.repeat && g_glctx) { menu_run(); return; }
+        if (e.type == SDL_CONTROLLERBUTTONDOWN && g_pad && g_glctx &&
+            ((e.cbutton.button == SDL_CONTROLLER_BUTTON_START && SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_BACK)) ||
+             (e.cbutton.button == SDL_CONTROLLER_BUTTON_BACK && SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_START)))) { menu_run(); return; }
         if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F11) {
             u32 fs = SDL_GetWindowFlags(g_win) & SDL_WINDOW_FULLSCREEN_DESKTOP;
+            g_cfg.fullscreen = !fs; if (g_glctx) settings_save();
             SDL_SetWindowFullscreen(g_win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
         }
     }
@@ -212,7 +226,8 @@ void platform_poll(void) {
         float rx = axis(SDL_CONTROLLER_AXIS_RIGHTX), ry = axis(SDL_CONTROLLER_AXIS_RIGHTY);
         if (rx || ry) {
             if (!g_pointer_pad) { g_pad_px = g_input.mouse_x; g_pad_py = g_input.mouse_y; g_pointer_pad = 1; }
-            const float speed = 1.6f / 60.f;
+            static const float speeds[6] = { 0, 0.7f, 1.1f, 1.6f, 2.3f, 3.2f };   // screen widths per second, by setting
+            const float speed = speeds[g_cfg.pointer_speed >= 1 && g_cfg.pointer_speed <= 5 ? g_cfg.pointer_speed : 3] / 60.f;
             g_pad_px += rx * (rx < 0 ? -rx : rx) * speed; g_pad_py += ry * (ry < 0 ? -ry : ry) * speed;
         }
         if (PB(RIGHTSHOULDER)) { g_pad_px = 0.5f; g_pad_py = 0.5f; g_pointer_pad = 1; }

@@ -12,6 +12,14 @@ typedef struct {
     int push, pull;           // move the Remote toward / away from the screen (wheel, R / V, right-stick click)
 } Input;
 extern Input g_input;
+
+// Settings (settings.ini, options menu in menu.c)
+typedef struct { int scale, fullscreen, stretch, sharp, vsync, textures, volume, pointer_speed; } Settings;
+extern Settings g_cfg;
+void settings_load(void);
+void settings_save(void);
+void settings_apply(void);
+void menu_run(void);
 extern int g_window_open;
 
 int platform_init(void);

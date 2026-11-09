@@ -370,6 +370,11 @@ static Setup S;
 // two texture maps, palette A giving red (intensity) + green (alpha), palette B blue + alpha, and the
 // TEV stages put the channels together. For texture packs such a pair is one full-colour image, keyed
 // by texpack_pair_key(hash A, hash B); a replacement is split back into the two halves on upload.
+// Options menu: texture pack switched on/off - decode (and look up) every texture again.
+void video_reload_textures(void) {
+    for (int i = 0; i < 1024; i++) { g_tcache[i].hash ^= 1; g_tcache[i].partner = 0; }
+    g_tgen++;
+}
 static void resolve_pairs(int nmaps_used) {
     int order[8], n = 0;   // maps in the order the stages first use them
     for (int s = 0; s < S.nst; s++) { int m = S.st[s].map; if (m < 0 || !S.tex[m].e) continue;
