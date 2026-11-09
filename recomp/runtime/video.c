@@ -918,12 +918,16 @@ static void xf_write(u32 addr, u32 v) {
 #define MAX_VERTS 65536
 static Out *g_tris; static int g_ntris;   // 3 * MAX_VERTS entries, allocated on first use
 static void collect_tri(const Out *a, const Out *b, const Out *c) {
-    if (a->w > 1e-6f && b->w > 1e-6f && c->w > 1e-6f && S.cull) {
-        if (S.cull == 3) return;
-        float X[3], Y[3], Z; const Out *v[3] = { a, b, c };
-        for (int k = 0; k < 3; k++) to_screen(v[k], &X[k], &Y[k], &Z);
-        float area = (X[1] - X[0]) * (Y[2] - Y[0]) - (X[2] - X[0]) * (Y[1] - Y[0]);
-        if ((S.cull == 1 && area < 0) || (S.cull == 2 && area > 0)) return;
+    if (S.cull == 3) return;   // cull all: no triangles at all, wherever they are
+    if (S.cull) {
+        // Facing from the homogeneous determinant: the same sign as the screen-space area when every
+        // corner is in front of the camera, and still the right answer for the visible part of a
+        // triangle that reaches behind it (where the projected area would be meaningless).
+        float wd = S.vp[0], ht = S.vp[1], xo = S.vp[3] - 342.f, yo = S.vp[4] - 342.f;
+        const Out *v[3] = { a, b, c }; double X[3], Y[3], W[3];
+        for (int k = 0; k < 3; k++) { W[k] = v[k]->w; X[k] = v[k]->x * wd + xo * W[k]; Y[k] = v[k]->y * ht + yo * W[k]; }
+        double det = X[0] * (Y[1] * W[2] - Y[2] * W[1]) - X[1] * (Y[0] * W[2] - Y[2] * W[0]) + X[2] * (Y[0] * W[1] - Y[1] * W[0]);
+        if ((S.cull == 1 && det < 0) || (S.cull == 2 && det > 0)) return;
     }
     if (g_ntris + 3 > 3 * MAX_VERTS) return;
     g_tris[g_ntris++] = *a; g_tris[g_ntris++] = *b; g_tris[g_ntris++] = *c;
