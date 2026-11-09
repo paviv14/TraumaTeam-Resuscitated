@@ -26,7 +26,11 @@ typedef struct { char path[64]; FILE *fp; int is_file; } Fd;
 static Fd g_fd[32];
 static int g_log = 1;
 static u32 g_cur_req, g_cur_cb;
-typedef struct { u32 req, cb; s32 result; u64 due; } Pending;
+typedef struct DiscJob DiscJob;
+DiscJob *disc_read_async(u64 off, u32 len, u32 dst); int disc_job_done(DiscJob *j); int disc_job_finish(DiscJob *j);
+typedef struct { u32 req, cb; s32 result; u64 due; DiscJob *job; } Pending;
+static DiscJob *g_async_job;   // set by an asynchronous drive read while handling the current request
+static int disc_job_finish_wait(DiscJob *j) { while (!disc_job_done(j)) ; return disc_job_finish(j); }
 // IOS answers take time on hardware (the request goes to the ARM coprocessor). Code relies on that: it
 // stores the async call's return value *after* issuing the request, so a reply delivered before the call
 // returns gets overwritten (seen as the save-data check failing). Replies wait at least this long.
@@ -81,6 +85,7 @@ static s32 di_ioctl(u32 cmd, u32 in, u32 inl, u32 out, u32 outl) {
     case 0x7A: /* GetCoverRegister */ if (outl >= 4) W32(out, 0); return 1;
     case 0xE0: /* RequestError */ if (outl >= 4) W32(out, 0); return 1;
     case 0x71: case 0x8D:   /* Read / UnencryptedRead: in+4 length, in+8 offset in 4-byte units */
+        if (g_cur_cb) { g_async_job = disc_read_async((u64)R32(in + 8) << 2, R32(in + 4), out); return 1; }   // completes later
         return disc_read((u64)R32(in + 8) << 2, R32(in + 4), out);
     case 0x70:              /* ReadDiskID: first 0x20 bytes of the disc header */
         return disc_read(0, outl < 0x20 ? outl : 0x20, out);
@@ -256,8 +261,9 @@ static s32 handle(u32 req) {
 
 void ios_service(CPU *c) {
     while (g_npend) {
-        if (now_ns() < g_pend[0].due) { g_irq_pending = 1; return; }   // not answered yet: poll again
+        if (now_ns() < g_pend[0].due || (g_pend[0].job && !disc_job_done(g_pend[0].job))) { g_irq_pending = 1; return; }   // not answered yet: poll again
         Pending p = g_pend[0];
+        if (p.job) { p.result = disc_job_finish(p.job); W32(p.req + 4, (u32)p.result); }
         memmove(g_pend, g_pend + 1, --g_npend * sizeof *g_pend);
         CPU save = *c;
         u32 cur = R32(0x800000D4);
@@ -274,20 +280,22 @@ void ios_service(CPU *c) {
 
 static void complete_later(u32 req, u32 cb, s32 result) {
     if (!cb) return;   // a synchronous caller would be asleep: not used for pending requests here
-    if (g_npend < 64) { g_pend[g_npend++] = (Pending){ req, cb, result, now_ns() + IOS_LATENCY_NS }; g_irq_pending = 1; }
+    if (g_npend < 64) { g_pend[g_npend++] = (Pending){ req, cb, result, now_ns() + IOS_LATENCY_NS, NULL }; g_irq_pending = 1; }
 }
 
 // __ios_Ipc2(request, callback): callback == 0 means synchronous (return the result).
 void f_8024D110(CPU *c) {
     u32 req = c->r[3], cb = c->r[4];
     if (!req) { c->r[3] = (u32)-4; return; }
-    g_cur_req = req; g_cur_cb = cb;
+    g_cur_req = req; g_cur_cb = cb; g_async_job = NULL;
     s32 r = handle(req);
+    DiscJob *job = g_async_job; g_async_job = NULL;
+    if (job && (!cb || r == IOS_PENDING)) { r = disc_job_finish_wait(job); }
     if (r == IOS_PENDING) { c->r[3] = 0; return; }   // left outstanding: the callback never fires
     W32(req + 4, (u32)r);
     if (!cb) { c->r[3] = (u32)r; return; }
     if (g_npend == 64) { fprintf(stderr, "[ios] too many pending replies\n"); return; }
-    g_pend[g_npend++] = (Pending){ req, cb, r, now_ns() + IOS_LATENCY_NS };
+    g_pend[g_npend++] = (Pending){ req, cb, r, now_ns() + IOS_LATENCY_NS, job };
     g_irq_pending = 1;
     c->r[3] = 0;
 }

@@ -57,23 +57,103 @@ void disc_init(const char *root) {
     fprintf(stderr, "[disc] %d files, FST at %08X (%ld bytes), root %s\n", g_nfiles, at, n, root);
 }
 
-// Read `len` bytes at disc byte offset `off` into guest memory at `dst`. Returns 1 (drive success) or 2.
-int disc_read(u64 off, u32 len, u32 dst) {
+// ---------------------------------------------------------------- reading
+// Files stay open (a few at a time): opening a file per read is slow on Windows, where every open can
+// also go through the antivirus. Reads can run on a worker thread (disc_read_async) so a slow first
+// read from the host disk stalls only the game's loading, not the frame loop.
+#include <pthread.h>
+static pthread_mutex_t g_io = PTHREAD_MUTEX_INITIALIZER;
+typedef struct { DiscFile *f; FILE *h; u64 used; } Open;
+static Open g_open[16]; static u64 g_use;
+static FILE *open_file(DiscFile *f) {   // caller holds g_io
+    Open *slot = &g_open[0];
+    for (int k = 0; k < 16; k++) {
+        if (g_open[k].f == f && g_open[k].h) { g_open[k].used = ++g_use; return g_open[k].h; }
+        if (g_open[k].used < slot->used) slot = &g_open[k];
+    }
+    if (slot->h) fclose(slot->h);
+    char p[800]; snprintf(p, sizeof p, "%s/%s", g_root, f->path);
+    slot->f = f; slot->h = fopen(p, "rb"); slot->used = ++g_use;
+    return slot->h;
+}
+static DiscFile *find_file(u64 off) {   // g_files is sorted by offset
+    int lo = 0, hi = g_nfiles - 1;
+    while (lo <= hi) {
+        int mid = (lo + hi) / 2; DiscFile *f = &g_files[mid];
+        if (off < f->off) hi = mid - 1; else if (off >= f->off + f->size) lo = mid + 1; else return f;
+    }
+    return NULL;
+}
+static int cmp_off(const void *a, const void *b) { u64 x = ((const DiscFile *)a)->off, y = ((const DiscFile *)b)->off; return x < y ? -1 : x > y; }
+
+// Read into a host buffer. Returns 1 (drive success) or 2 (a file is missing).
+static int read_host(u64 off, u32 len, u8 *buf) {
+    static int sorted; if (!sorted) { sorted = 1; qsort(g_files, g_nfiles, sizeof *g_files, cmp_off); }
     while (len) {
-        DiscFile *f = NULL;
-        for (int k = 0; k < g_nfiles; k++) if (off >= g_files[k].off && off < g_files[k].off + g_files[k].size) { f = &g_files[k]; break; }
+        DiscFile *f = find_file(off);
         if (!f) { static int np; if (np++ < 5) fprintf(stderr, "[disc] read %llX: past the end of a file (padding) - zeros\n", (unsigned long long)off);
-                  for (u32 k = 0; k < len; k++) W8(dst + k, 0); return 1; }
+                  memset(buf, 0, len); return 1; }
         u64 in = off - f->off; u32 n = (u32)(f->size - in < len ? f->size - in : len);
-        char p[800]; snprintf(p, sizeof p, "%s/%s", g_root, f->path);
-        FILE *h = fopen(p, "rb");
+        pthread_mutex_lock(&g_io);
+        FILE *h = open_file(f);
+        size_t got = 0;
+        if (h) { fseek(h, (long)in, SEEK_SET); got = fread(buf, 1, n, h); }
+        pthread_mutex_unlock(&g_io);
         if (!h) { fprintf(stderr, "[disc] MISSING %s (needed by the game)\n", f->path); return 2; }
-        u8 *buf = malloc(n); fseek(h, (long)in, SEEK_SET); size_t got = fread(buf, 1, n, h); fclose(h);
-        for (u32 k = 0; k < got; k++) W8(dst + k, buf[k]);
-        for (u32 k = got; k < n; k++) W8(dst + k, 0);
-        free(buf);
+        if (got < n) memset(buf + got, 0, n - got);
         if (g_log && !f->logged) { f->logged = 1; fprintf(stderr, "[disc] %s +%llX (%u bytes)\n", f->path, (unsigned long long)in, n); }
-        off += n; len -= n; dst += n;
+        off += n; len -= n; buf += n;
     }
     return 1;
+}
+static void to_guest(u32 dst, const u8 *buf, u32 len) {
+    u32 p = dst & 0x1FFFFFFF;
+    if (p + len <= 0x01800000u || (p >= 0x10000000u && p + len <= 0x14000000u)) memcpy(g_mem + p, buf, len);
+    else for (u32 k = 0; k < len; k++) W8(dst + k, buf[k]);
+}
+
+// Read `len` bytes at disc byte offset `off` into guest memory at `dst`. Returns 1 (drive success) or 2.
+int disc_read(u64 off, u32 len, u32 dst) {
+    u8 *buf = malloc(len ? len : 1);
+    int r = read_host(off, len, buf);
+    if (r == 1) to_guest(dst, buf, len);
+    free(buf);
+    return r;
+}
+
+// Asynchronous read: the worker thread fills a host buffer; disc_job_finish copies it into guest memory
+// (on the game thread) once done.
+struct DiscJob { u64 off; u32 len, dst; u8 *buf; volatile int done; int result; struct DiscJob *next; };
+typedef struct DiscJob DiscJob;
+static pthread_mutex_t g_qm = PTHREAD_MUTEX_INITIALIZER; static pthread_cond_t g_qc = PTHREAD_COND_INITIALIZER;
+static DiscJob *g_q, **g_qtail = &g_q;
+static void *worker(void *arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&g_qm);
+        while (!g_q) pthread_cond_wait(&g_qc, &g_qm);
+        DiscJob *j = g_q; g_q = j->next; if (!g_q) g_qtail = &g_q;
+        pthread_mutex_unlock(&g_qm);
+        j->result = read_host(j->off, j->len, j->buf);
+        __atomic_store_n(&j->done, 1, __ATOMIC_RELEASE);
+    }
+    return NULL;
+}
+DiscJob *disc_read_async(u64 off, u32 len, u32 dst) {
+    static int started; static pthread_t th;
+    if (!started) { started = 1; pthread_create(&th, NULL, worker, NULL); }
+    DiscJob *j = calloc(1, sizeof *j);
+    j->off = off; j->len = len; j->dst = dst; j->buf = malloc(len ? len : 1);
+    pthread_mutex_lock(&g_qm);
+    *g_qtail = j; g_qtail = &j->next;
+    pthread_cond_signal(&g_qc);
+    pthread_mutex_unlock(&g_qm);
+    return j;
+}
+int disc_job_done(DiscJob *j) { return __atomic_load_n(&j->done, __ATOMIC_ACQUIRE); }
+int disc_job_finish(DiscJob *j) {   // copy into guest memory, free; returns the drive result
+    int r = j->result;
+    if (r == 1) to_guest(j->dst, j->buf, j->len);
+    free(j->buf); free(j);
+    return r;
 }

@@ -161,21 +161,61 @@ static void mtx_apply(u32 base, const float in[3], float out[3], int rows) {
     for (int r = 0; r < rows; r++)
         out[r] = xf_f(base + 4 * r) * in[0] + xf_f(base + 4 * r + 1) * in[1] + xf_f(base + 4 * r + 2) * in[2] + xf_f(base + 4 * r + 3);
 }
-static void light_color(const Vtx *v, int ch, float out[4]) {
-    // XF 0x100E/0x100F: color channel control, 0x1010/0x1011 alpha. bit0 = material from vertex,
-    // bit1 = lighting enabled. Material registers 0x100C/0x100D, ambient 0x100A/0x100B (RGBA8).
-    u32 cc = xfreg[0x0E + ch], ac = xfreg[0x10 + ch];
-    u32 mat = xfreg[0x0C + ch], amb = xfreg[0x0A + ch];
-    float m[4] = { (mat >> 24) / 255.f, ((mat >> 16) & 255) / 255.f, ((mat >> 8) & 255) / 255.f, (mat & 255) / 255.f };
-    float am[4] = { (amb >> 24) / 255.f, ((amb >> 16) & 255) / 255.f, ((amb >> 8) & 255) / 255.f, (amb & 255) / 255.f };
-    float vc[4]; memcpy(vc, v->col[ch], sizeof vc);
-    for (int k = 0; k < 3; k++) {
-        float base = (cc & 1) ? vc[k] : m[k];
-        // lighting: approximate with ambient + full diffuse (keeps lit models visible until lights are done)
-        out[k] = (cc & 2) ? fminf(1.f, base * fminf(1.f, am[k] + 0.75f)) : base;
+// GX lighting (per vertex). Channel control XF 0x100E/F (colour 0/1) and 0x1010/1 (alpha 0/1):
+// bit0 material source (vertex colour), bit1 lighting on, bits 2-5 + 11-14 light mask, bit6 ambient
+// source, bits 7-8 diffuse function (none / sign / clamp), bit9 attenuation on, bit10 spot (else specular).
+// Lights at XF 0x600 + 16 * i: +3 colour, +4..6 cos attenuation, +7..9 distance attenuation,
+// +10..12 position, +13..15 direction (or half-angle for specular).
+static void unpack_rgba(u32 c, float o[4]) { o[0] = (c >> 24) / 255.f; o[1] = ((c >> 16) & 255) / 255.f; o[2] = ((c >> 8) & 255) / 255.f; o[3] = (c & 255) / 255.f; }
+static float light_one(u32 ctl, int i, int comp, const float pos[3], const float n[3]) {
+    u32 L = 0x600 + 16 * i;
+    float lp[3] = { xf_f(L + 10), xf_f(L + 11), xf_f(L + 12) }, ld[3] = { xf_f(L + 13), xf_f(L + 14), xf_f(L + 15) };
+    float ca[3] = { xf_f(L + 4), xf_f(L + 5), xf_f(L + 6) }, da[3] = { xf_f(L + 7), xf_f(L + 8), xf_f(L + 9) };
+    float col[4]; unpack_rgba(xfmem[L + 3], col);
+    float dir[3], attn = 1.f;
+    if ((ctl >> 9) & 1) {
+        if ((ctl >> 10) & 1) {   // spot / distance attenuation
+            dir[0] = lp[0] - pos[0]; dir[1] = lp[1] - pos[1]; dir[2] = lp[2] - pos[2];
+            float d2 = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2], d = sqrtf(d2);
+            if (d > 0) { dir[0] /= d; dir[1] /= d; dir[2] /= d; }
+            float c = dir[0] * ld[0] + dir[1] * ld[1] + dir[2] * ld[2]; if (c < 0) c = 0;
+            float num = ca[0] + ca[1] * c + ca[2] * c * c; if (num < 0) num = 0;
+            float den = da[0] + da[1] * d + da[2] * d2;
+            attn = den != 0 ? num / den : 0;
+        } else {                 // specular: light position = direction, direction = half-angle vector
+            float l = sqrtf(lp[0] * lp[0] + lp[1] * lp[1] + lp[2] * lp[2]);
+            for (int k = 0; k < 3; k++) dir[k] = l > 0 ? lp[k] / l : 0;
+            float nl = n[0] * dir[0] + n[1] * dir[1] + n[2] * dir[2];
+            float c = nl >= 0 ? n[0] * ld[0] + n[1] * ld[1] + n[2] * ld[2] : 0; if (c < 0) c = 0;
+            float num = ca[0] + ca[1] * c + ca[2] * c * c; if (num < 0) num = 0;
+            float den = da[0] + da[1] * c + da[2] * c * c;
+            attn = den != 0 ? num / den : 0;
+        }
+    } else {
+        dir[0] = lp[0] - pos[0]; dir[1] = lp[1] - pos[1]; dir[2] = lp[2] - pos[2];
+        float d = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+        if (d > 0) { dir[0] /= d; dir[1] /= d; dir[2] /= d; }
     }
-    float ba = (ac & 1) ? vc[3] : m[3];
-    out[3] = (ac & 2) ? fminf(1.f, ba * fminf(1.f, am[3] + 0.75f)) : ba;
+    float diff = 1.f;
+    int df = (ctl >> 7) & 3;
+    if (df) { diff = dir[0] * n[0] + dir[1] * n[1] + dir[2] * n[2]; if (df == 2 && diff < 0) diff = 0; }
+    return attn * diff * col[comp];
+}
+static float chan_value(u32 ctl, u32 matreg, u32 ambreg, const float vc[4], int comp, const float pos[3], const float n[3]) {
+    float m[4], a[4]; unpack_rgba(matreg, m); unpack_rgba(ambreg, a);
+    float mat = (ctl & 1) ? vc[comp] : m[comp];
+    if (!((ctl >> 1) & 1)) return mat;
+    float amb = ((ctl >> 6) & 1) ? vc[comp] : a[comp];
+    float lit = amb;
+    u32 mask = ((ctl >> 2) & 15) | (((ctl >> 11) & 15) << 4);
+    for (int i = 0; i < 8; i++) if (mask & (1u << i)) lit += light_one(ctl, i, comp, pos, n);
+    if (lit < 0) lit = 0; if (lit > 1) lit = 1;
+    return mat * lit;
+}
+static void light_color(const Vtx *v, int ch, const float pos[3], const float n[3], float out[4]) {
+    u32 cc = xfreg[0x0E + ch], ac = xfreg[0x10 + ch], mat = xfreg[0x0C + ch], amb = xfreg[0x0A + ch];
+    for (int k = 0; k < 3; k++) out[k] = chan_value(cc, mat, amb, v->col[ch], k, pos, n);
+    out[3] = chan_value(ac, mat, amb, v->col[ch], 3, pos, n);
 }
 static void transform(const Vtx *v, Out *o) {
     float p[3]; mtx_apply((u32)v->pnmtx * 4, v->pos, p, 3);
@@ -184,8 +224,13 @@ static void transform(const Vtx *v, Out *o) {
     if (!ortho) { o->x = P[0] * p[0] + P[1] * p[2]; o->y = P[2] * p[1] + P[3] * p[2]; o->z = P[4] * p[2] + P[5]; o->w = -p[2]; }
     else        { o->x = P[0] * p[0] + P[1]; o->y = P[2] * p[1] + P[3]; o->z = P[4] * p[2] + P[5]; o->w = 1.f; }
     int nchan = xfreg[0x09] & 3;
+    // normal in view space: normal matrix at XF 0x400 + 3 * pnmtx (3x3)
+    float n[3] = { 0, 0, 1 };
+    {   u32 nb = 0x400 + 3 * (u32)(v->pnmtx & 31);
+        for (int r = 0; r < 3; r++) n[r] = xf_f(nb + 3 * r) * v->nrm[0] + xf_f(nb + 3 * r + 1) * v->nrm[1] + xf_f(nb + 3 * r + 2) * v->nrm[2];
+        float l = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]); if (l > 0) { n[0] /= l; n[1] /= l; n[2] /= l; } }
     for (int ch = 0; ch < 2; ch++) {
-        if (ch < nchan || v->has_col[ch]) light_color(v, ch, o->col[ch]);
+        if (ch < nchan || v->has_col[ch]) light_color(v, ch, p, n, o->col[ch]);
         else for (int k = 0; k < 4; k++) o->col[ch][k] = 1.f;
     }
     // texture coordinate generation (XF 0x1040+n): source row bits 7-11, ST/STQ bit 1
@@ -202,7 +247,14 @@ static void transform(const Vtx *v, Out *o) {
             else if (src >= 5 && src <= 12) { in[0] = v->tex[src - 5][0]; in[1] = v->tex[src - 5][1]; in[2] = 1; }
             float r[3]; u32 m = (u32)v->texmtx[t] * 4;
             mtx_apply(m, in, r, stq ? 3 : 2);
-            o->uv[t][0] = r[0]; o->uv[t][1] = r[1]; o->uv[t][2] = stq ? r[2] : 1.f;
+            if (!stq) r[2] = 1.f;
+            if (xfreg[0x18] & 1) {   // dual texture transform: optional normalize, then post-matrix (XF 0x500 + 4 * index)
+                u32 pm = xfreg[0x50 + t];
+                if ((pm >> 8) & 1) { float l = sqrtf(r[0] * r[0] + r[1] * r[1] + r[2] * r[2]); if (l > 0) { r[0] /= l; r[1] /= l; r[2] /= l; } }
+                float q[3]; mtx_apply(0x500 + 4 * (pm & 63), r, q, 3);
+                r[0] = q[0]; r[1] = q[1]; r[2] = stq ? q[2] : 1.f;
+            }
+            o->uv[t][0] = r[0]; o->uv[t][1] = r[1]; o->uv[t][2] = r[2];
         } else {   // color-texgen and others: pass through texture coords
             o->uv[t][0] = v->tex[t][0]; o->uv[t][1] = v->tex[t][1];
         }
