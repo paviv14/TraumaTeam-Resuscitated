@@ -64,7 +64,8 @@ static void mkdirs(const char *path) {
 // 1 = 16:9) from it at boot and lays out its 3D and 2D for that shape, so the aspect option sets it here.
 #include "platform.h"
 static void sysconf_set_aspect(const char *hp) {
-    int wide = g_cfg.stretch == 1 || (getenv("TTPC_WIDE") && atoi(getenv("TTPC_WIDE")));
+    int wide = g_cfg.stretch != 0 ||   // stretch also uses the widescreen layout (its 4:3 one has letterbox bars)
+               (getenv("TTPC_WIDE") && atoi(getenv("TTPC_WIDE")));
     u8 d[0x4000]; FILE *f = fopen(hp, "rb");
     if (!f) return;
     size_t n = fread(d, 1, sizeof d, f); fclose(f);

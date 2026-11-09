@@ -78,7 +78,7 @@ static void value_text(const Item *it, char *b, size_t n) {
 static Item ITEMS[] = {
     { "Resolution", "Internal rendering resolution. Higher is sharper and needs a faster GPU.", &g_cfg.scale, 1, 6, 1 },
     { "Display", "Window or borderless fullscreen (F11 also switches).", &g_cfg.fullscreen, 0, 1, 1 },
-    { "Aspect ratio", "4:3, true 16:9 widescreen (the game redraws wider; restart to switch), or stretch to the window.", &g_cfg.stretch, 0, 2, 1 },
+    { "Aspect ratio", "4:3, true 16:9 widescreen, or 16:9 stretched to fill the window. Restart the game after switching from 4:3.", &g_cfg.stretch, 0, 2, 1 },
     { "Scaling filter", "How the picture is scaled to the window: smooth, or sharp pixels.", &g_cfg.sharp, 0, 1, 1 },
     { "VSync", "Sync to the monitor's refresh. Off is smoothest on a 60 Hz screen.", &g_cfg.vsync, 0, 1, 1 },
     { "Texture pack", "Use the upscaled textures in the 'textures' folder.", &g_cfg.textures, 0, 1, 1 },
