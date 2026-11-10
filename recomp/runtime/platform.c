@@ -59,6 +59,7 @@ static SDL_Texture *g_tex;
 static int g_tw, g_th;
 
 static SDL_AudioDeviceID g_audio; static int g_audio_rate, g_audio_paused, g_audio_playing;
+static u32 g_au_underruns, g_au_drops; static u64 g_au_level, g_au_samples;
 static void sdl_audio_push(const s16 *lr, int frames, int rate) {
     static int failed;
     if (failed || getenv("TTPC_MUTE")) return;
@@ -72,20 +73,39 @@ static void sdl_audio_push(const s16 *lr, int frames, int rate) {
         if (!g_audio) { fprintf(stderr, "[audio] no output device (%s): continuing without sound\n", SDL_GetError()); failed = 1; return; }
         fprintf(stderr, "[audio] output %d Hz stereo\n", rate);
     }
-    // A cushion of queued sound absorbs frames where the game thread is busy (big frames, vsync waits):
-    // playback (re)starts only once ~60 ms is queued, and pauses rather than crackling if it ever runs
-    // dry (a loading pause). Above ~180 ms (host clock drift) a buffer is dropped to bound the latency.
-    u32 queued = SDL_GetQueuedAudioSize(g_audio), ms = (u32)rate * 4 / 1000;
-    if (g_audio_playing && queued == 0) { SDL_PauseAudioDevice(g_audio, 1); g_audio_playing = 0; }
-    if (queued > 180 * ms) return;
-    if (!g_audio_playing && queued >= 60 * ms && !g_audio_paused) { SDL_PauseAudioDevice(g_audio, 0); g_audio_playing = 1; }
-    if (g_cfg.volume < 100) {   // volume setting
-        static s16 *buf; static int cap;
-        if (cap < frames * 2) { free(buf); buf = malloc(sizeof(s16) * frames * 2); cap = frames * 2; }
-        for (int i = 0; i < frames * 2; i++) buf[i] = (s16)(lr[i] * g_cfg.volume / 100);
-        lr = buf;
+    // A cushion of queued sound (~60 ms) absorbs frames where the game thread is busy. The game makes
+    // sound by the PC's clock and the sound card plays it by its own, so the queue would slowly drain
+    // or overfill (a click each time it hits a limit). Instead the sound is resampled by up to ±1%
+    // (inaudible) to hold the queue at its target. Playback (re)starts once the cushion is there.
+    u32 ms = (u32)rate * 4 / 1000, queued = SDL_GetQueuedAudioSize(g_audio), target = 60 * ms;
+    if (g_audio_playing && queued == 0) { SDL_PauseAudioDevice(g_audio, 1); g_audio_playing = 0; g_au_underruns++; }
+    if (queued > 250 * ms) { g_au_drops++; return; }   // far over (e.g. after a hitch): drop
+    double err = ((double)queued - target) / target;    // >0: too much queued
+    if (err > 1) err = 1; if (err < -1) err = -1;
+    double step = 1.0 + 0.01 * err;                     // input frames consumed per output frame (±1% at most)
+    static s16 out[2 * 8192]; static double pos; static s16 last[2];
+    int no = 0;
+    // linear interpolation between the previous buffer's last frame (index -1) and this buffer
+    while (no < 8192) {
+        double p = pos; int i = (int)p - 1;   // pos is relative to "last" at index 0
+        if (i + 1 >= frames) break;
+        double f = p - (int)p;
+        for (int c = 0; c < 2; c++) {
+            double s0 = i < 0 ? last[c] : lr[2 * i + c], s1 = lr[2 * (i + 1) + c];
+            int v = (int)(s0 + (s1 - s0) * f);
+            if (g_cfg.volume < 100) v = v * g_cfg.volume / 100;
+            out[2 * no + c] = (s16)v;
+        }
+        no++; pos += step;
     }
-    SDL_QueueAudio(g_audio, lr, (u32)frames * 4);
+    pos -= frames; last[0] = lr[2 * (frames - 1)]; last[1] = lr[2 * (frames - 1) + 1];
+    g_au_level += queued / ms; g_au_samples++;
+    SDL_QueueAudio(g_audio, out, (u32)no * 4);
+    if (!g_audio_playing && queued + (u32)no * 4 >= target && !g_audio_paused) { SDL_PauseAudioDevice(g_audio, 0); g_audio_playing = 1; }
+}
+void platform_audio_stats(char *buf, int n) {   // for the perf log
+    snprintf(buf, (size_t)n, "audio %.0f ms queued, %u underruns, %u drops", g_au_samples ? (double)g_au_level / g_au_samples : 0.0, g_au_underruns, g_au_drops);
+    g_au_level = g_au_samples = 0;
 }
 
 void platform_audio_pause(int pause) { g_audio_paused = pause; g_audio_playing = 0; if (g_audio) { SDL_PauseAudioDevice(g_audio, 1); SDL_ClearQueuedAudio(g_audio); } }   // resumes via the cushion
@@ -277,4 +297,5 @@ int platform_init(void) { return 0; }
 void platform_present(const u32 *px, int x0, int y0, int w, int h, int stride) { (void)px; (void)x0; (void)y0; (void)w; (void)h; (void)stride; }
 void platform_poll(void) {}
 void platform_set_title(const char *t) { (void)t; }
+void platform_audio_stats(char *buf, int n) { if (n) buf[0] = 0; }
 #endif

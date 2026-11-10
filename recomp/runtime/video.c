@@ -1116,10 +1116,11 @@ static void perf_title(void) {
     platform_set_title(b);
     static int log = -1; if (log < 0) log = getenv("TTPC_PERFLOG") != NULL;
     if (log) { double fr = frames ? frames : 1;
-        fprintf(stderr, "[perf] frame %llu: %s, %.0f draws/frame, worst frame %.1f ms | %.0f prims %.0f verts | read %.1f setup %.1f xform %.1f asm %.1f gl %.1f ms | gpu %.1f ms, swap wait %.1f ms, %.0f efb copies (%.0f resized) | shaders: %.0f%% specialised, %llu built | %.1f screens of pixels\n", (unsigned long long)g_copies, b, g_perf_draws / fr, worst / 1e6,
+        char aus[96]; platform_audio_stats(aus, sizeof aus);
+        fprintf(stderr, "[perf] frame %llu: %s, %.0f draws/frame, worst frame %.1f ms | %.0f prims %.0f verts | read %.1f setup %.1f xform %.1f asm %.1f gl %.1f ms | gpu %.1f ms, swap wait %.1f ms, %.0f efb copies (%.0f resized) | shaders: %.0f%% specialised, %llu built | %.1f screens of pixels | %s\n", (unsigned long long)g_copies, b, g_perf_draws / fr, worst / 1e6,
                 g_pt_calls / fr, g_pt_verts / fr, g_pt_read / 1e6 / fr, g_pt_setup / 1e6 / fr, g_pt_xform / 1e6 / fr, g_pt_asm / 1e6 / fr, g_pt_gl / 1e6 / fr,
                 g_pf_gpu_frames ? g_pf_gpu_ns / 1e6 / g_pf_gpu_frames : 0.0, g_pf_swap_ns / 1e6 / fr, g_pf_copies / fr, g_pf_copy_allocs / fr,
-                g_pf_spec_draws + g_pf_uber_draws ? 100.0 * g_pf_spec_draws / (g_pf_spec_draws + g_pf_uber_draws) : 0.0, (unsigned long long)g_pf_spec_built, g_pf_frags / fr / (640.0 * 528.0 * gpu_get_scale() * gpu_get_scale())); g_pf_frags = 0;
+                g_pf_spec_draws + g_pf_uber_draws ? 100.0 * g_pf_spec_draws / (g_pf_spec_draws + g_pf_uber_draws) : 0.0, (unsigned long long)g_pf_spec_built, g_pf_frags / fr / (640.0 * 528.0 * gpu_get_scale() * gpu_get_scale()), aus); g_pf_frags = 0;
         g_pf_spec_draws = g_pf_uber_draws = 0;
         g_pf_gpu_ns = g_pf_gpu_frames = g_pf_swap_ns = g_pf_copies = g_pf_copy_allocs = 0;
         g_perf_draws = 0; g_pt_read = g_pt_setup = g_pt_xform = g_pt_asm = g_pt_gl = g_pt_verts = g_pt_calls = 0; }

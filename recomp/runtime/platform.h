@@ -27,3 +27,4 @@ int platform_init(void);
 void platform_present(const u32 *px, int x0, int y0, int w, int h, int stride);
 void platform_poll(void);
 void platform_set_title(const char *t);
+void platform_audio_stats(char *buf, int n);
