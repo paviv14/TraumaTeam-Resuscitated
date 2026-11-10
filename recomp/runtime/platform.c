@@ -58,7 +58,7 @@ extern int g_view_x, g_view_y, g_view_w, g_view_h;
 static SDL_Texture *g_tex;
 static int g_tw, g_th;
 
-static SDL_AudioDeviceID g_audio; static int g_audio_rate;
+static SDL_AudioDeviceID g_audio; static int g_audio_rate, g_audio_paused, g_audio_playing;
 static void sdl_audio_push(const s16 *lr, int frames, int rate) {
     static int failed;
     if (failed || getenv("TTPC_MUTE")) return;
@@ -68,13 +68,17 @@ static void sdl_audio_push(const s16 *lr, int frames, int rate) {
         SDL_AudioSpec want = { 0 }, have;
         want.freq = rate; want.format = AUDIO_S16SYS; want.channels = 2; want.samples = 512;
         g_audio = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-        g_audio_rate = rate;
+        g_audio_rate = rate; g_audio_playing = 0;
         if (!g_audio) { fprintf(stderr, "[audio] no output device (%s): continuing without sound\n", SDL_GetError()); failed = 1; return; }
-        SDL_PauseAudioDevice(g_audio, 0);
         fprintf(stderr, "[audio] output %d Hz stereo\n", rate);
     }
-    // keep latency bounded: if more than ~120 ms is queued (host clock drift), drop this buffer
-    if (SDL_GetQueuedAudioSize(g_audio) > (u32)rate * 4 * 120 / 1000) return;
+    // A cushion of queued sound absorbs frames where the game thread is busy (big frames, vsync waits):
+    // playback (re)starts only once ~60 ms is queued, and pauses rather than crackling if it ever runs
+    // dry (a loading pause). Above ~180 ms (host clock drift) a buffer is dropped to bound the latency.
+    u32 queued = SDL_GetQueuedAudioSize(g_audio), ms = (u32)rate * 4 / 1000;
+    if (g_audio_playing && queued == 0) { SDL_PauseAudioDevice(g_audio, 1); g_audio_playing = 0; }
+    if (queued > 180 * ms) return;
+    if (!g_audio_playing && queued >= 60 * ms && !g_audio_paused) { SDL_PauseAudioDevice(g_audio, 0); g_audio_playing = 1; }
     if (g_cfg.volume < 100) {   // volume setting
         static s16 *buf; static int cap;
         if (cap < frames * 2) { free(buf); buf = malloc(sizeof(s16) * frames * 2); cap = frames * 2; }
@@ -84,7 +88,7 @@ static void sdl_audio_push(const s16 *lr, int frames, int rate) {
     SDL_QueueAudio(g_audio, lr, (u32)frames * 4);
 }
 
-void platform_audio_pause(int pause) { if (g_audio) { SDL_PauseAudioDevice(g_audio, pause); if (pause) SDL_ClearQueuedAudio(g_audio); } }
+void platform_audio_pause(int pause) { g_audio_paused = pause; g_audio_playing = 0; if (g_audio) { SDL_PauseAudioDevice(g_audio, 1); SDL_ClearQueuedAudio(g_audio); } }   // resumes via the cushion
 
 int platform_init(void) {
     if (getenv("TTPC_HEADLESS")) return 0;

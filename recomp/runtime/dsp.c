@@ -86,7 +86,11 @@ void dsp_tick(void) {      // called from rt_poll
         for (u32 i = 0; i < n; i++) { pcm[2 * i + 1] = (s16)R16(a + 4 * i); pcm[2 * i] = (s16)R16(a + 4 * i + 2); }
         platform_audio_push(pcm, (int)n, (int)ai_dma_rate());
     }
-    g_dma_due += dma_period_ns(); if (g_dma_due < t) g_dma_due = t + dma_period_ns();
+    // Next buffer: due one period later. If the game thread was held up (graphics, vsync), the missed
+    // buffers are made up on the following polls rather than skipped, so the output keeps a steady
+    // stream; only after a long stall (a loading pause) does the clock jump ahead.
+    g_dma_due += dma_period_ns();
+    if (t > g_dma_due + 100000000ull) g_dma_due = t + dma_period_ns();
     g_csr |= 0x08;
     if (g_csr & 0x10) { mmio_poke(0x0C003000u, mmio_peek(0x0C003000u) | 0x40); g_irq_pending = 1; }
     if (g_log && ++g_dma_frames <= 3) fprintf(stderr, "[ai] audio buffer %08X len %u played\n", g_audio_last_buffer, g_audio_last_len);
