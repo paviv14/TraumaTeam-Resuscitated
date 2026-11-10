@@ -62,6 +62,19 @@ void settings_apply(void) {
 }
 
 typedef struct { const char *label, *help; int *v, lo, hi, step; } Item;
+// Scenes ("sequences", see hle.c) the retail game never switches to. Enter on the item switches.
+static const struct { int seq; const char *name; } DEV[] = {
+    { 32, "Stage select (dev)" }, { 10, "Scene test menu" },
+    { 28, "DNA logic puzzle (cut)" }, { 29, "Medicine puzzle (cut)" }, { 30, "Virus action game (cut)" },
+    { 6, "Sound test" }, { 7, "Model viewer" }, { 22, "Effect editor" }, { 5, "Effect viewer" },
+    { 56, "Comic viewer" }, { 26, "Comic event editor" }, { 24, "Message viewer" },
+    { 40, "Forensics test menu" }, { 51, "Diagnosis test menu" }, { 44, "Endoscope stage menu" },
+    { 45, "Endoscope path tool" }, { 42, "Endoscope lesion setter" }, { 3, "Model test" }, { 23, "Hit test" },
+    { 1, "Back to the title screen" },
+};
+#define NDEV (int)(sizeof DEV / sizeof DEV[0])
+static int g_dev_pick;
+extern volatile int g_dev_seq_request;
 static void value_text(const Item *it, char *b, size_t n) {
     int v = *it->v;
     if (it->v == &g_cfg.scale) {
@@ -72,6 +85,7 @@ static void value_text(const Item *it, char *b, size_t n) {
     else if (it->v == &g_cfg.fullscreen) snprintf(b, n, v ? "Fullscreen" : "Window");
     else if (it->v == &g_cfg.stretch) { static const char *s[] = { "4:3", "16:9 widescreen", "Stretch to fill" }; snprintf(b, n, "%s", s[v]); }
     else if (it->v == &g_cfg.sharp) snprintf(b, n, v ? "Sharp" : "Smooth");
+    else if (it->v == &g_dev_pick) snprintf(b, n, "%s", DEV[v].name);
     else snprintf(b, n, v ? "On" : "Off");
 }
 
@@ -84,6 +98,7 @@ static Item ITEMS[] = {
     { "Texture pack", "Use the upscaled textures in the 'textures' folder.", &g_cfg.textures, 0, 1, 1 },
     { "Volume", "Game sound volume.", &g_cfg.volume, 0, 100, 10 },
     { "Pointer speed", "How fast the controller's right stick moves the pointer.", &g_cfg.pointer_speed, 1, 5, 1 },
+    { "Developer scene", "Hidden developer tools and cut prototypes left in the game. Enter / A goes there now (unsaved progress is lost).", &g_dev_pick, 0, NDEV - 1, 1 },
 };
 #define NITEMS (int)(sizeof ITEMS / sizeof ITEMS[0])
 
@@ -92,6 +107,8 @@ static void change(int i, int dir) {
     int v = *it->v + dir * it->step;
     if (it->hi - it->lo == 1) v = *it->v ? 0 : 1;          // toggles wrap
     else if (it->v == &g_cfg.stretch) v = (v + 3) % 3;     // so does the aspect ratio list
+    else if (it->v == &g_dev_pick) v = (v + NDEV) % NDEV;
+    if (it->v == &g_dev_pick) { *it->v = v; return; }      // a choice, not a setting
     else if (v < it->lo) v = it->lo; else if (v > it->hi) v = it->hi;
     if (v == *it->v) return;
     int textures_changed = it->v == &g_cfg.textures;
@@ -117,7 +134,11 @@ void menu_run(void) {
             if (key == SDLK_DOWN || key == SDLK_s || btn == SDL_CONTROLLER_BUTTON_DPAD_DOWN) sel = (sel + 1) % (NITEMS + 1);
             int dir = (key == SDLK_LEFT || key == SDLK_a || btn == SDL_CONTROLLER_BUTTON_DPAD_LEFT) ? -1
                     : (key == SDLK_RIGHT || key == SDLK_d || btn == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) ? 1 : 0;
-            if (key == SDLK_RETURN || key == SDLK_SPACE || btn == SDL_CONTROLLER_BUTTON_A) { if (sel == NITEMS) done = 1; else dir = 1; }
+            if (key == SDLK_RETURN || key == SDLK_SPACE || btn == SDL_CONTROLLER_BUTTON_A) {
+                if (sel == NITEMS) done = 1;
+                else if (ITEMS[sel].v == &g_dev_pick) { g_dev_seq_request = DEV[g_dev_pick].seq; done = 1; }
+                else dir = 1;
+            }
             if (dir && sel < NITEMS) change(sel, dir);
             if (key == SDLK_F11) { g_cfg.fullscreen ^= 1; settings_apply(); settings_save(); }
             if (e.type == SDL_MOUSEMOTION) {
@@ -128,7 +149,9 @@ void menu_run(void) {
             if (e.type == SDL_MOUSEBUTTONDOWN && mx >= panel_x && mx < panel_x + panel_w) {
                 for (int i = 0; i <= NITEMS; i++) if (my >= rows_y[i] && my < rows_y[i] + row_h) {
                     sel = i;
-                    if (i == NITEMS) done = 1; else change(i, e.button.button == SDL_BUTTON_RIGHT ? -1 : 1);
+                    if (i == NITEMS) done = 1;
+                    else if (ITEMS[i].v == &g_dev_pick && e.button.button == SDL_BUTTON_LEFT) { g_dev_seq_request = DEV[g_dev_pick].seq; done = 1; }
+                    else change(i, e.button.button == SDL_BUTTON_RIGHT ? -1 : 1);
                 }
             }
             if (e.type == SDL_MOUSEWHEEL && sel < NITEMS) change(sel, e.wheel.y > 0 ? 1 : -1);
@@ -138,7 +161,7 @@ void menu_run(void) {
         if (!gpu_overlay_begin(&W, &H, 0.55f)) break;
         float u = H / 30.f; if (u * 30 > W) u = W / 30.f;     // layout unit: scales with the window
         panel_w = (int)(u * 28); panel_x = (W - panel_w) / 2; row_h = (int)(u * 1.6f);
-        int ph = (int)(u * 4.2f) + row_h * (NITEMS + 1) + (int)(u * 3.6f), py = (H - ph) / 2;
+        int ph = (int)(u * 4.2f) + row_h * (NITEMS + 1) + (int)(u * 4.2f), py = (H - ph) / 2;
         static const float bg[4] = { 0.06f, 0.07f, 0.09f, 0.92f }, hi[4] = { 0.80f, 0.12f, 0.16f, 0.95f }, line[4] = { 0.80f, 0.12f, 0.16f, 1 };
         static const float white[4] = { 1, 1, 1, 1 }, grey[4] = { 0.72f, 0.74f, 0.78f, 1 }, dimc[4] = { 0.5f, 0.52f, 0.56f, 1 };
         gpu_overlay_rect((float)panel_x, (float)py, (float)panel_w, (float)ph, bg);
@@ -160,8 +183,20 @@ void menu_run(void) {
             y += row_h;
         }
         const char *help = sel < NITEMS ? ITEMS[sel].help : "Back to the game.";
-        gpu_overlay_text(panel_x + u, y + u * 0.6f, u * 0.75f, help, grey);
-        gpu_overlay_text(panel_x + u, y + u * 1.9f, u * 0.7f, "Arrows / D-pad: choose and change    Enter / A: change    Esc / B: close", dimc);
+        {   // help text, wrapped to the panel (two lines at most)
+            char line1[160] = "", line2[160] = ""; const char *w = help; float maxw = panel_w - 2 * u, hs = u * 0.75f;
+            char *cur = line1;
+            while (*w) {
+                const char *e = strchr(w, ' '); int len = e ? (int)(e - w) : (int)strlen(w);
+                char t[160]; snprintf(t, sizeof t, "%s%s%.*s", cur, *cur ? " " : "", len, w);
+                if (*cur && gpu_overlay_text_width(hs, t) > maxw && cur == line1) { cur = line2; snprintf(t, sizeof t, "%.*s", len, w); }
+                snprintf(cur, 160, "%s", t);
+                w += len; while (*w == ' ') w++;
+            }
+            gpu_overlay_text(panel_x + u, y + u * 0.5f, hs, line1, grey);
+            if (*line2) gpu_overlay_text(panel_x + u, y + u * 1.4f, hs, line2, grey);
+        }
+        gpu_overlay_text(panel_x + u, y + u * 2.5f, u * 0.7f, "Arrows / D-pad: choose and change    Enter / A: change    Esc / B: close", dimc);
         gpu_overlay_end();
         SDL_Delay(15);
     }

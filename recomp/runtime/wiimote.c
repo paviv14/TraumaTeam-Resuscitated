@@ -43,6 +43,7 @@ enum {
 
 static u32 g_hold, g_prev, g_trig, g_rel, g_host_hold;
 static u64 g_reads;   // controller reads by the game (~ game frames): the clock for TTPC_INPUT
+u64 wiimote_reads(void) { return g_reads; }
 static float g_px, g_py, g_ppx, g_ppy, g_sx, g_sy;
 static int g_point_valid = 1;
 static u64 g_vi;

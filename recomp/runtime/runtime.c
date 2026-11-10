@@ -65,6 +65,14 @@ static void dump(CPU *c) {
     for (int i = 0; i < 32; i += 8)
         fprintf(stderr, "  r%-2d %08X %08X %08X %08X %08X %08X %08X %08X\n", i, c->r[i], c->r[i + 1],
                 c->r[i + 2], c->r[i + 3], c->r[i + 4], c->r[i + 5], c->r[i + 6], c->r[i + 7]);
+    // call stack from the guest back chain: each frame's saved LR sits at (caller's sp)+4
+    fprintf(stderr, "  call stack:");
+    u32 sp = c->r[1];
+    for (int k = 0; k < 24 && sp >= 0x80000000u && sp < 0x81800000u; k++) {
+        u32 next = R32(sp); if (next <= sp || next >= 0x81800000u) break;
+        fprintf(stderr, " %08X", R32(next + 4)); sp = next;
+    }
+    fprintf(stderr, "\n");
 }
 static void halt(const char *why) { fprintf(stderr, "HALT: %s\n", why); dump(&g_cpu); dump_trace(); report_seen(); exit(1); }
 void rt_halt(const char *why) { halt(why); }
@@ -105,6 +113,13 @@ void rt_call(CPU *c, u32 addr) {
     if (lo >= 0) {
         g_funcs[lo].fn(c);   // (no depth counter: fibers/longjmp unwind past returns; see on_segv)
         return;
+    }
+    // The console's Bluetooth stack (0x80262000-0x80290000) is bypassed by the Wii Remote HLE, so its
+    // modules' callbacks are never registered; a stray timer event (seen in the developers' stage
+    // select) would call a null one. On the console nothing would be listening either: skip it.
+    if (addr == 0 && c->lr >= 0x80262000u && c->lr < 0x80290000u) {
+        static int n; if (n++ < 3) fprintf(stderr, "[bt] skipped unregistered Bluetooth callback (lr %08X)\n", c->lr);
+        c->r[3] = 0; return;
     }
     char b[64]; snprintf(b, sizeof b, "indirect call to unknown address %08X (lr %08X)", addr, c->lr); halt(b);
 }

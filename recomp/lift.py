@@ -92,6 +92,7 @@ def bc_cond(BO, BI):
 WRAP = {
     0x802222E0,  # SelectThread   (thread scheduler: fiber switching)
     0x8021B5D0,  # OSSaveContext  (records which fiber owns a context)
+    0x80007690,  # cadSequence task (switch to a developer scene on request)
 }
 
 

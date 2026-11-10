@@ -37,3 +37,43 @@ void rt_logfn(CPU *c, u32 addr) {
             R16(r13 - 0x51F8), R16(0xCC00100E), R32(r13 - 0x5200));
 }
 
+
+// ---------------------------------------------------------------- developer menus
+// The game runs as numbered "sequences" (table at 0x803413B0, switched by f_80007760(seq, a, b)).
+// Retail boots sequence 1 (title). The developers' own start menu (sequence 0) and test scenes are
+// still in the executable, just never reached. TTPC_SEQ=N boots one directly (tests); the options
+// menu switches to one from the running game (below), which keeps the console's normal start-up.
+#include "platform.h"
+void f_80009900(CPU *c); void f_80007760(CPU *c);
+HLE(80007700, cadSequenceInit) {
+    c->r[3] = 0x803413A0u;   // "cadSequence"
+    c->r[4] = 0x1003; c->r[5] = 0; c->r[6] = 0; c->r[7] = 0x80007690u; c->r[8] = 0; c->r[9] = 0;
+    f_80009900(c);
+    int seq = 1;
+    const char *e = getenv("TTPC_SEQ");
+    if (e && *e) seq = atoi(e);
+    if (seq != 1) fprintf(stderr, "[hle] booting sequence %d\n", seq);
+    c->r[3] = (u32)seq; c->r[4] = 0; c->r[5] = 0;
+    f_80007760(c);
+}
+// Switching later, from the running game, keeps the boot path (title, system setup, Wii Remote and
+// Bluetooth start-up) exactly as on the console. The request is taken at the top of the sequence
+// manager's own per-frame task, where the game itself switches.
+volatile int g_dev_seq_request = -1;
+void orig_80007690(CPU *c);
+u64 wiimote_reads(void);
+HLE(80007690, cadSequenceTask) {
+    static long at = -2; static int at_seq;
+    if (at == -2) { const char *e = getenv("TTPC_SEQ_AT"); at = -1; if (e) sscanf(e, "%ld:%d", &at, &at_seq); }   // read:seq (tests)
+    if (at >= 0 && wiimote_reads() >= (u64)at) { g_dev_seq_request = at_seq; at = -1; }
+    int r = g_dev_seq_request;
+    if (r >= 0) {
+        g_dev_seq_request = -1;
+        fprintf(stderr, "[hle] switching to sequence %d\n", r);
+        u32 sp = c->r[1], lr = c->lr;
+        c->r[3] = (u32)r; c->r[4] = 0; c->r[5] = 0; f_80007760(c);
+        c->r[1] = sp; c->lr = lr; c->r[3] = 0;
+        return;
+    }
+    orig_80007690(c);
+}
