@@ -32,6 +32,7 @@ int g_gpu;
     X(void, ReadPixels, (GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *)) X(void, PixelStorei, (GLenum, GLint)) \
     X(void, GenTextures, (GLsizei, GLuint *)) X(void, BindTexture, (GLenum, GLuint)) X(void, ActiveTexture, (GLenum)) \
     X(void, TexImage2D, (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *)) \
+    X(void, CompressedTexImage2D, (GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void *)) X(void, DeleteTextures, (GLsizei, const GLuint *)) \
     X(void, TexParameteri, (GLenum, GLenum, GLint)) X(void, GenerateMipmap, (GLenum)) \
     X(void, GenFramebuffers, (GLsizei, GLuint *)) X(void, BindFramebuffer, (GLenum, GLuint)) \
     X(void, FramebufferTexture2D, (GLenum, GLenum, GLenum, GLuint, GLint)) X(GLenum, CheckFramebufferStatus, (GLenum)) \
@@ -201,6 +202,7 @@ typedef struct { u32 dst; GLuint tex, fbo; int w, h, tw, th; } CopyTex;
 static CopyTex g_ct[64]; static int g_nct;
 static GLuint g_cprog, g_cvao; static GLint g_cu_rect, g_cu_fmt, g_cu_inten;
 static int g_scale = 1, g_W, g_H;
+static long long g_rt_budget;   // texture pack GPU memory budget (below)
 // Ultrawide: the EFB is g_NW native pixels wide instead of 640, the game's 640 sitting in the middle
 // (g_M on each side). Perspective geometry the game draws beyond its own 16:9 frame lands in the
 // sides; 2D stays centred, except full-width 2D (fades, overlays, backgrounds), which is stretched.
@@ -301,12 +303,69 @@ int gpu_init(int scale) {
         glGenVertexArrays_(1, &g_cvao);
         glUseProgram_(g_prog); glBindVertexArray_(g_vao);
     }
+    // texture pack format: DXT5 where the GPU has it (every desktop GPU), size limit and memory budget from the settings
+    g_tp_compress = g_cfg.tex_compress && SDL_GL_ExtensionSupported("GL_EXT_texture_compression_s3tc");
+    { static const int lim[3] = { 1024, 2048, 4096 }; g_tp_limit = lim[g_cfg.tex_limit < 0 ? 0 : g_cfg.tex_limit > 2 ? 2 : g_cfg.tex_limit]; }
+    g_rt_budget = (long long)(g_cfg.tex_vram_mb > 256 ? g_cfg.tex_vram_mb : 256) << 20;
     g_gpu = 1;
     fprintf(stderr, "[gl] backend ready: %s | %s | EFB %dx%d\n", (const char *)glGetString_(GL_RENDERER), (const char *)glGetString_(GL_VERSION), g_W, g_H);
     return 1;
 }
 
 // ---------------------------------------------------------------- textures
+// Texture pack replacements on the GPU, one per (replacement id, variant). Finished images come from
+// the loader threads (texpack.c); at most ~24 MB is uploaded per frame so a scene full of new
+// textures never stalls a frame, and textures unused for a few seconds are dropped when the total
+// goes over the memory budget (they come back from the disk cache when needed again).
+typedef struct { GLuint tex; u32 bytes; u32 last; u8 failed; } RTex;
+static RTex *g_rt; static int g_nrt;
+static u32 g_frame_no; static long long g_rt_bytes, g_up_left;
+u64 g_pf_tp_uploads, g_pf_tp_upbytes;
+static GLuint repl_texture(int id, int var) {
+    if (!g_rt) { g_nrt = g_texpack_count * 3; g_rt = calloc((size_t)(g_nrt ? g_nrt : 1), sizeof *g_rt); }
+    int i = id * 3 + var; if (i < 0 || i >= g_nrt) return 0;
+    RTex *r = &g_rt[i];
+    if (r->tex) { r->last = g_frame_no; return r->tex; }
+    if (r->failed) return 0;
+    int failed;
+    TPImage *im = texpack_get(id, var, &failed, g_up_left > 0);
+    if (failed) { r->failed = 1; return 0; }
+    if (!im) return 0;
+    glGenTextures_(1, &r->tex); glBindTexture_(GL_TEXTURE_2D, r->tex);
+    int w = im->w, h = im->h;
+    for (int l = 0; l < im->nlevels; l++) {
+        if (im->compressed) glCompressedTexImage2D_(GL_TEXTURE_2D, l, im->compressed == 2 ? 0x83F1 /* DXT1 */ : 0x83F3 /* DXT5 */, w, h, 0, (GLsizei)im->size[l], im->data[l]);
+        else glTexImage2D_(GL_TEXTURE_2D, l, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, im->data[l]);
+        w = w > 1 ? w / 2 : 1; h = h > 1 ? h / 2 : 1;
+    }
+    glTexParameteri_(GL_TEXTURE_2D, 0x813D /* GL_TEXTURE_MAX_LEVEL */, im->nlevels - 1);
+    r->bytes = (u32)im->bytes; r->last = g_frame_no; g_rt_bytes += (long long)im->bytes;
+    g_up_left -= (long long)im->bytes; g_pf_tp_uploads++; g_pf_tp_upbytes += im->bytes;
+    texpack_free_image(im);
+    return r->tex;
+}
+static void repl_frame(void) {   // once per presented frame: upload allowance, eviction
+    g_frame_no++;
+    g_up_left = 24ll << 20;
+    if (g_rt && g_rt_bytes > g_rt_budget && (g_frame_no & 31) == 0) {
+        // drop the least recently used textures (not used for 5+ seconds) until under budget
+        for (int pass = 0; pass < 64 && g_rt_bytes > g_rt_budget; pass++) {
+            int best = -1; u32 oldest = g_frame_no;
+            for (int i = 0; i < g_nrt; i++) if (g_rt[i].tex && g_rt[i].last < oldest) { oldest = g_rt[i].last; best = i; }
+            if (best < 0 || g_frame_no - oldest < 300) break;
+            glDeleteTextures_(1, &g_rt[best].tex); g_rt[best].tex = 0; g_rt_bytes -= g_rt[best].bytes; g_rt[best].bytes = 0;
+        }
+    }
+}
+void gpu_texpack_stats(char *b, int n) {
+    snprintf(b, (size_t)n, "texture pack %lld MB on GPU, %d waiting", g_rt_bytes >> 20, g_texpack_count ? texpack_pending() : 0);
+}
+void gpu_texpack_flush(void) {   // options menu: pack switched off/on
+    if (!g_rt) return;
+    for (int i = 0; i < g_nrt; i++) if (g_rt[i].tex) { glDeleteTextures_(1, &g_rt[i].tex); g_rt[i].tex = 0; }
+    memset(g_rt, 0, sizeof *g_rt * (size_t)g_nrt); g_rt_bytes = 0;
+}
+
 static void bind_texture(int unit, const TexV *t) {
     glActiveTexture_(GL_TEXTURE0 + unit);
     static const GLint wrapm[4] = { GL_CLAMP_TO_EDGE, GL_REPEAT, GL_MIRRORED_REPEAT, GL_CLAMP_TO_EDGE };
@@ -319,22 +378,28 @@ static void bind_texture(int unit, const TexV *t) {
     }
     TexEntry *e = t->e;
     if (!e || !e->px) { glBindTexture_(GL_TEXTURE_2D, 0); return; }
+    static const GLint wrap[4] = { GL_CLAMP_TO_EDGE, GL_REPEAT, GL_MIRRORED_REPEAT, GL_CLAMP_TO_EDGE };
+    if (e->rid >= 0 && g_cfg.textures) {   // texture pack replacement, once it has loaded
+        GLuint rt = repl_texture(e->rid, e->rvar);
+        glActiveTexture_(GL_TEXTURE0 + unit);
+        if (rt) {
+            glBindTexture_(GL_TEXTURE_2D, rt);
+            glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap[t->ws & 3]); glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap[t->wt & 3]);
+            glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            return;
+        }
+    }
     if (!e->gl_tex) glGenTextures_(1, &e->gl_tex);
     glBindTexture_(GL_TEXTURE_2D, e->gl_tex);
     if (e->gl_version != e->version) {
-        if (e->hi) {   // texture pack replacement (RGBA bytes), with mipmaps since it is usually larger
-            glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, e->hw, e->hh, 0, GL_RGBA, GL_UNSIGNED_BYTE, e->hi);
-            glGenerateMipmap_(GL_TEXTURE_2D);
-        } else
-            // px holds R<<24|G<<16|B<<8|A in host order: GL_UNSIGNED_INT_8_8_8_8 reads exactly that.
-            glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, e->w, e->h, 0, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, e->px);
+        // px holds R<<24|G<<16|B<<8|A in host order: GL_UNSIGNED_INT_8_8_8_8 reads exactly that.
+        glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, e->w, e->h, 0, GL_RGBA, GL_UNSIGNED_INT_8_8_8_8, e->px);
         e->gl_version = e->version;
     }
-    static const GLint wrap[4] = { GL_CLAMP_TO_EDGE, GL_REPEAT, GL_MIRRORED_REPEAT, GL_CLAMP_TO_EDGE };
     glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap[t->ws & 3]);
     glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, wrap[t->wt & 3]);
-    GLint f = t->linear || e->hi ? GL_LINEAR : GL_NEAREST;
-    glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, e->hi ? GL_LINEAR_MIPMAP_LINEAR : f);
+    GLint f = t->linear ? GL_LINEAR : GL_NEAREST;
+    glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, f);
     glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, f);
 }
 
@@ -713,6 +778,7 @@ void gpu_present(int x0, int y0, int w, int h) {
     g_pf_swap_ns += host_now_ns() - ts;
     gpu_timer_frame();
     g_spec_budget = 4;
+    repl_frame();
     tile_frame();
     wide_update(ww, wh);   // between frames: the window's shape (or the setting) may have changed
     glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo);
@@ -940,4 +1006,6 @@ void gpu_clear(int x0, int y0, int w, int h, u32 c, float z, int color, int alph
 void gpu_present(int x0, int y0, int w, int h) { (void)x0; (void)y0; (void)w; (void)h; }
 int gpu_read_rgb(int x0, int y0, int w, int h, u8 *out) { (void)x0; (void)y0; (void)w; (void)h; (void)out; return 0; }
 int gpu_read_rgb_wide(int x0, int y0, int w, int h, u8 **out) { (void)x0; (void)y0; (void)w; (void)h; (void)out; return 0; }
+void gpu_texpack_stats(char *b, int n) { if (n) b[0] = 0; }
+void gpu_texpack_flush(void) {}
 #endif

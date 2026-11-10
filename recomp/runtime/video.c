@@ -359,8 +359,7 @@ static void konst_value(int stage, int alpha, float out[4]) {
 // cached texture is revalidated by hashing its source bytes, and re-decoded only if they changed.
 static TexEntry g_tcache[1024];
 static u64 g_st_decodes, g_st_decoded_px;
-const u8 *texpack_lookup(u64 hash, int *w, int *h); void texpack_dump(u64 hash, int w, int h, int fmt, const u32 *px);
-const u8 *texpack_lookup_half(u64 key, int which, int *w, int *h);
+void texpack_dump(u64 hash, int w, int h, int fmt, const u32 *px);
 u64 texpack_pair_key(u64 a, u64 b);
 static u32 g_copy_dst[32]; static int g_ncopy;     // recent EFB->texture destinations
 static int is_copy_target(u32 a) { a &= 0x1FFFFFFF; for (int k = 0; k < g_ncopy; k++) if (g_copy_dst[k] == a) return 1; return 0; }
@@ -415,9 +414,9 @@ static TexEntry *tex_decode(const Tex *t, u32 img0, u32 tlutreg) {
     e->addr = t->addr; e->img0 = img0; e->tlut = tlutreg; e->w = t->w; e->h = t->h; e->hash = h; e->version++;
     e->fmt = t->fmt; e->partner = 0;
     // texture packs: render-target textures (EFB copies) are excluded - their content changes
-    e->hi = NULL;
+    e->rid = -1; e->rvar = 0;
     if (!is_copy_target(t->addr)) {
-        e->hi = texpack_lookup(h, &e->hw, &e->hh);
+        e->rid = texpack_find(h);
         if (!pal) texpack_dump(h, t->w, t->h, t->fmt, e->px);   // paletted ones: see resolve_pairs()
     }
     return e;
@@ -433,6 +432,7 @@ static Setup S;
 // by texpack_pair_key(hash A, hash B); a replacement is split back into the two halves on upload.
 // Options menu: texture pack switched on/off - decode (and look up) every texture again.
 void video_reload_textures(void) {
+    gpu_texpack_flush();
     for (int i = 0; i < 1024; i++) { g_tcache[i].hash ^= 1; g_tcache[i].partner = 0; }
     g_tgen++;
 }
@@ -447,11 +447,11 @@ static void resolve_pairs(int nmaps_used) {
         paired[order[i]] = paired[order[j]] = 1;
         if (a->partner == b->hash && b->partner == a->hash) continue;   // already resolved
         a->partner = b->hash; b->partner = a->hash;
-        u64 k = texpack_pair_key(a->hash, b->hash); int w, h;
+        u64 k = texpack_pair_key(a->hash, b->hash);
         TexEntry *A = a, *B = b;
-        if (!texpack_lookup(k, &w, &h)) { u64 k2 = texpack_pair_key(b->hash, a->hash); if (texpack_lookup(k2, &w, &h)) { k = k2; A = b; B = a; } }
-        const u8 *ha = texpack_lookup_half(k, 0, &A->hw, &A->hh), *hb = texpack_lookup_half(k, 1, &B->hw, &B->hh);
-        if (ha && hb) { A->hi = ha; B->hi = hb; A->version++; B->version++; }
+        int id = texpack_find(k);
+        if (id < 0) { u64 k2 = texpack_pair_key(b->hash, a->hash); id = texpack_find(k2); if (id >= 0) { k = k2; A = b; B = a; } }
+        if (id >= 0) { A->rid = id; A->rvar = 1; B->rid = id; B->rvar = 2; }
         else {   // dump the combined image (A = the map the first stage samples)
             static u32 *buf; static size_t cap; size_t np = (size_t)a->w * a->h;
             if (cap < np) { free(buf); buf = malloc(np * 4); cap = np; }
@@ -1117,10 +1117,11 @@ static void perf_title(void) {
     static int log = -1; if (log < 0) log = getenv("TTPC_PERFLOG") != NULL;
     if (log) { double fr = frames ? frames : 1;
         char aus[96]; platform_audio_stats(aus, sizeof aus);
-        fprintf(stderr, "[perf] frame %llu: %s, %.0f draws/frame, worst frame %.1f ms | %.0f prims %.0f verts | read %.1f setup %.1f xform %.1f asm %.1f gl %.1f ms | gpu %.1f ms, swap wait %.1f ms, %.0f efb copies (%.0f resized) | shaders: %.0f%% specialised, %llu built | %.1f screens of pixels | %s\n", (unsigned long long)g_copies, b, g_perf_draws / fr, worst / 1e6,
+        char tps[96]; gpu_texpack_stats(tps, sizeof tps);
+        fprintf(stderr, "[perf] frame %llu: %s, %.0f draws/frame, worst frame %.1f ms | %.0f prims %.0f verts | read %.1f setup %.1f xform %.1f asm %.1f gl %.1f ms | gpu %.1f ms, swap wait %.1f ms, %.0f efb copies (%.0f resized) | shaders: %.0f%% specialised, %llu built | %.1f screens of pixels | %s | %s\n", (unsigned long long)g_copies, b, g_perf_draws / fr, worst / 1e6,
                 g_pt_calls / fr, g_pt_verts / fr, g_pt_read / 1e6 / fr, g_pt_setup / 1e6 / fr, g_pt_xform / 1e6 / fr, g_pt_asm / 1e6 / fr, g_pt_gl / 1e6 / fr,
                 g_pf_gpu_frames ? g_pf_gpu_ns / 1e6 / g_pf_gpu_frames : 0.0, g_pf_swap_ns / 1e6 / fr, g_pf_copies / fr, g_pf_copy_allocs / fr,
-                g_pf_spec_draws + g_pf_uber_draws ? 100.0 * g_pf_spec_draws / (g_pf_spec_draws + g_pf_uber_draws) : 0.0, (unsigned long long)g_pf_spec_built, g_pf_frags / fr / (640.0 * 528.0 * gpu_get_scale() * gpu_get_scale()), aus); g_pf_frags = 0;
+                g_pf_spec_draws + g_pf_uber_draws ? 100.0 * g_pf_spec_draws / (g_pf_spec_draws + g_pf_uber_draws) : 0.0, (unsigned long long)g_pf_spec_built, g_pf_frags / fr / (640.0 * 528.0 * gpu_get_scale() * gpu_get_scale()), aus, tps); g_pf_frags = 0;
         g_pf_spec_draws = g_pf_uber_draws = 0;
         g_pf_gpu_ns = g_pf_gpu_frames = g_pf_swap_ns = g_pf_copies = g_pf_copy_allocs = 0;
         g_perf_draws = 0; g_pt_read = g_pt_setup = g_pt_xform = g_pt_asm = g_pt_gl = g_pt_verts = g_pt_calls = 0; }

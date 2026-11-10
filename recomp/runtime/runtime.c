@@ -317,6 +317,7 @@ static const char *find_disc(const char *exe) {
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1 && !strcmp(argv[argc - 1], "--prepare-textures")) { int texpack_prepare(void); return texpack_prepare(); }
     setvbuf(stderr, NULL, _IONBF, 0);   // the log survives a crash or a forced exit (Windows buffers redirected stderr)
     const char *disc = find_disc(argv[0]);
     char dolpath[1200];

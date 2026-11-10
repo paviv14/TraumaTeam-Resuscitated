@@ -5,6 +5,18 @@
 #include <stddef.h>
 
 // A transformed vertex: clip-space position (GX convention, before the viewport), colors, texcoords.
+// A texture pack image ready for the GPU: mip chain, DXT5 blocks or RGBA8 (texpack.c -> gl.c).
+typedef struct { int w, h, nlevels, compressed; u8 *data[16]; u32 size[16]; size_t bytes; } TPImage;   // compressed: 0 RGBA8, 1 DXT5, 2 DXT1
+int texpack_find(u64 hash);
+TPImage *texpack_take(int id, int var, int *failed);
+TPImage *texpack_get(int id, int var, int *failed, int take);
+extern int g_texpack_count;
+void texpack_free_image(TPImage *im);
+int texpack_pending(void);
+void gpu_texpack_stats(char *b, int n); void gpu_texpack_flush(void);
+extern int g_tp_limit, g_tp_compress;
+extern long long g_tp_decoded, g_tp_cached, g_tp_failed;
+
 typedef struct { float x, y, z, w; float col[2][4]; float uv[8][3]; } Out;
 
 // A decoded texture (RGBA8 packed as R<<24|G<<16|B<<8|A), cached across frames and revalidated by
@@ -13,7 +25,7 @@ typedef struct {
     u32 addr, img0, tlut, gen; int w, h; u32 *px; size_t cap;
     u64 hash, data_hash; u32 version;
     u32 gl_tex, gl_version;            // owned by the GPU backend
-    const u8 *hi; int hw, hh;          // replacement from a texture pack (RGBA bytes), or NULL
+    int rid, rvar;                     // texture pack replacement id (-1: none) and variant (0 image, 1/2 pair halves)
     int fmt;
     u64 partner;                       // dual-palette image: hash of the other half last paired with
 } TexEntry;
