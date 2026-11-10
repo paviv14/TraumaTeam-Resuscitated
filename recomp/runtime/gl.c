@@ -522,20 +522,50 @@ static int mirror_side(const GV *tri, GV *out, float lo, float hi, float axis, f
     for (int i = 1; i + 1 < n; i++) { out[m++] = p2[0]; out[m++] = p2[i]; out[m++] = p2[i + 1]; }
     return m;
 }
+// Repeating patterns are laid as many copies of one identical tile (same texture, same texture
+// coordinates, same size). Counted per frame; a tile seen 3+ times last frame repeats outwards.
+#define TSIG 2048
+static u64 g_tsig[2][TSIG]; static u8 g_tcnt[2][TSIG]; static int g_tcur;
+static int tile_seen(u64 sig, int add) {   // returns last frame's count
+    int i = (int)(sig % TSIG), prev = g_tcur ^ 1, r = 0;
+    for (int k = 0; k < 8; k++) { int j = (i + k) % TSIG; if (g_tsig[prev][j] == sig) { r = g_tcnt[prev][j]; break; } if (!g_tsig[prev][j]) break; }
+    if (add) for (int k = 0; k < 8; k++) { int j = (i + k) % TSIG;
+        if (g_tsig[g_tcur][j] == sig) { if (g_tcnt[g_tcur][j] < 255) g_tcnt[g_tcur][j]++; break; }
+        if (!g_tsig[g_tcur][j]) { g_tsig[g_tcur][j] = sig; g_tcnt[g_tcur][j] = 1; break; } }
+    return r;
+}
+static void tile_frame(void) { g_tcur ^= 1; memset(g_tsig[g_tcur], 0, sizeof g_tsig[0]); memset(g_tcnt[g_tcur], 0, sizeof g_tcnt[0]); }
 void gpu_draw(const Setup *s, const Out *v, int n) {
     static GV *buf; static int cap;
     if (n * 7 > cap) { free(buf); cap = n * 7 + 1024; buf = malloc(sizeof *buf * (size_t)cap); }
     float wd = s->vp[0], ht = s->vp[1], zr = s->vp[2], xo = s->vp[3] - 342.f, yo = s->vp[4] - 342.f, fz = s->vp[5];
     // ultrawide: 2D (w == 1 everywhere) spanning the game's whole width is stretched to the EFB's
-    float xs = 1.f, xm = (float)g_M; int touch_l = 0, touch_r = 0;
+    float xs = 1.f, xm = (float)g_M; int touch_l = 0, touch_r = 0; float tile_w = 0, edge_l = 0, edge_r = 0;
     if (g_M) {
         int flat = 1; float mn = 1e9f, mx = -1e9f;
         for (int i = 0; i < n && flat; i++) {
             if (v[i].w != 1.f) { flat = 0; break; }
             float x = v[i].x * wd + xo; if (x < mn) mn = x; if (x > mx) mx = x;
         }
-        if (flat && g_cfg.wide_fill) { touch_l = mn <= 0.5f; touch_r = mx >= 639.5f; }
-        else if (flat && mn <= 0.5f && mx >= 639.5f) { xs = (float)g_NW / 640.f; xm = 0; }
+        if (flat && g_cfg.wide_fill && n <= 6) {   // one quad: is it a tile of a repeating pattern?
+            float u0 = 1e9f, u1 = -1e9f, t0 = 1e9f, t1 = -1e9f, ymn = 1e9f, ymx = -1e9f;
+            for (int i = 0; i < n; i++) { float u = v[i].uv[0][0], t = v[i].uv[0][1], y = v[i].y * ht + yo;
+                if (u < u0) u0 = u; if (u > u1) u1 = u; if (t < t0) t0 = t; if (t > t1) t1 = t; if (y < ymn) ymn = y; if (y > ymx) ymx = y; }
+            u64 sig = (s->tex[0].e ? s->tex[0].e->data_hash : (u64)s->tex[0].gl_copy) * 0x9E3779B97F4A7C15ull;
+            sig ^= (u64)(int)((u1 - u0) * 1000) * 31 + (u64)(int)((t1 - t0) * 1000) * 1009 + (u64)(int)(mx - mn) * 65537 + (u64)(int)(ymx - ymn) * 7919 + (u64)(int)(u0 * 1000) * 131;
+            if (!sig) sig = 1;
+            if (tile_seen(sig, 1) >= 3) tile_w = mx - mn;
+        }
+        // reaches the frame edge; edge_l/edge_r = its outer edge in EFB columns (it may already reach
+        // part of the way into the side)
+        // a layer drawing a copy of the screen itself (post effects): its texture already holds the
+        // sides, so it is stretched to the full width like the copy was
+        // Full-screen layers are stretched (pictures would show mirrored duplicates of what is near
+        // their edge); narrow strips at the frame edge (borders) are mirrored outwards; tiles of a
+        // repeating pattern are repeated outwards; other partial pieces of a picture are left alone.
+        if (flat && mn <= 0.5f && mx >= 639.5f) { xs = (float)g_NW / 640.f; xm = 0; }
+        else if (flat && g_cfg.wide_fill && (tile_w > 0 || mx - mn <= 120.f)) {
+            touch_l = mn <= 0.5f && mn + g_M > 0.5f; touch_r = mx >= 639.5f && mx + g_M < g_NW - 0.5f; edge_l = mn + g_M; edge_r = mx + g_M; }
     }
     float half = g_NW * 0.5f;
     for (int i = 0; i < n; i++) {
@@ -550,11 +580,25 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
         memcpy(g->c0, o->col[0], 16); memcpy(g->c1, o->col[1], 16);
         memcpy(g->t, o->uv, sizeof g->t);
     }
-    if (touch_l || touch_r) {   // mirror the edge strips into the side margins
+    { static int dbg = -1; if (dbg < 0) dbg = getenv("TTPC_FILL_DBG") != NULL;
+      if (dbg && (touch_l || touch_r || xs != 1.f)) { static int nl; if (nl++ < 4000) fprintf(stderr, "[fill] n %d x %.1f..%.1f tile %.0f L%d R%d stretch %d tex %dx%d copy %u\n",
+          n, edge_l - g_M, edge_r - g_M, tile_w, touch_l, touch_r, xs != 1.f, s->tex[0].w, s->tex[0].h, s->tex[0].gl_copy); } }
+    if ((touch_l || touch_r) && tile_w >= 4.f && tile_w < 320.f && !(touch_l && touch_r)) {
+        // a small piece at the edge (one tile of a grid laid over the screen, like the title's dot
+        // pattern): repeat it outwards at its own width until the side is covered
+        int reps = (int)ceilf(g_M / tile_w) + 1, m = n;
+        if ((size_t)n * (reps + 1) > (size_t)cap) { GV *nb = malloc(sizeof *nb * (size_t)n * (reps + 2)); if (nb) { memcpy(nb, buf, sizeof *nb * (size_t)n); free(buf); buf = nb; cap = n * (reps + 2); } else reps = 0; }
+        float step = (touch_l ? -tile_w : tile_w) / half;   // in clip x (w == 1)
+        reps = (int)ceilf((touch_l ? edge_l : g_NW - edge_r) / tile_w);
+        for (int k = 1; k <= reps; k++)
+            for (int i = 0; i < n; i++) { buf[m] = buf[i]; buf[m].pos[0] += step * k; m++; }
+        n = m;
+    } else if (touch_l || touch_r) {   // bigger 2D (backgrounds, panels): mirror the edge strips
         int m = n; float M = (float)g_M;
         for (int i = 0; i + 2 < n; i += 3) {
-            if (touch_l) m += mirror_side(&buf[i], &buf[m], M, 2 * M, M, half);
-            if (touch_r) m += mirror_side(&buf[i], &buf[m], 640.f, 640.f + M, 640.f + M, half);
+            // mirror about the layer's own outer edge, just enough to reach the screen edge
+            if (touch_l) m += mirror_side(&buf[i], &buf[m], edge_l, 2 * edge_l, edge_l, half);
+            if (touch_r) m += mirror_side(&buf[i], &buf[m], 2 * edge_r - g_NW, edge_r, edge_r, half);
         }
         n = m;
     }
@@ -669,6 +713,7 @@ void gpu_present(int x0, int y0, int w, int h) {
     g_pf_swap_ns += host_now_ns() - ts;
     gpu_timer_frame();
     g_spec_budget = 4;
+    tile_frame();
     wide_update(ww, wh);   // between frames: the window's shape (or the setting) may have changed
     glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo);
     static int nframes; GLenum err = nframes++ < 600 ? glGetError_() : 0; static int nerr;   // glGetError stalls threaded drivers: early frames only
