@@ -10,12 +10,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-Settings g_cfg = { .scale = 2, .fullscreen = 0, .stretch = 0, .sharp = 0, .vsync = 0, .textures = 1, .volume = 100, .pointer_speed = 3 };
+Settings g_cfg = { .scale = 2, .fullscreen = 0, .stretch = 0, .sharp = 0, .vsync = 0, .textures = 1, .volume = 100, .pointer_speed = 3, .wide_fill = 1 };
 static const char *CFG_PATH = "settings.ini";
 
 static struct { const char *key; int *v; int lo, hi; } KEYS[] = {
     { "resolution_scale", &g_cfg.scale, 1, 6 }, { "fullscreen", &g_cfg.fullscreen, 0, 1 },
-    { "aspect_ratio", &g_cfg.stretch, 0, 3 }, { "sharp_pixels", &g_cfg.sharp, 0, 1 },
+    { "aspect_ratio", &g_cfg.stretch, 0, 3 }, { "ultrawide_sides", &g_cfg.wide_fill, 0, 1 }, { "sharp_pixels", &g_cfg.sharp, 0, 1 },
     { "vsync", &g_cfg.vsync, 0, 1 }, { "texture_pack", &g_cfg.textures, 0, 1 },
     { "volume", &g_cfg.volume, 0, 100 }, { "pointer_speed", &g_cfg.pointer_speed, 1, 5 },
 };
@@ -86,6 +86,7 @@ static void value_text(const Item *it, char *b, size_t n) {
     else if (it->v == &g_cfg.stretch) { static const char *s[] = { "4:3", "16:9 widescreen", "Stretch to fill", "Ultrawide" }; snprintf(b, n, "%s", s[v]); }
     else if (it->v == &g_cfg.sharp) snprintf(b, n, v ? "Sharp" : "Smooth");
     else if (it->v == &g_dev_pick) snprintf(b, n, "%s", DEV[v].name);
+    else if (it->v == &g_cfg.wide_fill) snprintf(b, n, v ? "Extend game art" : "Black");
     else snprintf(b, n, v ? "On" : "Off");
 }
 
@@ -93,6 +94,7 @@ static Item ITEMS[] = {
     { "Resolution", "Internal rendering resolution. Higher is sharper and needs a faster GPU.", &g_cfg.scale, 1, 6, 1 },
     { "Display", "Window or borderless fullscreen (F11 also switches).", &g_cfg.fullscreen, 0, 1, 1 },
     { "Aspect ratio", "4:3, 16:9, 16:9 stretched to the window, or ultrawide: a wider view of 3D scenes for wider screens, 2D stays centred. Restart after switching from 4:3.", &g_cfg.stretch, 0, 3, 1 },
+    { "Ultrawide sides", "On 2D screens: continue the game's own backgrounds and panels into the sides (mirrored), or leave them black.", &g_cfg.wide_fill, 0, 1, 1 },
     { "Scaling filter", "How the picture is scaled to the window: smooth, or sharp pixels.", &g_cfg.sharp, 0, 1, 1 },
     { "VSync", "Sync to the monitor's refresh. Off is smoothest on a 60 Hz screen.", &g_cfg.vsync, 0, 1, 1 },
     { "Texture pack", "Use the upscaled textures in the 'textures' folder.", &g_cfg.textures, 0, 1, 1 },

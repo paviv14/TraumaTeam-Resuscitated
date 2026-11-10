@@ -718,8 +718,8 @@ static void dump_frame(void) {
     u32 src = bp[0x49], wh = bp[0x4A];
     if (g_gpu) {
         int x0 = src & 0x3FF, y0 = (src >> 10) & 0x3FF, w = (wh & 0x3FF) + 1, h = ((wh >> 10) & 0x3FF) + 1;
-        static u8 buf[640 * 8 * 528 * 8 * 3];
-        int W, H; if (!(W = gpu_read_rgb(x0, y0, w, h, buf))) return; H = W >> 16; W &= 0xFFFF;
+        u8 *buf = NULL;
+        int W, H; if (!(W = gpu_read_rgb_wide(x0, y0, w, h, &buf))) return; H = W >> 16; W &= 0xFFFF;
         char path[512]; snprintf(path, sizeof path, "%s/frame_%06llu.ppm", g_dump_dir, (unsigned long long)g_copies);
         FILE *f = fopen(path, "wb"); if (!f) return;
         fprintf(f, "P6\n%d %d\n255\n", W, H); fwrite(buf, 3, (size_t)W * H, f); fclose(f);
@@ -824,8 +824,8 @@ void video_capture_request(void) {
 static void capture_frame_end(void) {
     if (g_cap_png_at >= 0 && (long)g_copies == g_cap_png_at && g_gpu) {
         u32 src = bp[0x49], wh = bp[0x4A];
-        static u8 *buf; if (!buf) buf = malloc((size_t)640 * 528 * 3 * 64);
-        int W = gpu_read_rgb(src & 0x3FF, (src >> 10) & 0x3FF, (wh & 0x3FF) + 1, ((wh >> 10) & 0x3FF) + 1, buf);
+        u8 *buf = NULL;   // the whole picture, ultrawide sides included
+        int W = gpu_read_rgb_wide(src & 0x3FF, (src >> 10) & 0x3FF, (wh & 0x3FF) + 1, ((wh >> 10) & 0x3FF) + 1, &buf);
         if (W) texpack_write_png(g_cap_png, W & 0xFFFF, W >> 16, buf);
         g_cap_png_at = -1;
     }

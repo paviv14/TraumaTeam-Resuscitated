@@ -50,6 +50,7 @@ int  gpu_copy_to_texture(u32 dst, int x0, int y0, int w, int h, int ow, int oh, 
 u32  gpu_copy_lookup(u32 addr, int w, int h);   // GPU texture of an EFB copy, or 0
 int  gpu_read_rgba(int x0, int y0, int w, int h, u32 *out);  // native-res R<<24|G<<16|B<<8|A, top row first
 int  gpu_read_rgb(int x0, int y0, int w, int h, u8 *out);   // for frame dumps (top row first)
+int  gpu_read_rgb_wide(int x0, int y0, int w, int h, u8 **out);   // same, ultrawide sides included
 extern int g_gpu;
 // display options and the overlay used by the options menu (menu.c)
 extern int g_disp_stretch, g_disp_sharp;

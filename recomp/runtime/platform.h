@@ -15,7 +15,7 @@ typedef struct {
 extern Input g_input;
 
 // Settings (settings.ini, options menu in menu.c)
-typedef struct { int scale, fullscreen, stretch, sharp, vsync, textures, volume, pointer_speed; } Settings;
+typedef struct { int scale, fullscreen, stretch, sharp, vsync, textures, volume, pointer_speed, wide_fill; } Settings;
 extern Settings g_cfg;
 void settings_load(void);
 void settings_save(void);

@@ -9,6 +9,7 @@
 //   konst/register colors) plus the alpha test; blending, depth and color masks map to GL state.
 // * Textures come from the decoder's cache (decoded RGBA); a GL texture is (re)uploaded only when the
 //   cached copy changed.
+#include "platform.h"
 #include "cpu.h"
 #include "gx_state.h"
 #include <stdio.h>
@@ -493,19 +494,48 @@ fixed_function:
     glScissor_(ex0 * g_scale, (528 - y1) * g_scale, (ex1 - ex0) * g_scale, (y1 - y0) * g_scale);
 }
 
+// Ultrawide side fill: 2D that reaches the edge of the game's frame (backgrounds, panel strips,
+// borders) is continued into the side margin as a mirror image of its own edge strip. Mirroring
+// keeps to the part of the texture the game drew there, so atlases and clamped textures stay clean.
+#define GVF (int)(sizeof(GV) / sizeof(float))
+static int clip_x(const GV *in, int n, GV *out, float x, int keep_above, float half) {
+    // keep the part of polygon `in` with X >= x (keep_above) or X <= x; X = EFB column of pos[0]
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        const GV *a = &in[i], *b = &in[(i + 1) % n];
+        float xa = (a->pos[0] + 1.f) * half - x, xb = (b->pos[0] + 1.f) * half - x;
+        if (!keep_above) { xa = -xa; xb = -xb; }
+        if (xa >= 0) out[m++] = *a;
+        if ((xa >= 0) != (xb >= 0)) {
+            float t = xa / (xa - xb); const float *fa = (const float *)a, *fb = (const float *)b; float *fo = (float *)&out[m++];
+            for (int k = 0; k < GVF; k++) fo[k] = fa[k] + (fb[k] - fa[k]) * t;
+        }
+    }
+    return m;
+}
+static int mirror_side(const GV *tri, GV *out, float lo, float hi, float axis, float half) {
+    GV p1[8], p2[8];
+    int n = clip_x(tri, 3, p1, lo, 1, half); if (n < 3) return 0;
+    n = clip_x(p1, n, p2, hi, 0, half); if (n < 3) return 0;
+    for (int i = 0; i < n; i++) { float X = (p2[i].pos[0] + 1.f) * half; p2[i].pos[0] = (2.f * axis - X) / half - 1.f; }
+    int m = 0;
+    for (int i = 1; i + 1 < n; i++) { out[m++] = p2[0]; out[m++] = p2[i]; out[m++] = p2[i + 1]; }
+    return m;
+}
 void gpu_draw(const Setup *s, const Out *v, int n) {
     static GV *buf; static int cap;
-    if (n > cap) { free(buf); cap = n + 1024; buf = malloc(sizeof *buf * (size_t)cap); }
+    if (n * 7 > cap) { free(buf); cap = n * 7 + 1024; buf = malloc(sizeof *buf * (size_t)cap); }
     float wd = s->vp[0], ht = s->vp[1], zr = s->vp[2], xo = s->vp[3] - 342.f, yo = s->vp[4] - 342.f, fz = s->vp[5];
     // ultrawide: 2D (w == 1 everywhere) spanning the game's whole width is stretched to the EFB's
-    float xs = 1.f, xm = (float)g_M;
+    float xs = 1.f, xm = (float)g_M; int touch_l = 0, touch_r = 0;
     if (g_M) {
         int flat = 1; float mn = 1e9f, mx = -1e9f;
         for (int i = 0; i < n && flat; i++) {
             if (v[i].w != 1.f) { flat = 0; break; }
             float x = v[i].x * wd + xo; if (x < mn) mn = x; if (x > mx) mx = x;
         }
-        if (flat && mn <= 0.5f && mx >= 639.5f) { xs = (float)g_NW / 640.f; xm = 0; }
+        if (flat && g_cfg.wide_fill) { touch_l = mn <= 0.5f; touch_r = mx >= 639.5f; }
+        else if (flat && mn <= 0.5f && mx >= 639.5f) { xs = (float)g_NW / 640.f; xm = 0; }
     }
     float half = g_NW * 0.5f;
     for (int i = 0; i < n; i++) {
@@ -519,6 +549,14 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
         g->pos[3] = w;
         memcpy(g->c0, o->col[0], 16); memcpy(g->c1, o->col[1], 16);
         memcpy(g->t, o->uv, sizeof g->t);
+    }
+    if (touch_l || touch_r) {   // mirror the edge strips into the side margins
+        int m = n; float M = (float)g_M;
+        for (int i = 0; i + 2 < n; i += 3) {
+            if (touch_l) m += mirror_side(&buf[i], &buf[m], M, 2 * M, M, half);
+            if (touch_r) m += mirror_side(&buf[i], &buf[m], 640.f, 640.f + M, 640.f + M, half);
+        }
+        n = m;
     }
     glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo);
     glViewport_(0, 0, g_W, g_H);
@@ -751,6 +789,18 @@ void gpu_overlay_end(void) {
     glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo); glViewport_(0, 0, g_W, g_H); glEnable_(GL_SCISSOR_TEST);
 }
 
+// The whole displayed picture, side margins included (captures, frame dumps); *out is reused.
+int gpu_read_rgb_wide(int x0, int y0, int w, int h, u8 **out) {
+    int ex0, ex1; wide_x(x0, x0 + w, &ex0, &ex1);
+    int W = (ex1 - ex0) * g_scale, H = h * g_scale;
+    static u8 *tmp, *res; static size_t cap;
+    size_t need = (size_t)W * H * 3; if (cap < need) { free(tmp); free(res); tmp = malloc(need); res = malloc(need); cap = need; }
+    if (!tmp || !res) return 0;
+    glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_fbo);
+    glReadPixels_(ex0 * g_scale, (528 - y0 - h) * g_scale, W, H, GL_RGB, GL_UNSIGNED_BYTE, tmp);
+    for (int y = 0; y < H; y++) memcpy(res + (size_t)y * W * 3, tmp + (size_t)(H - 1 - y) * W * 3, (size_t)W * 3);
+    *out = res; return W | H << 16;
+}
 int gpu_read_rgb(int x0, int y0, int w, int h, u8 *out) {
     int W = w * g_scale, H = h * g_scale;
     static u8 *tmp; static size_t cap;
@@ -844,4 +894,5 @@ void gpu_draw(const Setup *s, const Out *v, int n) { (void)s; (void)v; (void)n; 
 void gpu_clear(int x0, int y0, int w, int h, u32 c, float z, int color, int alpha, int depth) { (void)x0; (void)y0; (void)w; (void)h; (void)c; (void)z; (void)color; (void)alpha; (void)depth; }
 void gpu_present(int x0, int y0, int w, int h) { (void)x0; (void)y0; (void)w; (void)h; }
 int gpu_read_rgb(int x0, int y0, int w, int h, u8 *out) { (void)x0; (void)y0; (void)w; (void)h; (void)out; return 0; }
+int gpu_read_rgb_wide(int x0, int y0, int w, int h, u8 **out) { (void)x0; (void)y0; (void)w; (void)h; (void)out; return 0; }
 #endif
