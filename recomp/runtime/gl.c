@@ -200,6 +200,13 @@ typedef struct { u32 dst; GLuint tex, fbo; int w, h, tw, th; } CopyTex;
 static CopyTex g_ct[64]; static int g_nct;
 static GLuint g_cprog, g_cvao; static GLint g_cu_rect, g_cu_fmt, g_cu_inten;
 static int g_scale = 1, g_W, g_H;
+// Ultrawide: the EFB is g_NW native pixels wide instead of 640, the game's 640 sitting in the middle
+// (g_M on each side). Perspective geometry the game draws beyond its own 16:9 frame lands in the
+// sides; 2D stays centred, except full-width 2D (fades, overlays, backgrounds), which is stretched.
+static int g_M = 0, g_NW = 640;
+static void wide_x(int x0, int x1, int *o0, int *o1) {   // game x range -> EFB x range (native px)
+    if (x0 <= 0 && x1 >= 640) { *o0 = 0; *o1 = g_NW; } else { *o0 = x0 + g_M; *o1 = x1 + g_M; }
+}
 static struct { GLint nst, csel, asel, cop, aop, st, rsw, tsw, chan, k, ka, reg, at, aop2, nbump, is, indcmd, im, cs, ms; } U;
 
 // ---------------------------------------------------------------- per-configuration shaders
@@ -230,7 +237,7 @@ typedef struct { float pos[4], c0[4], c1[4], t[8][3]; } GV;   // 36 floats
 
 int gpu_init(int scale) {
     if (!load_gl()) return 0;
-    g_scale = scale < 1 ? 1 : scale; g_W = 640 * g_scale; g_H = 528 * g_scale;
+    g_scale = scale < 1 ? 1 : scale; g_W = g_NW * g_scale; g_H = 528 * g_scale;
     GLuint vs = compile(GL_VERTEX_SHADER, VS), fs = compile(GL_FRAGMENT_SHADER, FS);
     if (!vs || !fs) return 0;
     g_vs_obj = vs;
@@ -482,19 +489,31 @@ fixed_function:
     int x0 = s->sx0, y0 = s->sy0, x1 = s->sx1 + 1, y1 = s->sy1 + 1;
     if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > 640) x1 = 640; if (y1 > 528) y1 = 528;
     if (x1 < x0) x1 = x0; if (y1 < y0) y1 = y0;
-    glScissor_(x0 * g_scale, (528 - y1) * g_scale, (x1 - x0) * g_scale, (y1 - y0) * g_scale);
+    int ex0, ex1; wide_x(x0, x1, &ex0, &ex1);
+    glScissor_(ex0 * g_scale, (528 - y1) * g_scale, (ex1 - ex0) * g_scale, (y1 - y0) * g_scale);
 }
 
 void gpu_draw(const Setup *s, const Out *v, int n) {
     static GV *buf; static int cap;
     if (n > cap) { free(buf); cap = n + 1024; buf = malloc(sizeof *buf * (size_t)cap); }
     float wd = s->vp[0], ht = s->vp[1], zr = s->vp[2], xo = s->vp[3] - 342.f, yo = s->vp[4] - 342.f, fz = s->vp[5];
+    // ultrawide: 2D (w == 1 everywhere) spanning the game's whole width is stretched to the EFB's
+    float xs = 1.f, xm = (float)g_M;
+    if (g_M) {
+        int flat = 1; float mn = 1e9f, mx = -1e9f;
+        for (int i = 0; i < n && flat; i++) {
+            if (v[i].w != 1.f) { flat = 0; break; }
+            float x = v[i].x * wd + xo; if (x < mn) mn = x; if (x > mx) mx = x;
+        }
+        if (flat && mn <= 0.5f && mx >= 639.5f) { xs = (float)g_NW / 640.f; xm = 0; }
+    }
+    float half = g_NW * 0.5f;
     for (int i = 0; i < n; i++) {
         const Out *o = &v[i]; GV *g = &buf[i];
         float w = o->w;
         // screen x = x/w*wd + xo (0..640), y likewise (0..528, down), z = (z/w*zr + fz)/2^24 (0..1)
         float sxw = o->x * wd + xo * w, syw = o->y * ht + yo * w, szw = (o->z * zr + fz * w) / 16777215.f;
-        g->pos[0] = sxw / 320.f - w;
+        g->pos[0] = (sxw * xs + xm * w) / half - w;
         g->pos[1] = w - syw / 264.f;
         g->pos[2] = 2.f * szw - w;
         g->pos[3] = w;
@@ -516,7 +535,8 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
 
 void gpu_clear(int x0, int y0, int w, int h, u32 c, float z, int color, int alpha, int depth) {
     glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo);
-    glScissor_(x0 * g_scale, (528 - y0 - h) * g_scale, w * g_scale, h * g_scale);
+    int ex0, ex1; wide_x(x0, x0 + w, &ex0, &ex1);
+    glScissor_(ex0 * g_scale, (528 - y0 - h) * g_scale, (ex1 - ex0) * g_scale, h * g_scale);
     glColorMask_(color, color, color, alpha); glDepthMask_(depth ? GL_TRUE : GL_FALSE);
     glClearColor_((c >> 24) / 255.f, ((c >> 16) & 255) / 255.f, ((c >> 8) & 255) / 255.f, (c & 255) / 255.f);
     glClearDepth_(z);
@@ -529,12 +549,36 @@ int g_view_x, g_view_y, g_view_w, g_view_h;   // where the picture sits in the w
 // Display options (set by the options menu, menu.c)
 int g_disp_stretch, g_disp_sharp;
 static GLuint g_last_fbo, g_last_tex; static int g_last_w, g_last_h;   // the last displayed picture
-static void view_rect(int ww, int wh) {   // fit the picture into the window: 4:3, 16:9, or stretched to fill
-    int ax = g_disp_stretch == 1 ? 16 : 4, ay = g_disp_stretch == 1 ? 9 : 3;
-    int vw = ww, vh = (int)((long long)ww * ay / ax);
-    if (vh > wh) { vh = wh; vw = (int)((long long)wh * ax / ay); }
+static int g_pic_x, g_pic_y, g_pic_w, g_pic_h;   // where the whole picture goes (wider than g_view_* when ultrawide)
+static void view_rect(int ww, int wh) {   // fit the picture into the window: 4:3, 16:9, stretched, or ultrawide
+    long long ax = g_disp_stretch == 1 ? 16 : 4, ay = g_disp_stretch == 1 ? 9 : 3;
+    if (g_disp_stretch == 3) { ax = 16LL * g_NW; ay = 9LL * 640; }   // 16:9 widened by the side margins
+    int vw = ww, vh = (int)(ww * ay / ax);
+    if (vh > wh) { vh = wh; vw = (int)(wh * ax / ay); }
     if (g_disp_stretch == 2) { vw = ww; vh = wh; }
-    g_view_x = (ww - vw) / 2; g_view_y = (wh - vh) / 2; g_view_w = vw; g_view_h = vh;
+    g_pic_x = (ww - vw) / 2; g_pic_y = (wh - vh) / 2; g_pic_w = vw; g_pic_h = vh;
+    // the game's own 640 columns (for the pointer)
+    g_view_x = g_pic_x + (int)((long long)vw * g_M / g_NW); g_view_w = (int)((long long)vw * 640 / g_NW);
+    g_view_y = g_pic_y; g_view_h = vh;
+}
+// Ultrawide margin for the window's shape: 16:9 game picture widened to the window (up to 32:9).
+static void wide_update(int ww, int wh) {
+    int nw = 640;
+    if (g_disp_stretch == 3 && wh > 0) {
+        double a = (double)ww / wh, base = 16.0 / 9.0;
+        if (a > base) { if (a > 32.0 / 9.0) a = 32.0 / 9.0; nw = ((int)(640.0 * a / base + 0.5) + 1) & ~1; }
+    }
+    if (nw == g_NW) return;
+    g_NW = nw; g_M = (nw - 640) / 2; g_W = g_NW * g_scale;
+    glBindTexture_(GL_TEXTURE_2D, g_color);
+    glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, g_W, g_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glBindRenderbuffer_(GL_RENDERBUFFER, g_depth);
+    glRenderbufferStorage_(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, g_W, g_H);
+    glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo);
+    glDisable_(GL_SCISSOR_TEST); glViewport_(0, 0, g_W, g_H);
+    glClearColor_(0, 0, 0, 0); glClearDepth_(1.0); glColorMask_(1, 1, 1, 1); glDepthMask_(GL_TRUE); glClear_(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glEnable_(GL_SCISSOR_TEST);
+    fprintf(stderr, "[gl] ultrawide: %d columns (%d each side), internal %dx%d\n", g_NW, g_M, g_W, g_H);
 }
 // perf (TTPC_PERFLOG): GPU time per frame from timer queries, time blocked in SwapWindow, EFB copies
 extern u64 g_pf_gpu_ns, g_pf_gpu_frames, g_pf_swap_ns, g_pf_copies, g_pf_copy_allocs;
@@ -558,9 +602,12 @@ static void gpu_timer_frame(void) {
 void gpu_present(int x0, int y0, int w, int h) {
     int ww, wh; SDL_GL_GetDrawableSize(g_sdl_window, &ww, &wh);
     view_rect(ww, wh);
-    int vw = g_view_w, vh = g_view_h;
+    int vw = g_pic_w, vh = g_pic_h;
+    int ex0, ex1; wide_x(x0, x0 + w, &ex0, &ex1);
     // keep a copy of the displayed picture (the options menu shows it, paused, behind itself)
-    int lw = w * g_scale, lh = h * g_scale;
+    int lw = (ex1 - ex0) * g_scale, lh = h * g_scale;
+    { static int dbg = -1, n; if (dbg < 0) dbg = getenv("TTPC_PRESENT_DBG") != NULL;   // tests: where the picture goes
+      if (dbg && n++ % 120 == 0) fprintf(stderr, "[present] win %dx%d pic %d,%d %dx%d src x %d..%d y %d h %d | EFB %dx%d\n", ww, wh, g_pic_x, g_pic_y, g_pic_w, g_pic_h, ex0, ex1, y0, h, g_W, g_H); }
     if (!g_last_fbo) { glGenFramebuffers_(1, &g_last_fbo); glGenTextures_(1, &g_last_tex); }
     if (lw != g_last_w || lh != g_last_h) {
         glBindTexture_(GL_TEXTURE_2D, g_last_tex);
@@ -572,11 +619,11 @@ void gpu_present(int x0, int y0, int w, int h) {
     }
     glDisable_(GL_SCISSOR_TEST);
     glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_fbo); glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, g_last_fbo);
-    glBlitFramebuffer_(x0 * g_scale, (528 - y0 - h) * g_scale, (x0 + w) * g_scale, (528 - y0) * g_scale, 0, 0, lw, lh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    glBlitFramebuffer_(ex0 * g_scale, (528 - y0 - h) * g_scale, ex1 * g_scale, (528 - y0) * g_scale, 0, 0, lw, lh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
     glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_last_fbo);
     glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, 0);
     glClearColor_(0, 0, 0, 1); glColorMask_(1, 1, 1, 1); glClear_(GL_COLOR_BUFFER_BIT);
-    glBlitFramebuffer_(0, 0, lw, lh, g_view_x, wh - g_view_y - vh, g_view_x + vw, wh - g_view_y, GL_COLOR_BUFFER_BIT, g_disp_sharp ? GL_NEAREST : GL_LINEAR);
+    glBlitFramebuffer_(0, 0, lw, lh, g_pic_x, wh - g_pic_y - vh, g_pic_x + vw, wh - g_pic_y, GL_COLOR_BUFFER_BIT, g_disp_sharp ? GL_NEAREST : GL_LINEAR);
     glEnable_(GL_SCISSOR_TEST);
     if (g_tq_active) { glEndQuery_(0x88BF); g_tq_active = 0; }
     u64 ts = host_now_ns();
@@ -584,6 +631,7 @@ void gpu_present(int x0, int y0, int w, int h) {
     g_pf_swap_ns += host_now_ns() - ts;
     gpu_timer_frame();
     g_spec_budget = 4;
+    wide_update(ww, wh);   // between frames: the window's shape (or the setting) may have changed
     glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo);
     static int nframes; GLenum err = nframes++ < 600 ? glGetError_() : 0; static int nerr;   // glGetError stalls threaded drivers: early frames only
     if (err && nerr++ < 10) fprintf(stderr, "[gl] error 0x%04X\n", err);
@@ -594,7 +642,7 @@ int gpu_get_scale(void) { return g_scale; }
 void gpu_set_scale(int scale) {
     if (scale < 1) scale = 1; if (scale > 8) scale = 8;
     if (scale == g_scale) return;
-    g_scale = scale; g_W = 640 * scale; g_H = 528 * scale;
+    g_scale = scale; g_W = g_NW * scale; g_H = 528 * scale;
     glBindTexture_(GL_TEXTURE_2D, g_color);
     glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, g_W, g_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     glBindRenderbuffer_(GL_RENDERBUFFER, g_depth);
@@ -672,7 +720,7 @@ int gpu_overlay_begin(int *w, int *h, float dim) {
     GLfloat sc[2] = { (float)ww, (float)wh }; glUniform2fv_(g_ou_screen, 1, sc);
     g_omode = -1; g_nov = 0;
     if (g_last_tex) { float c[4] = { 1 - dim, 1 - dim, 1 - dim, 1 };
-        ov_quad(2, (float)g_view_x, (float)g_view_y, (float)(g_view_x + g_view_w), (float)(g_view_y + g_view_h), 0, 1, 1, 0, c); }
+        ov_quad(2, (float)g_pic_x, (float)g_pic_y, (float)(g_pic_x + g_pic_w), (float)(g_pic_y + g_pic_h), 0, 1, 1, 0, c); }
     *w = ww; *h = wh;
     return 1;
 }
@@ -708,7 +756,7 @@ int gpu_read_rgb(int x0, int y0, int w, int h, u8 *out) {
     static u8 *tmp; static size_t cap;
     size_t need = (size_t)W * H * 3; if (cap < need) { free(tmp); tmp = malloc(need); cap = need; }
     glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_fbo);
-    glReadPixels_(x0 * g_scale, (528 - y0 - h) * g_scale, W, H, GL_RGB, GL_UNSIGNED_BYTE, tmp);
+    glReadPixels_((x0 + g_M) * g_scale, (528 - y0 - h) * g_scale, W, H, GL_RGB, GL_UNSIGNED_BYTE, tmp);
     for (int y = 0; y < H; y++) memcpy(out + (size_t)y * W * 3, tmp + (size_t)(H - 1 - y) * W * 3, (size_t)W * 3);
     return W | H << 16;
 }
@@ -720,7 +768,8 @@ int gpu_copy_to_texture(u32 dst, int x0, int y0, int w, int h, int ow, int oh, i
     CopyTex *c = NULL;
     for (int k = 0; k < g_nct; k++) if (g_ct[k].dst == dst) { c = &g_ct[k]; break; }
     if (!c) { c = &g_ct[g_nct < 64 ? g_nct++ : (int)(dst >> 5) & 63]; memset(c, 0, sizeof *c); c->dst = dst; }
-    int tw = ow * g_scale, th = oh * g_scale;
+    int ex0, ex1; wide_x(x0, x0 + w, &ex0, &ex1);   // full-width copies take the sides too (and keep their detail)
+    int tw = (int)((long long)ow * g_scale * (ex1 - ex0) / (w > 0 ? w : 1)), th = oh * g_scale;
     g_pf_copies++;
     if (!c->tex) { glGenTextures_(1, &c->tex); glGenFramebuffers_(1, &c->fbo); }
     if (c->tw != tw || c->th != th) {
@@ -740,7 +789,7 @@ int gpu_copy_to_texture(u32 dst, int x0, int y0, int w, int h, int ow, int oh, i
     glActiveTexture_(GL_TEXTURE0); glBindTexture_(GL_TEXTURE_2D, g_color);
     glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);   // half-scale copies average texels
     // source rect in EFB texture coordinates (the EFB is stored bottom-up): top row maps to v = 0 here
-    float u0 = (float)x0 / 640.f, uw = (float)w / 640.f;
+    float u0 = (float)ex0 / g_NW, uw = (float)(ex1 - ex0) / g_NW;
     float v0 = (float)(528 - y0) / 528.f, vh = -(float)h / 528.f;
     glUniform4f_(g_cu_rect, u0, v0, uw, vh);
     glUniform1i_(g_cu_fmt, fmt); glUniform1i_(g_cu_inten, inten);
@@ -764,7 +813,7 @@ int gpu_read_rgba(int x0, int y0, int w, int h, u32 *out) {
     static u8 *tmp; static size_t cap;
     size_t need = (size_t)W * H * 4; if (cap < need) { free(tmp); tmp = malloc(need); cap = need; }
     glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_fbo);
-    glReadPixels_(x0 * g_scale, (528 - y0 - h) * g_scale, W, H, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+    glReadPixels_((x0 + g_M) * g_scale, (528 - y0 - h) * g_scale, W, H, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
     glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo);
     int s = g_scale, n = s * s;
     for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {   // box-filter down to native resolution

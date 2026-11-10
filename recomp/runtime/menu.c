@@ -15,7 +15,7 @@ static const char *CFG_PATH = "settings.ini";
 
 static struct { const char *key; int *v; int lo, hi; } KEYS[] = {
     { "resolution_scale", &g_cfg.scale, 1, 6 }, { "fullscreen", &g_cfg.fullscreen, 0, 1 },
-    { "aspect_ratio", &g_cfg.stretch, 0, 2 }, { "sharp_pixels", &g_cfg.sharp, 0, 1 },
+    { "aspect_ratio", &g_cfg.stretch, 0, 3 }, { "sharp_pixels", &g_cfg.sharp, 0, 1 },
     { "vsync", &g_cfg.vsync, 0, 1 }, { "texture_pack", &g_cfg.textures, 0, 1 },
     { "volume", &g_cfg.volume, 0, 100 }, { "pointer_speed", &g_cfg.pointer_speed, 1, 5 },
 };
@@ -83,7 +83,7 @@ static void value_text(const Item *it, char *b, size_t n) {
     } else if (it->v == &g_cfg.volume) snprintf(b, n, "%d%%", v);
     else if (it->v == &g_cfg.pointer_speed) { static const char *s[] = { "", "Slowest", "Slow", "Normal", "Fast", "Fastest" }; snprintf(b, n, "%s", s[v]); }
     else if (it->v == &g_cfg.fullscreen) snprintf(b, n, v ? "Fullscreen" : "Window");
-    else if (it->v == &g_cfg.stretch) { static const char *s[] = { "4:3", "16:9 widescreen", "Stretch to fill" }; snprintf(b, n, "%s", s[v]); }
+    else if (it->v == &g_cfg.stretch) { static const char *s[] = { "4:3", "16:9 widescreen", "Stretch to fill", "Ultrawide" }; snprintf(b, n, "%s", s[v]); }
     else if (it->v == &g_cfg.sharp) snprintf(b, n, v ? "Sharp" : "Smooth");
     else if (it->v == &g_dev_pick) snprintf(b, n, "%s", DEV[v].name);
     else snprintf(b, n, v ? "On" : "Off");
@@ -92,7 +92,7 @@ static void value_text(const Item *it, char *b, size_t n) {
 static Item ITEMS[] = {
     { "Resolution", "Internal rendering resolution. Higher is sharper and needs a faster GPU.", &g_cfg.scale, 1, 6, 1 },
     { "Display", "Window or borderless fullscreen (F11 also switches).", &g_cfg.fullscreen, 0, 1, 1 },
-    { "Aspect ratio", "4:3, true 16:9 widescreen, or 16:9 stretched to fill the window. Restart the game after switching from 4:3.", &g_cfg.stretch, 0, 2, 1 },
+    { "Aspect ratio", "4:3, 16:9, 16:9 stretched to the window, or ultrawide: a wider view of 3D scenes for wider screens, 2D stays centred. Restart after switching from 4:3.", &g_cfg.stretch, 0, 3, 1 },
     { "Scaling filter", "How the picture is scaled to the window: smooth, or sharp pixels.", &g_cfg.sharp, 0, 1, 1 },
     { "VSync", "Sync to the monitor's refresh. Off is smoothest on a 60 Hz screen.", &g_cfg.vsync, 0, 1, 1 },
     { "Texture pack", "Use the upscaled textures in the 'textures' folder.", &g_cfg.textures, 0, 1, 1 },
@@ -106,7 +106,7 @@ static void change(int i, int dir) {
     Item *it = &ITEMS[i];
     int v = *it->v + dir * it->step;
     if (it->hi - it->lo == 1) v = *it->v ? 0 : 1;          // toggles wrap
-    else if (it->v == &g_cfg.stretch) v = (v + 3) % 3;     // so does the aspect ratio list
+    else if (it->v == &g_cfg.stretch) v = (v + 4) % 4;     // so does the aspect ratio list
     else if (it->v == &g_dev_pick) v = (v + NDEV) % NDEV;
     if (it->v == &g_dev_pick) { *it->v = v; return; }      // a choice, not a setting
     else if (v < it->lo) v = it->lo; else if (v > it->hi) v = it->hi;

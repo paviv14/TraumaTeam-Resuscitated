@@ -120,6 +120,8 @@ int platform_init(void) {
     }
     int zoom = getenv("TTPC_ZOOM") ? atoi(getenv("TTPC_ZOOM")) : 2;   // window size multiplier
     if (zoom < 1) zoom = 1;
+    int win_w = 640 * zoom, win_h = 480 * zoom;   // TTPC_WINSIZE=WxH (tests) overrides
+    if (getenv("TTPC_WINSIZE")) sscanf(getenv("TTPC_WINSIZE"), "%dx%d", &win_w, &win_h);
     // OpenGL (GPU rendering) unless TTPC_SOFTWARE=1 or it is unavailable.
     if (!getenv("TTPC_SOFTWARE")) {
         // Creating the GPU context can fail transiently on Windows (driver still starting, the window
@@ -137,7 +139,7 @@ int platform_init(void) {
             SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
             SDL_GL_SetAttribute(SDL_GL_ACCELERATED_VISUAL, 1);   // never the Windows generic (GDI) OpenGL 1.1
             g_win = SDL_CreateWindow("Trauma Team (native)", SDL_WINDOWPOS_CENTERED_DISPLAY(disp), SDL_WINDOWPOS_CENTERED_DISPLAY(disp),
-                                     640 * zoom, 480 * zoom, SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
+                                     win_w, win_h, SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
             if (!g_win) fprintf(stderr, "[platform] window: %s\n", SDL_GetError());
             else if (!(g_glctx = SDL_GL_CreateContext(g_win))) fprintf(stderr, "[platform] OpenGL context: %s\n", SDL_GetError());
             else if (SDL_GL_MakeCurrent(g_win, g_glctx) != 0) fprintf(stderr, "[platform] make current: %s\n", SDL_GetError());
