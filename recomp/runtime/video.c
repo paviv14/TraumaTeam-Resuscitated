@@ -826,6 +826,7 @@ void video_capture_request(void) {
     FILE *f = fopen(path, "w"); if (!f) return;
     g_dlf = f; g_dl_from = (long)g_copies + 1; g_cap_end = g_dl_from + 2;
     snprintf(g_cap_png, sizeof g_cap_png, "captures/capture_%03d.png", n); g_cap_png_at = g_dl_from + 1;
+    { extern char g_vr_shot[256]; snprintf(g_vr_shot, sizeof g_vr_shot, "captures/capture_%03d_vr.png", n); }   // VR: what the headset shows
     fprintf(stderr, "[capture] writing %s\n", path);
 }
 static void capture_frame_end(void) {
