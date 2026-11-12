@@ -105,7 +105,7 @@ static void m4_dir(M4 a, const float p[3], float o[3]) { for (int i = 0; i < 3; 
 
 // ---------------------------------------------------------------- the room (glTF)
 typedef struct { float base[4], emis[3]; GLuint tex, etex; int blend, mask; float cutoff; int screen; } Mat;
-typedef struct { GLuint vao; int n; int mat; } Prim;
+typedef struct { GLuint vao; int n; int mat; int grp; } Prim;   // grp: 1 door, 3 mouse (moved at draw time)
 static Mat *g_mat; static int g_nmat;
 static Prim *g_prim; static int g_nprim;
 static GLuint g_white, g_prog, g_lineprog, g_linevao, g_linevbo;
@@ -135,7 +135,14 @@ int g_vr_pic_y0 = 24, g_vr_pic_h = 480;  // the presented picture's rows in the 
 // (the centres of the markers the game puts on them, in its 640x528 frame)
 static const float HS_PC[2] = { 166, 173 }, HS_RECORDER[2] = { 111, 320 }, HS_DOOR[2] = { 576, 152 };
 #define OFFICE_BG_Y 0
-static float g_obj_min[3][3], g_obj_max[3][3]; static int g_obj_ok[3];   // 0 recorder, 1 door, 2 monitor body
+static float g_obj_min[4][3], g_obj_max[4][3]; static int g_obj_ok[4];   // 0 recorder, 1 door, 2 monitor body, 3 mouse
+// the door: swings open (into the alcove) when you leave through it; beyond it, a black void that shows the
+// game's other screens (the map...) on a pane in the doorway until those places are built
+static float g_door_t; static int g_door_req, g_last_kind;   // g_last_kind: what the laser was on (4 = door)
+static const float HINGE[3] = { -0.8f, 0, -7.25f };
+// the desk mouse: hold it (grip near it, or E on the keyboard) and it moves the computer's pointer
+static float g_mouse_off[2]; static int g_mouse_held = -1; static float g_mouse_grab[3], g_mouse_grab_off[2];
+static GLint u_model;
 static M4 g_head; static int g_head_ok;
 // where the game's interface is on screen (office): rectangles of the drawn pieces, this frame and last
 typedef struct { float x0, y0, x1, y1; } Rect;
@@ -181,7 +188,7 @@ static int load_room(const char *path) {
     for (cgltf_size ni = 0; ni < d->nodes_count; ni++) {
         cgltf_node *nd = &d->nodes[ni]; if (!nd->mesh) continue;
         float wm[16]; cgltf_node_transform_world(nd, wm); M4 W; memcpy(W.m, wm, 64);
-        int obj = !nd->name ? -1 : !strncmp(nd->name, "recorder", 8) ? 0 : !strncmp(nd->name, "door_exit", 9) ? 1 : !strncmp(nd->name, "monitor", 7) ? 2 : -1;
+        int obj = !nd->name ? -1 : !strncmp(nd->name, "recorder", 8) ? 0 : !strncmp(nd->name, "door_exit", 9) ? 1 : !strncmp(nd->name, "monitor", 7) ? 2 : !strncmp(nd->name, "mouse", 5) ? 3 : -1;
         for (cgltf_size pi = 0; pi < nd->mesh->primitives_count; pi++) {
             cgltf_primitive *pr = &nd->mesh->primitives[pi];
             const cgltf_accessor *ap = NULL, *at = NULL, *ac = NULL;
@@ -222,7 +229,7 @@ static int load_room(const char *path) {
                         sqrtf(g_scr_u[0] * g_scr_u[0] + g_scr_u[1] * g_scr_u[1] + g_scr_u[2] * g_scr_u[2]), sqrtf(g_scr_v[0] * g_scr_v[0] + g_scr_v[1] * g_scr_v[1] + g_scr_v[2] * g_scr_v[2]));
             }
             if (g_nprim == cap) { cap = cap ? cap * 2 : 256; g_prim = realloc(g_prim, cap * sizeof *g_prim); }
-            Prim *o = &g_prim[g_nprim++]; o->n = ni_; o->mat = mi;
+            Prim *o = &g_prim[g_nprim++]; o->n = ni_; o->mat = mi; o->grp = obj == 1 || obj == 3 ? obj : 0;
             GLuint vb, ib; vGenVertexArrays(1, &o->vao); vBindVertexArray(o->vao);
             vGenBuffers(1, &vb); vBindBuffer(GL_ARRAY_BUFFER, vb); vBufferData(GL_ARRAY_BUFFER, sizeof(float) * 9 * nv, v, GL_STATIC_DRAW);
             vGenBuffers(1, &ib); vBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib); vBufferData(GL_ELEMENT_ARRAY_BUFFER, 4 * ni_, ix, GL_STATIC_DRAW);
@@ -240,8 +247,8 @@ static int load_room(const char *path) {
 static const char *VS =
     "#version 330 core\n"
     "layout(location=0) in vec3 aP; layout(location=1) in vec2 aT; layout(location=2) in vec4 aC;\n"
-    "uniform mat4 uMVP; out vec2 vT; out vec4 vC;\n"
-    "void main() { gl_Position = uMVP * vec4(aP, 1.0); vT = aT; vC = aC; }\n";
+    "uniform mat4 uMVP; uniform mat4 uModel; out vec2 vT; out vec4 vC;\n"
+    "void main() { gl_Position = uMVP * uModel * vec4(aP, 1.0); vT = aT; vC = aC; }\n";
 static const char *FS =
     "#version 330 core\n"
     "in vec2 vT; in vec4 vC; uniform vec4 uBase; uniform vec3 uEmis; uniform sampler2D uTex, uETex; uniform float uCut;\n"
@@ -303,8 +310,14 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
     float qa = sh > 0 ? sw / sh : 1, ga = desk_aspect();
     float kx = qa > ga ? qa / ga : 1, ky = qa > ga ? 1 : ga / qa;
     vUniform2f(u_scr_k, kx, ky); vUniform4f(u_crop, g_x0f, DESK_Y0, g_x1f, DESK_Y1);
+    M4 ident = m4_id(), door_m, mouse_m = m4_id();
+    {   float a = -1.65f * g_door_t; M4 r = m4_yaw(a, 0, 0, 0), t = m4_yaw(0, HINGE[0], 0, HINGE[2]), ti = m4_yaw(0, -HINGE[0], 0, -HINGE[2]);
+        door_m = m4_mul(t, m4_mul(r, ti)); }
+    mouse_m.m[12] = g_mouse_off[0]; mouse_m.m[14] = g_mouse_off[1];
+    int cur_grp = -1;
     for (int i = 0; i < g_nprim; i++) {
         Prim *p = &g_prim[i]; Mat *m = p->mat < g_nmat ? &g_mat[p->mat] : NULL;
+        if (p->grp != cur_grp) { cur_grp = p->grp; vUniformMatrix4fv(u_model, 1, 0, (p->grp == 1 ? door_m : p->grp == 3 ? mouse_m : ident).m); }
         static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 };
         vActiveTexture(GL_TEXTURE1); vBindTexture(GL_TEXTURE_2D, m && m->etex ? m->etex : g_white);
         vActiveTexture(GL_TEXTURE0);
@@ -314,6 +327,16 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
         vUniform4fv(u_base, 1, m ? m->base : one); vUniform3fv(u_emis, 1, m ? m->emis : zero);
         vUniform1f(u_cut, m && m->mask ? m->cutoff : -1.f);
         vBindVertexArray(p->vao); vDrawElements(GL_TRIANGLES, p->n, GL_UNSIGNED_INT, 0);
+    }
+    vUniformMatrix4fv(u_model, 1, 0, ident.m);
+    if (g_door_t > 0.02f) {   // the void beyond the open door
+        static const float black[4] = { 0, 0, 0, 1 }, zero3[3] = { 0, 0, 0 };
+        float q[4][9] = { { -0.8f, 2.2f, -7.272f, 0, 0, 1, 1, 1, 1 }, { 0.2f, 2.2f, -7.272f, 1, 0, 1, 1, 1, 1 },
+                          { 0.2f, 0.0f, -7.272f, 1, 1, 1, 1, 1, 1 }, { -0.8f, 0.0f, -7.272f, 0, 1, 1, 1, 1, 1 } };
+        vBindBuffer(GL_ARRAY_BUFFER, g_pan_vbo); vBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
+        vActiveTexture(GL_TEXTURE0); vBindTexture(GL_TEXTURE_2D, g_white); vUniform1i(u_screen, 0);
+        vUniform4fv(u_base, 1, black); vUniform3fv(u_emis, 1, zero3); vUniform1f(u_cut, -1.f);
+        vBindVertexArray(g_pan_vao); vDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     }
     if (panel_on() && game_tex && g_pan_placed) {   // the pane: the game's interface (office) or the whole picture (elsewhere)
         static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 };
@@ -401,19 +424,27 @@ static int laser_target(const Ray *r, float *gx, float *gy, float *dist) {
     float dr = 1e9f, dd = 1e9f;
     int hr = g_office_now && g_obj_ok[0] && ray_box(r, g_obj_min[0], g_obj_max[0], 0.03f, &dr);
     int hd = g_office_now && g_obj_ok[1] && ray_box(r, g_obj_min[1], g_obj_max[1], 0.02f, &dd);
-    if (hit2 && (!hit1 || d2 < d1) && (!hr || d2 < dr) && (!hd || d2 < dd)) { *gx = bx; *gy = by; *dist = d2; return 2; }
-    if (hr && (!hit1 || dr < d1) && (!hd || dr < dd)) { office_spot(HS_RECORDER, gx, gy); *dist = dr; return 1; }
-    if (hd && (!hit1 || dd < d1)) { office_spot(HS_DOOR, gx, gy); *dist = dd; return 1; }
+    g_last_kind = 0;
+    if (hit2 && (!hit1 || d2 < d1) && (!hr || d2 < dr) && (!hd || d2 < dd)) { *gx = bx; *gy = by; *dist = d2; g_last_kind = 2; return 2; }
+    if (hr && (!hit1 || dr < d1) && (!hd || dr < dd)) { office_spot(HS_RECORDER, gx, gy); *dist = dr; g_last_kind = 3; return 1; }
+    if (hd && (!hit1 || dd < d1)) { office_spot(HS_DOOR, gx, gy); *dist = dd; g_last_kind = 4; return 1; }
     if (hit1) {
         if (g_desk_now) { *gx = ax; *gy = DESK_Y0 + ay * (DESK_Y1 - DESK_Y0); }
         else if (g_office_now) office_spot(HS_PC, gx, gy);   // the office is up: point at the painted computer
         else { *dist = d1; return 0; }
-        *dist = d1; return 1;
+        *dist = d1; g_last_kind = 1; return 1;
     }
     return 0;
 }
 // the pane follows lazily: it stays put while you look at it, and comes back in front of you when you look away
 static void place_pane(void) {
+    if (!g_office_now && !g_desk_now && g_door_t > 0.5f) {   // the other screens show in the doorway
+        const float w = 0.9f, h = 0.675f;
+        g_pan_o[0] = -0.3f - w / 2; g_pan_o[1] = 1.3f + h / 2; g_pan_o[2] = -7.268f;
+        g_pan_u[0] = w; g_pan_u[1] = 0; g_pan_u[2] = 0; g_pan_v[0] = 0; g_pan_v[1] = -h; g_pan_v[2] = 0;
+        g_pan_placed = 2; return;
+    }
+    if (g_pan_placed == 2) g_pan_placed = 0;
     if (!g_head_ok) return;
     float eye[3] = { g_head.m[12], g_head.m[13], g_head.m[14] }, fw[3] = { -g_head.m[8], 0, -g_head.m[10] };
     float fl = sqrtf(fw[0] * fw[0] + fw[2] * fw[2]); if (fl < 1e-3f) return; fw[0] /= fl; fw[2] /= fl;
@@ -455,7 +486,7 @@ typedef struct GLSave GLSave; static void gl_save(GLSave *s); static void gl_res
 static GLuint g_game_tex; static int g_gw = 640, g_gh = 480;
 static int common_init(void) {
     g_prog = build(VS, FS); g_lineprog = build(LVS, LFS);
-    u_mvp = vGetUniformLocation(g_prog, "uMVP"); u_base = vGetUniformLocation(g_prog, "uBase"); u_emis = vGetUniformLocation(g_prog, "uEmis");
+    u_mvp = vGetUniformLocation(g_prog, "uMVP"); u_model = vGetUniformLocation(g_prog, "uModel"); u_base = vGetUniformLocation(g_prog, "uBase"); u_emis = vGetUniformLocation(g_prog, "uEmis");
     u_tex = vGetUniformLocation(g_prog, "uTex"); u_etex = vGetUniformLocation(g_prog, "uETex"); u_cut = vGetUniformLocation(g_prog, "uCut");
     u_screen = vGetUniformLocation(g_prog, "uScreen"); u_scr_k = vGetUniformLocation(g_prog, "uScrK"); u_crop = vGetUniformLocation(g_prog, "uCrop");
     u_line_mvp = vGetUniformLocation(g_lineprog, "uMVP"); u_line_col = vGetUniformLocation(g_lineprog, "uCol");
@@ -525,7 +556,20 @@ static int preview_frame(void) {
     const u8 *k = SDL_GetKeyboardState(NULL);
     if (k[SDL_SCANCODE_F2] && !f2_prev) { captured = !captured; SDL_SetRelativeMouseMode(captured ? SDL_TRUE : SDL_FALSE); }
     f2_prev = k[SDL_SCANCODE_F2];
-    int dx = 0, dy = 0; SDL_GetRelativeMouseState(&dx, &dy);
+    int dx = 0, dy = 0; u32 mb = SDL_GetRelativeMouseState(&dx, &dy);
+    static int lmb_prev;
+    if (g_mouse_held == 2) {   // holding the desk mouse: the real mouse slides it (right = -z, toward you = +x)
+        g_mouse_off[1] -= dx * 0.0004f; g_mouse_off[0] += dy * 0.0004f;
+        if (k[SDL_SCANCODE_T]) { g_mouse_held = -1; fprintf(stderr, "[vr] let go of the mouse\n"); }
+        dx = dy = 0;
+    } else if ((mb & SDL_BUTTON_LMASK) && !lmb_prev && g_obj_ok[3] && g_head_ok) {   // click on the desk mouse: take it
+        Ray er; float el[3] = { 0, 0, 0 }, fl[3] = { 0, 0, -1 }; m4_point(g_head, el, er.o); m4_dir(g_head, fl, er.d); er.valid = 1;
+        float mn[3], mx[3], d; for (int c = 0; c < 3; c++) { mn[c] = g_obj_min[3][c] + (c == 0 ? g_mouse_off[0] : c == 2 ? g_mouse_off[1] : 0); mx[c] = g_obj_max[3][c] + (c == 0 ? g_mouse_off[0] : c == 2 ? g_mouse_off[1] : 0); }
+        if (ray_box(&er, mn, mx, 0.03f, &d) && d < 1.5f) { g_mouse_held = 2; fprintf(stderr, "[vr] took the mouse (T lets go)\n"); }
+    }
+    lmb_prev = (mb & SDL_BUTTON_LMASK) != 0;
+    if (g_mouse_off[0] < -0.12f) g_mouse_off[0] = -0.12f; if (g_mouse_off[0] > 0.12f) g_mouse_off[0] = 0.12f;
+    if (g_mouse_off[1] < -0.16f) g_mouse_off[1] = -0.16f; if (g_mouse_off[1] > 0.16f) g_mouse_off[1] = 0.16f;
     if (captured) { yaw -= dx * 0.0025f; pitch -= dy * 0.0025f; if (pitch > 1.4f) pitch = 1.4f; if (pitch < -1.4f) pitch = -1.4f; }
     float fx = -sinf(yaw), fz = -cosf(yaw), rx = cosf(yaw), rz = -sinf(yaw), mv = 1.4f / 60;
     float wx = (k[SDL_SCANCODE_W] ? 1.f : 0.f) - (k[SDL_SCANCODE_S] ? 1.f : 0.f), wr = (k[SDL_SCANCODE_D] ? 1.f : 0.f) - (k[SDL_SCANCODE_A] ? 1.f : 0.f);
@@ -693,6 +737,19 @@ static void xr_input(XrTime t) {
         XrSpaceLocation loc = { XR_TYPE_SPACE_LOCATION };
         g_hand_ok[h] = XR_SUCCEEDED(xrLocateSpace(g_aim[h], g_stage, t, &loc)) && (loc.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT) && (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
         if (g_hand_ok[h]) g_hand[h] = m4_mul(g_world_from_stage, m4_pose(&loc.pose.orientation.x, &loc.pose.position.x));
+        if (g_hand_ok[h] && g_obj_ok[3]) {   // grip near the desk mouse: hold it; it slides on the tray with your hand
+            float hp[3] = { g_hand[h].m[12], g_hand[h].m[13], g_hand[h].m[14] };
+            float mc[3]; for (int c = 0; c < 3; c++) mc[c] = (g_obj_min[3][c] + g_obj_max[3][c]) / 2;
+            mc[0] += g_mouse_off[0]; mc[2] += g_mouse_off[1];
+            float d2 = (hp[0] - mc[0]) * (hp[0] - mc[0]) + (hp[1] - mc[1]) * (hp[1] - mc[1]) + (hp[2] - mc[2]) * (hp[2] - mc[2]);
+            if (g_mouse_held < 0 && g_gripb[h] && d2 < 0.12f * 0.12f) { g_mouse_held = h; memcpy(g_mouse_grab, hp, 12); memcpy(g_mouse_grab_off, g_mouse_off, 8); }
+            if (g_mouse_held == h) {
+                if (!g_gripb[h]) g_mouse_held = -1;
+                else { g_mouse_off[0] = g_mouse_grab_off[0] + hp[0] - g_mouse_grab[0]; g_mouse_off[1] = g_mouse_grab_off[1] + hp[2] - g_mouse_grab[2]; }
+                if (g_mouse_off[0] < -0.12f) g_mouse_off[0] = -0.12f; if (g_mouse_off[0] > 0.12f) g_mouse_off[0] = 0.12f;
+                if (g_mouse_off[1] < -0.16f) g_mouse_off[1] = -0.16f; if (g_mouse_off[1] > 0.16f) g_mouse_off[1] = 0.16f;
+            }
+        }
     }
     // right stick: 30 degree snap turns about the head; left stick: walk where the head looks
     float sx = g_stick[1][0];
@@ -824,6 +881,10 @@ int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
     if (g_vr_office_seen) g_office_hold = 4; else if (g_office_hold > 0) g_office_hold--;
     g_office_now = g_office_hold > 0 && !g_desk_now; g_vr_office_seen = 0;
     g_uicur ^= 1; g_nui[g_uicur] = 0;
+    if (g_office_now || g_desk_now) { if (g_office_now) g_door_req = g_door_req && 1; }
+    {   int open = g_door_req && !g_office_now && !g_desk_now;
+        if (g_office_now && g_door_t >= 1.f) g_door_req = 0;   // back from the map: the door closes
+        float target = open ? 1.f : 0.f; g_door_t += (target - g_door_t) * 0.08f; if (fabsf(target - g_door_t) < 0.002f) g_door_t = target; }
     place_pane();
     gl_chk("enter"); GLSave s; gl_save(&s); gl_chk("save"); int drew = 0;
     if (fresh) {   // keep this desktop frame for the monitor
@@ -854,8 +915,26 @@ void vr_input(Input *in) {
     if (!g_active) return;
     float px, py, dist;
     int what = laser_target(&g_ray, &px, &py, &dist);
+    if (g_mouse_held >= 0 && (g_desk_now || g_office_now)) {   // holding the desk mouse: it is the pointer
+        if (g_desk_now) { px = 0.5f - g_mouse_off[1] / 0.32f * 1.0f; py = DESK_Y0 + (0.5f + g_mouse_off[0] / 0.24f) * (DESK_Y1 - DESK_Y0);
+                          px = px < 0 ? 0 : px > 1 ? 1 : px; }
+        else office_spot(HS_PC, &px, &py);   // in the office: using the mouse wakes the computer
+        what = 1; g_last_kind = 1;
+    }
+#ifdef TTPC_OPENXR
+    if (!g_preview && panel_on() && g_pan_placed) for (int h = 0; h < 2; h++) if (g_hand_ok[h]) {   // touch the pane with a controller
+        float tip[3], tl[3] = { 0, 0, -0.06f }; m4_point(g_hand[h], tl, tip);
+        Ray r; memcpy(r.o, tip, 12); r.valid = 1;
+        float n[3] = { g_pan_u[1] * g_pan_v[2] - g_pan_u[2] * g_pan_v[1], g_pan_u[2] * g_pan_v[0] - g_pan_u[0] * g_pan_v[2], g_pan_u[0] * g_pan_v[1] - g_pan_u[1] * g_pan_v[0] };
+        float nl = len3(n); for (int c = 0; c < 3; c++) r.d[c] = -n[c] / nl;   // straight at the pane
+        float bx, by, d; int hit = ray_quad(g_pan_o, g_pan_u, g_pan_v, 4.f / 3, &r, &bx, &by, &d);
+        if (!hit) { for (int c = 0; c < 3; c++) r.d[c] = -r.d[c]; hit = ray_quad(g_pan_o, g_pan_u, g_pan_v, 4.f / 3, &r, &bx, &by, &d); d = -d; }
+        if (hit && fabsf(d) < 0.03f && bx >= 0 && bx <= 1 && by >= 0 && by <= 1) { px = bx; py = by; what = 2; in->lmb = in->a = 1; }
+    }
+#endif
     if (what) { in->mouse_x = px; in->mouse_y = py; in->mouse_in = 1; }
     { static int prev; int down = in->lmb || in->a;
+      if (down && !prev && g_last_kind == 4 && g_office_now) g_door_req = 1;   // the door: if the game lets you go, it opens
       if (down && !prev) fprintf(stderr, "[vr] click: %s at %.3f %.3f (office %d desktop %d)\n", what == 2 ? "pane" : what == 1 ? "room object/monitor" : "nothing", px, py, g_office_now, g_desk_now);
       prev = down; }
     if (what) {}
