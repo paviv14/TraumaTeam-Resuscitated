@@ -428,12 +428,7 @@ static int laser_target(const Ray *r, float *gx, float *gy, float *dist) {
     if (hit2 && (!hit1 || d2 < d1) && (!hr || d2 < dr) && (!hd || d2 < dd)) { *gx = bx; *gy = by; *dist = d2; g_last_kind = 2; return 2; }
     if (hr && (!hit1 || dr < d1) && (!hd || dr < dd)) { office_spot(HS_RECORDER, gx, gy); *dist = dr; g_last_kind = 3; return 1; }
     if (hd && (!hit1 || dd < d1)) { office_spot(HS_DOOR, gx, gy); *dist = dd; g_last_kind = 4; return 1; }
-    if (hit1) {
-        if (g_desk_now) { *gx = ax; *gy = DESK_Y0 + ay * (DESK_Y1 - DESK_Y0); }
-        else if (g_office_now) office_spot(HS_PC, gx, gy);   // the office is up: point at the painted computer
-        else { *dist = d1; return 0; }
-        *dist = d1; g_last_kind = 1; return 1;
-    }
+    if (hit1) { *dist = d1; return 0; }   // the computer is used with the desk mouse only (the laser just stops on it)
     return 0;
 }
 // the pane follows lazily: it stays put while you look at it, and comes back in front of you when you look away
@@ -558,7 +553,8 @@ static int preview_frame(void) {
     f2_prev = k[SDL_SCANCODE_F2];
     int dx = 0, dy = 0; u32 mb = SDL_GetRelativeMouseState(&dx, &dy);
     static int lmb_prev;
-    if (g_mouse_held == 2) {   // holding the desk mouse: you still look around freely; walk away (or T) to let go
+    if (g_mouse_held == 2) {   // holding the desk mouse: your mouse slides it; right-drag looks around; walk away (or T) to let go
+        if (!(mb & SDL_BUTTON_RMASK)) { g_mouse_off[1] -= dx * 0.0004f; g_mouse_off[0] += dy * 0.0004f; dx = dy = 0; }
         float mc[3]; for (int c = 0; c < 3; c++) mc[c] = (g_obj_min[3][c] + g_obj_max[3][c]) / 2;
         float ddx = px_ - (mc[0] + g_mouse_off[0]), ddz = pz_ - (mc[2] + g_mouse_off[1]);
         if (k[SDL_SCANCODE_T] || ddx * ddx + ddz * ddz > 1.1f * 1.1f) { g_mouse_held = -1; fprintf(stderr, "[vr] let go of the mouse\n"); }
@@ -915,9 +911,8 @@ void vr_input(Input *in) {
     if (!g_active) return;
     float px, py, dist;
     int what = laser_target(&g_ray, &px, &py, &dist);
-    if (g_mouse_held == 2 && g_desk_now) {   // desktop mode: aim with the crosshair; the desk mouse slides to match
-        if (what == 1) { g_mouse_off[1] = (0.5f - px) * 0.32f; g_mouse_off[0] = ((py - DESK_Y0) / (DESK_Y1 - DESK_Y0) - 0.5f) * 0.24f; }
-    } else if ((g_mouse_held == 0 || g_mouse_held == 1) && (g_desk_now || g_office_now)) {   // VR: the held desk mouse is the pointer
+    if (g_mouse_held == 2) in->rmb = 0;   // desktop mode: right mouse is for looking around while you hold the desk mouse
+    if (g_mouse_held >= 0 && (g_desk_now || g_office_now)) {   // the held desk mouse is the computer's pointer
         if (g_desk_now) { px = 0.5f - g_mouse_off[1] / 0.32f * 1.0f; py = DESK_Y0 + (0.5f + g_mouse_off[0] / 0.24f) * (DESK_Y1 - DESK_Y0);
                           px = px < 0 ? 0 : px > 1 ? 1 : px; }
         else office_spot(HS_PC, &px, &py);   // in the office: using the mouse wakes the computer
