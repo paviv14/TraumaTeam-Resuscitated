@@ -715,7 +715,7 @@ static int preview_frame(void) {
 // ---------------------------------------------------------------- OpenXR
 static XrInstance g_xi; static XrSystemId g_sys; static XrSession g_xs; static XrSpace g_stage, g_aim[2];
 static XrSessionState g_state; static int g_running;
-static XrSwapchain g_sc[2]; static int g_scw[2], g_sch[2]; static XrSwapchainImageOpenGLKHR *g_scimg[2]; static uint32_t g_scn[2];
+static XrSwapchain g_sc[2]; static int g_scw[2], g_sch[2]; static XrSwapchainImageOpenGLKHR *g_scimg[2]; static uint32_t g_sc_count[2];
 static GLuint g_fbo, g_depth[2];
 static XrActionSet g_aset; static XrAction a_aim, a_trig, a_grip, a_a, a_b, a_stick, a_click; static XrPath g_hp[2];
 static XrViewConfigurationView g_vcv[2];
@@ -765,9 +765,9 @@ static int xr_init(void) {
         XrSwapchainCreateInfo ci = { XR_TYPE_SWAPCHAIN_CREATE_INFO }; ci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT; ci.format = fmt;
         ci.sampleCount = 1; ci.width = g_vcv[e].recommendedImageRectWidth; ci.height = g_vcv[e].recommendedImageRectHeight; ci.faceCount = 1; ci.arraySize = 1; ci.mipCount = 1;
         XRC(xrCreateSwapchain(g_xs, &ci, &g_sc[e])); g_scw[e] = ci.width; g_sch[e] = ci.height;
-        XRC(xrEnumerateSwapchainImages(g_sc[e], 0, &g_scn[e], NULL));
-        g_scimg[e] = calloc(g_scn[e], sizeof **g_scimg); for (uint32_t i = 0; i < g_scn[e]; i++) g_scimg[e][i].type = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR;
-        XRC(xrEnumerateSwapchainImages(g_sc[e], g_scn[e], &g_scn[e], (XrSwapchainImageBaseHeader *)g_scimg[e]));
+        XRC(xrEnumerateSwapchainImages(g_sc[e], 0, &g_sc_count[e], NULL));
+        g_scimg[e] = calloc(g_sc_count[e], sizeof **g_scimg); for (uint32_t i = 0; i < g_sc_count[e]; i++) g_scimg[e][i].type = XR_TYPE_SWAPCHAIN_IMAGE_OPENGL_KHR;
+        XRC(xrEnumerateSwapchainImages(g_sc[e], g_sc_count[e], &g_sc_count[e], (XrSwapchainImageBaseHeader *)g_scimg[e]));
         vGenRenderbuffers(1, &g_depth[e]); vBindRenderbuffer(GL_RENDERBUFFER, g_depth[e]); vRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, ci.width, ci.height);
         fprintf(stderr, "[vr] eye %d: %dx%d\n", e, ci.width, ci.height);
     }
@@ -977,7 +977,7 @@ static void aff_mul(const float a[12], const float b[12], float o[12]) {
 }
 // the examination's own background (the game's swirling tunnel): taken fresh every frame, in the game's view space
 typedef struct { float *v; int nv, cap; TexEntry *e; GLuint vao, vbo; } Scn;
-static Scn g_scn[160]; static int g_nscn, g_scn_frame;
+static Scn g_scenery[160]; static int g_nscenery, g_scn_frame;
 static struct { TexEntry *e; u32 ver; GLuint tex; } g_scn_tex[24];
 static GLuint scn_texture(TexEntry *e) {
     if (!e || !e->px) return g_white;
@@ -994,9 +994,9 @@ static GLuint scn_texture(TexEntry *e) {
 }
 static void scn_capture(const Setup *s, int prim, int n, const VrVert *v, const float M[12]) {
     if (n < 3 || v[0].w == 1.f) return;   // flat interface pieces stay on the pane
-    if (g_scn_frame != g_vr_frame_no) { g_scn_frame = g_vr_frame_no; g_nscn = 0; }
-    if (g_nscn >= 160) return;
-    Scn *sc = &g_scn[g_nscn++]; int need = n * 6 * 9;
+    if (g_scn_frame != g_vr_frame_no) { g_scn_frame = g_vr_frame_no; g_nscenery = 0; }
+    if (g_nscenery >= 160) return;
+    Scn *sc = &g_scenery[g_nscenery++]; int need = n * 6 * 9;
     if (need > sc->cap) { free(sc->v); sc->cap = need + 512; sc->v = malloc(sizeof(float) * (size_t)sc->cap); }
     int nv = 0;
     #define CORNER(i) do { const VrVert *q = &v[i]; float *o = sc->v + nv * 9; aff_pt(M, q->pos, o); o[3] = q->uv[0]; o[4] = q->uv[1]; memcpy(o + 5, q->col, 16); nv++; } while (0)
@@ -1011,15 +1011,15 @@ static void scn_capture(const Setup *s, int prim, int n, const VrVert *v, const 
     sc->nv = nv; sc->e = s->tex[0].e;
 }
 static void scn_draw(void) {   // around you, in the game's view space scaled to the room (called with the room program bound)
-    if (g_scn_frame < g_vr_frame_no - 2 || !g_nscn) return;
+    if (g_scn_frame < g_vr_frame_no - 2 || !g_nscenery) return;
     M4 sc = m4_id(); sc.m[0] = sc.m[5] = sc.m[10] = g_exam_k; M4 W = m4_mul(g_exam_A, sc);
     static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 };
     float base[4] = { 1, 1, 1, g_exam_fade };
     vUniformMatrix4fv(u_model, 1, 0, W.m); vUniform1i(u_screen, 3); vUniform4fv(u_base, 1, base); vUniform3fv(u_emis, 1, zero); (void)one;
     vEnable(GL_BLEND); vBlendFunc(GL_SRC_ALPHA, GL_ONE); vDisable(GL_DEPTH_TEST); vDisable(GL_CULL_FACE); vDepthMask(0);
     vActiveTexture(GL_TEXTURE0);
-    for (int i = 0; i < g_nscn; i++) {
-        Scn *q = &g_scn[i]; if (!q->nv) continue;
+    for (int i = 0; i < g_nscenery; i++) {
+        Scn *q = &g_scenery[i]; if (!q->nv) continue;
         if (!q->vao) { vGenVertexArrays(1, &q->vao); vGenBuffers(1, &q->vbo); vBindVertexArray(q->vao); vBindBuffer(GL_ARRAY_BUFFER, q->vbo);
             vEnableVertexAttribArray(0); vVertexAttribPointer(0, 3, GL_FLOAT, 0, 36, (void *)0);
             vEnableVertexAttribArray(1); vVertexAttribPointer(1, 2, GL_FLOAT, 0, 36, (void *)12);
