@@ -196,6 +196,11 @@ void f_8025F830(CPU *c) {
     static int dbg = -1; if (dbg < 0) dbg = getenv("TTPC_PADLOG") != NULL;
     if (0 && dbg && chan == 0) { static u64 n; if (n++ % 600 == 0 || g_trig) fprintf(stderr, "[pad] read #%llu vi %llu hold %04X trig %04X lr %08X\n", (unsigned long long)n, (unsigned long long)g_vi, g_hold, g_trig, c->lr); }
     if (chan != 0 || !max) { if (err) W32(err, (u32)-1); c->r[3] = 0; return; }   // no controller
+    {   // VR asked to leave Little Guy's computer: run the game's own close for it (the routine its
+        // module table lists next to "is the computer open", 0x8007DF40: flags the autCompCalc task to close)
+        extern int g_vr_close_comp; void f_8007DF40(CPU *c);
+        if (g_vr_close_comp) { g_vr_close_comp = 0; CPU save = *c; f_8007DF40(c); *c = save; fprintf(stderr, "[vr] computer: closed by the game's own exit routine\n"); }
+    }
     // buttons are latched per read: host input from the last retrace plus any scripted presses
     g_reads++;
     u32 h = g_host_hold;

@@ -144,10 +144,14 @@ static const float HINGE[3] = { -0.8f, 0, -7.25f };
 static float g_mouse_off[2]; static int g_mouse_held = -1; static float g_mouse_grab[3], g_mouse_grab_off[2];
 static GLint u_model, u_hole;
 // the LIMIT hearts: their spot in the game's picture (pixels) and their plaque on the wall
-static const float HEARTS_PX[4] = { 44, 68, 256, 116 };
+static float HEARTS_PX[4] = { 44, 68, 256, 116 };   // measured each frame from the HUD draws in the top-left corner
+static float g_hr[4] = { 1e9f, 1e9f, -1e9f, -1e9f };
 static GLuint g_saver_tex;
+int g_vr_case;                       // disc.c: the forensics case being loaded (110, 120...)
+static int g_case_shown = -1; static GLuint g_case_tex;
 // stepping away from the desk while the computer is on presses its EXIT button for you
-static int g_auto_exit; static const float EXIT_BTN[2] = { 0.823f, 0.875f };   // vr/screensaver.png: the monitor when the computer is off
+static int g_auto_exit; static const float EXIT_BTN[2] = { 0.823f, 0.875f };
+int g_vr_close_comp;   // wiimote.c runs the game's close-computer routine on the next controller read   // vr/screensaver.png: the monitor when the computer is off
 static M4 g_head; static int g_head_ok;
 // where the game's interface is on screen (office): rectangles of the drawn pieces, this frame and last
 typedef struct { float x0, y0, x1, y1; } Rect;
@@ -549,7 +553,7 @@ static int common_init(void) {
         if (px) { GLuint t; vGenTextures(1, &t); vBindTexture(GL_TEXTURE_2D, t); vTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
                   vGenerateMipmap(GL_TEXTURE_2D); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                   vTexParameteri(GL_TEXTURE_2D, 0x84FE, 8); free(px);
-                  for (int i = 0; i < g_nmat; i++) if (g_mat[i].name_paper) g_mat[i].tex = t; }
+                  for (int i = 0; i < g_nmat; i++) if (g_mat[i].name_paper) g_mat[i].tex = t; g_case_tex = t; }
     }
     g_world_from_stage = m4_yaw(g_turn, g_seat[0], g_seat[1], g_seat[2]);
     return 1;
@@ -606,6 +610,7 @@ static int preview_frame(void) {
         float mc[3]; for (int c = 0; c < 3; c++) mc[c] = (g_obj_min[3][c] + g_obj_max[3][c]) / 2;
         float ddx = px_ - (mc[0] + g_mouse_off[0]), ddz = pz_ - (mc[2] + g_mouse_off[1]);
         (void)ddx; (void)ddz;
+        if (k[SDL_SCANCODE_T] && g_desk_now && g_auto_exit == 0) { g_vr_close_comp = 1; g_auto_exit = -90; }
     } else if (0) {
         Ray er; float el[3] = { 0, 0, 0 }, fl[3] = { 0, 0, -1 }; m4_point(g_head, el, er.o); m4_dir(g_head, fl, er.d); er.valid = 1;
         float mn[3], mx[3], d; for (int c = 0; c < 3; c++) { mn[c] = g_obj_min[3][c] + (c == 0 ? g_mouse_off[0] : c == 2 ? g_mouse_off[1] : 0); mx[c] = g_obj_max[3][c] + (c == 0 ? g_mouse_off[0] : c == 2 ? g_mouse_off[1] : 0); }
@@ -890,6 +895,9 @@ int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float 
         // over the office: the hotspot markers and the pointer are left out too (the room objects and the laser replace them)
         if (e && g_vr_office_seen && ((e->w == 56 && e->h == 56) || (e->w == 64 && e->h == 64))) return 1;
     }
+    if (g_vr_office_seen && mx > mn && ymx > ymn && mx < 300 && ymx < 150) {   // the LIMIT hearts corner
+        if (mn < g_hr[0]) g_hr[0] = mn; if (ymn < g_hr[1]) g_hr[1] = ymn; if (mx > g_hr[2]) g_hr[2] = mx; if (ymx > g_hr[3]) g_hr[3] = ymx;
+    }
     if (g_vr_office_seen && g_nui[g_uicur] < 96 && mx > mn && ymx > ymn && mx - mn < 640)   // an interface piece: the pane takes the laser here
         g_ui[g_uicur][g_nui[g_uicur]++] = (Rect){ mn, ymn, mx, ymx };
     return 0;
@@ -921,9 +929,22 @@ int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
     // desktop up? (seen this frame, or within the last few: some frames skip the wallpaper during fades)
     if (g_vr_desk_seen) g_desk_hold = 4; else if (g_desk_hold > 0) g_desk_hold--;
     g_desk_now = g_desk_hold > 0; int fresh = g_vr_desk_seen; g_vr_desk_seen = 0;
+    if (g_vr_case != g_case_shown) {   // a case loaded: put its autopsy report on the desk (vr/case_report_<case>.png)
+        g_case_shown = g_vr_case; char path[64]; snprintf(path, sizeof path, "vr/case_report_%d.png", g_vr_case);
+        int w, h, c; u8 *px = stbi_load(path, &w, &h, &c, 4);
+        if (px) {
+            if (!g_case_tex) vGenTextures(1, &g_case_tex);
+            vBindTexture(GL_TEXTURE_2D, g_case_tex); vTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            vGenerateMipmap(GL_TEXTURE_2D); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            for (int i = 0; i < g_nmat; i++) if (g_mat[i].name_paper) g_mat[i].tex = g_case_tex;
+            free(px); fprintf(stderr, "[vr] case %d: its autopsy report is on the desk\n", g_vr_case);
+        }
+    }
     if (g_vr_office_seen) g_office_hold = 4; else if (g_office_hold > 0) g_office_hold--;
     g_office_now = g_office_hold > 0 && !g_desk_now; g_vr_office_seen = 0;
     g_uicur ^= 1; g_nui[g_uicur] = 0;
+    if (g_hr[2] > g_hr[0]) { HEARTS_PX[0] = g_hr[0] - 3; HEARTS_PX[1] = g_hr[1] - 3; HEARTS_PX[2] = g_hr[2] + 3; HEARTS_PX[3] = g_hr[3] + 3; }
+    g_hr[0] = g_hr[1] = 1e9f; g_hr[2] = g_hr[3] = -1e9f;
     if (g_office_now || g_desk_now) { if (g_office_now) g_door_req = g_door_req && 1; }
     {   int open = g_door_req && !g_office_now && !g_desk_now;
         if (g_office_now && g_door_t >= 1.f) g_door_req = 0;   // back from the map: the door closes
@@ -931,7 +952,7 @@ int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
     if (g_desk_now && g_head_ok && g_obj_ok[3] && g_auto_exit == 0) {
         float mx = (g_obj_min[3][0] + g_obj_max[3][0]) / 2 + g_mouse_off[0], mz = (g_obj_min[3][2] + g_obj_max[3][2]) / 2 + g_mouse_off[1];
         float dx = g_head.m[12] - mx, dz = g_head.m[14] - mz;
-        if (dx * dx + dz * dz > 1.2f * 1.2f) { g_auto_exit = 40; fprintf(stderr, "[vr] stepped away from the computer: EXIT\n"); }
+        if (dx * dx + dz * dz > 1.2f * 1.2f) { g_vr_close_comp = 1; g_auto_exit = -90; fprintf(stderr, "[vr] stepped away from the computer\n"); }
     }
     if (!g_desk_now && g_auto_exit > 0 && g_auto_exit < 30) g_auto_exit = 0;   // it closed
     place_pane();
@@ -1029,7 +1050,7 @@ int vr_wanted(void) { return 0; }
 int vr_active(void) { return 0; }
 void vr_init(void) {}
 int vr_frame(unsigned t, int w, int h, float a, float b) { (void)t; (void)w; (void)h; (void)a; (void)b; return 0; }
-int g_vr_desk_seen, g_vr_office_seen; int g_vr_pic_y0, g_vr_pic_h;
+int g_vr_desk_seen, g_vr_office_seen; int g_vr_pic_y0, g_vr_pic_h; int g_vr_case; int g_vr_close_comp;
 int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float xo, float yo) { (void)s; (void)v; (void)n; (void)wd; (void)ht; (void)xo; (void)yo; return 0; }
 int vr_key_frame(void) { return 0; }
 void vr_input(Input *in) { (void)in; }
