@@ -107,7 +107,7 @@ static void m4_dir(M4 a, const float p[3], float o[3]) { for (int i = 0; i < 3; 
 typedef struct { float base[4], emis[3]; GLuint tex, etex; int blend, mask; float cutoff; int screen, name_paper; } Mat;
 typedef struct { GLuint vao; int n; int mat; int grp; int room; } Prim;   // grp: 1 door, 3 mouse (moved at draw time); room: 0 office, 1 morgue
 static int g_room;                         // which room is shown
-static int g_exam_now, g_morgue_now, g_click_t, g_pending_bed = -1, g_exit_t; static float g_click_px[2];
+static int g_exam_now, g_morgue_now, g_click_t, g_pending_bed = -1, g_exit_t; static float g_click_px[2]; static float g_exam_fade;
 typedef struct Ray Ray;
 static int mdl_hit(int k, const Ray *r, float *sx, float *sy, float *dist); static int bed_hit(int k, const Ray *r, float *dist);
 static void morgue_marker(int which, float *x, float *y); static void click_at(float sx, float sy, int frames);
@@ -364,7 +364,20 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
     }
     vUniformMatrix4fv(u_model, 1, 0, ident.m); vUniform4f(u_hole, 2, 2, 2, 2);
     { static const float no[3] = { 0, 0, 0 }; vUniform3fv(u_lit, 1, no); }
-    if (g_room == 1) { mdl_draw(0); mdl_draw(1); }   // the body and the personal effects on their beds
+    if (g_room == 1 && g_exam_fade > 0.01f && g_head_ok) {   // examining: the room fades into a dark void
+        float col[4] = { 0.0f, 0.01f, 0.015f, g_exam_fade };
+        vUseProgram(g_lineprog); vBindVertexArray(g_linevao); vEnableVertexAttribArray(0);
+        vBindBuffer(GL_ARRAY_BUFFER, g_linevbo); vVertexAttribPointer(0, 3, GL_FLOAT, 0, 12, (void *)0);
+        vEnable(GL_BLEND); vBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); vDisable(GL_DEPTH_TEST); vDisable(GL_CULL_FACE);
+        M4 at = m4_id(); at.m[12] = g_head.m[12]; at.m[13] = g_head.m[13]; at.m[14] = g_head.m[14];
+        draw_box(vp, at, 0.3f, 0.3f, 0.3f, col);
+        vDisable(GL_BLEND); vEnable(GL_DEPTH_TEST); vClear(GL_DEPTH_BUFFER_BIT);
+        vUseProgram(g_prog); vUniformMatrix4fv(u_mvp, 1, 0, vp.m);
+    }
+    if (g_room == 1) {
+        if (g_exam_fade > 0.5f) mdl_draw(g_exam_now ? g_exam_now - 1 : 0);   // the model you're examining, in front of you
+        else { mdl_draw(0); mdl_draw(1); }                                     // the body and the personal effects on their beds
+    }
     if (g_door_t > 0.02f) {   // the void beyond the open door
         static const float black[4] = { 0, 0, 0, 1 }, zero3[3] = { 0, 0, 0 };
         float q[4][9] = { { -0.8f, 2.2f, -7.272f, 0, 0, 1, 1, 1, 1 }, { 0.2f, 2.2f, -7.272f, 1, 0, 1, 1, 1, 1 },
@@ -485,7 +498,7 @@ static int laser_target(const Ray *r, float *gx, float *gy, float *dist) {
         if (g_exam_now) {
             int k = g_exam_now - 1, o = 1 - k;
             if (mdl_hit(k, r, &sx, &sy, &d) && (!hit2 || d < d2)) { *gx = sx / 640.f; *gy = (sy - g_vr_pic_y0) / (float)g_vr_pic_h; *dist = d; g_last_kind = 6; return 1; }
-            if (bed_hit(o, r, &d) && (!hit2 || d < d2)) { *gx = 0.5f; *gy = 0.08f; *dist = d; g_last_kind = 7 + o; return 1; }   // the other bed: leave this one first
+            (void)o;
         } else if (!hit2) for (int k = 0; k < 2; k++) if (bed_hit(k, r, &d)) {
             float mx_, my_; morgue_marker(k, &mx_, &my_); *gx = mx_ / 640.f; *gy = (my_ - g_vr_pic_y0) / (float)g_vr_pic_h; *dist = d; g_last_kind = 7 + k; return 1;
         }
@@ -931,6 +944,9 @@ typedef struct {
 } MModel;
 static MModel g_mdl[2];
 static int g_vr_frame_no, g_exam_seen, g_exam_now, g_exam_hold;   // examining: 1 body, 2 personal effects
+// examining: the room fades into a dark void and the model floats in front of you, posed exactly as the game sees it
+// (the game's view space, anchored where your head was when it opened, scaled so the model is ~0.9 m away)
+static float g_exam_fade; static M4 g_exam_A; static float g_exam_k; static int g_exam_anchored, g_exam_exit_cd, g_scripted;
 static int g_vr_morgue_seen, g_morgue_now, g_morgue_hold;
 static float g_mk[8][2]; static int g_nmk, g_nmk_last; static float g_mk_last[8][2];   // the morgue's hotspot markers (centres)
 
@@ -1044,7 +1060,13 @@ static void mdl_place(int k) {
     memcpy(md->lit_R, md->R, 36);
     (void)mid;
 }
+static M4 exam_matrix(int k) {   // reference frame -> game view space -> in front of you
+    MModel *md = &g_mdl[k]; M4 r = m4_id();
+    for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) r.m[j * 4 + i] = md->ref[i * 4 + j] * g_exam_k; r.m[12 + i] = md->ref[i * 4 + 3] * g_exam_k; }
+    return m4_mul(g_exam_A, r);
+}
 static M4 mdl_matrix(int k) {   // model (reference frame) -> world, as a column-major M4
+    if (g_exam_now == k + 1 && g_exam_anchored) return exam_matrix(k);
     MModel *md = &g_mdl[k]; M4 m = m4_id(); float s = md->scale;
     float mid[3] = { (md->lo[0] + md->hi[0]) / 2, (md->lo[1] + md->hi[1]) / 2, (md->lo[2] + md->hi[2]) / 2 };
     // rows of the rotation: world x = sd, world y = up, world z = -a  (R holds sd, up, -a as columns -> those are the rows of Bm^T)
@@ -1053,7 +1075,7 @@ static M4 mdl_matrix(int k) {   // model (reference frame) -> world, as a column
     return m;
 }
 static void mdl_draw(int k) {
-    MModel *md = &g_mdl[k]; if (!md->nparts || !md->placed) return;
+    MModel *md = &g_mdl[k]; if (!md->nparts || (!md->placed && !(g_exam_now == k + 1 && g_exam_anchored))) return;
     M4 W = mdl_matrix(k); vUniformMatrix4fv(u_model, 1, 0, W.m);
     static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 }, skin[4] = { 0.86f, 0.74f, 0.66f, 1 };
     vUniform1i(u_screen, 0); vUniform3fv(u_emis, 1, zero); vUniform1f(u_cut, 0.3f);
@@ -1077,8 +1099,8 @@ static void mdl_draw(int k) {
 }
 // the laser on the model being examined: the spot -> where it is on the game's screen (640x528 frame)
 static int mdl_hit(int k, const Ray *r, float *sx, float *sy, float *dist) {
-    MModel *md = &g_mdl[k]; if (!md->nparts || !md->placed) return 0;
-    M4 W = mdl_matrix(k); float s = md->scale;
+    MModel *md = &g_mdl[k]; if (!md->nparts || (!md->placed && !(g_exam_now == k + 1 && g_exam_anchored))) return 0;
+    M4 W = mdl_matrix(k); float s = sqrtf(W.m[0] * W.m[0] + W.m[1] * W.m[1] + W.m[2] * W.m[2]); if (s <= 0) return 0;
     // ray into model space: p_m = W^-1 p (W = s * R, R orthonormal)
     float o[3] = { r->o[0] - W.m[12], r->o[1] - W.m[13], r->o[2] - W.m[14] }, om[3], dm[3];
     for (int i = 0; i < 3; i++) { om[i] = (W.m[i * 4] * o[0] + W.m[i * 4 + 1] * o[1] + W.m[i * 4 + 2] * o[2]) / (s * s);
@@ -1224,16 +1246,25 @@ int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
             if (!first) { g_world_from_stage = m4_yaw(g_turn, g_seat[0], g_seat[1], g_seat[2]); g_arrive = 1; }
         } }
     {   static int le = -1; if (g_exam_now != le) { le = g_exam_now; if (g_exam_now) fprintf(stderr, "[vr] examining the %s\n", g_exam_now == 1 ? "body" : "personal effects"); } }
-    // leaving: walk away from the bed you're examining (or reach for the other one) and the game's EXIT is pressed
-    if (g_exam_now && g_head_ok && g_spot_ok[g_exam_now - 1] && g_exit_t == 0 && g_click_t == 0) {
-        float dx = g_head.m[12] - g_spot[g_exam_now - 1][0], dz = g_head.m[14] - g_spot[g_exam_now - 1][2];
-        if (dx * dx + dz * dz > 1.6f * 1.6f) { g_exit_t = 1; fprintf(stderr, "[vr] stepped away from the %s\n", g_exam_now == 1 ? "body" : "personal effects"); }
-    }
-    if (g_exit_t == 1 && g_exam_now) { click_at(527, 424, 24); g_exit_t = 2; }   // the EXIT button (lower right)
-    if (g_exit_t && !g_exam_now) g_exit_t = 0;
-    if (g_exit_t == 2 && g_click_t == 0) g_exit_t = 1;   // still there: press again
-    if (g_pending_bed >= 0 && g_morgue_now && !g_exam_now && g_click_t == 0) {   // then open the bed you reached for
-        float x, y; morgue_marker(g_pending_bed, &x, &y); click_at(x, y, 24); g_pending_bed = -1;
+    {   // opening / closing the examination: anchor the void where your head is, fade the room
+        static int le2; if (g_exam_now != le2) { le2 = g_exam_now; g_exam_anchored = 0; g_exam_k = 0; }
+        if (g_exam_now && !g_exam_anchored && g_head_ok && g_mdl[g_exam_now - 1].nparts) {
+            MModel *md = &g_mdl[g_exam_now - 1];
+            float fx = -g_head.m[8], fz = -g_head.m[10], yaw = atan2f(-fx, -fz);
+            g_exam_A = m4_yaw(yaw, g_head.m[12], g_head.m[13], g_head.m[14]);
+            float mid[3] = { (md->lo[0] + md->hi[0]) / 2, (md->lo[1] + md->hi[1]) / 2, (md->lo[2] + md->hi[2]) / 2 };
+            float z = md->ref[8] * mid[0] + md->ref[9] * mid[1] + md->ref[10] * mid[2] + md->ref[11];
+            g_exam_k = 0.9f / (z < -1 ? -z : 200.f); g_exam_anchored = 1; g_exam_exit_cd = 0;
+            fprintf(stderr, "[vr] examination opened in front of you (game depth %.0f -> scale %.4f)\n", -z, g_exam_k);
+        }
+        float target = g_exam_now && g_exam_anchored ? 1.f : 0.f; g_exam_fade += (target - g_exam_fade) * 0.12f;
+        if (fabsf(target - g_exam_fade) < 0.01f) g_exam_fade = target;
+        // stepping back out of it presses the game's EXIT
+        if (g_exam_exit_cd > 0) g_exam_exit_cd--;
+        if (g_exam_now && g_exam_anchored && g_head_ok && g_exam_exit_cd == 0 && g_click_t == 0) {
+            float dx = g_head.m[12] - g_exam_A.m[12], dz = g_head.m[14] - g_exam_A.m[14];
+            if (dx * dx + dz * dz > 0.9f * 0.9f) { click_at(527, 424, 20); g_exam_exit_cd = 150; fprintf(stderr, "[vr] stepped back: EXIT\n"); }
+        }
     }
     if (g_vr_office_seen) g_office_hold = 4; else if (g_office_hold > 0) g_office_hold--;
     g_office_now = g_office_hold > 0 && !g_desk_now; g_vr_office_seen = 0;
@@ -1309,7 +1340,7 @@ void vr_input(Input *in) {
 #endif
     if (g_click_t > 0) {   // a press the VR layer makes for you (EXIT, then opening the other bed)
         px = g_click_px[0] / 640.f; py = (g_click_px[1] - g_vr_pic_y0) / (float)g_vr_pic_h; what = 1;
-        in->a = in->lmb = (g_click_t <= 14 && g_click_t > 6); g_click_t--;
+        in->a = in->lmb = (g_click_t <= 14 && g_click_t > 6); g_click_t--; g_scripted = 1;
     }
     if (g_auto_exit > 0 && g_desk_now) {
         px = EXIT_BTN[0]; py = EXIT_BTN[1]; what = 1;
@@ -1326,6 +1357,31 @@ void vr_input(Input *in) {
         in->minus |= g_ab[0]; in->plus |= g_bb[0];
     }
 #endif
+    {   // examining: tap the model = A on that spot; hold and drag = turn it (the game's Rotate / Scroll on the D-pad)
+        static int st; static float y0, p0, yp, pp, tx, ty;
+        int raw = (in->a || in->lmb) && !g_scripted;
+        float yaw = atan2f(g_ray.d[0], -g_ray.d[2]), pit = asinf(g_ray.d[1] < -1 ? -1 : g_ray.d[1] > 1 ? 1 : g_ray.d[1]);
+        if (!g_exam_now || !g_exam_anchored) st = 0;
+        else {
+            if (st == 0 && raw) { if (g_last_kind == 6) { st = 1; y0 = yp = yaw; p0 = pp = pit; tx = px; ty = py; } else st = 3; }
+            if (st == 1) {
+                if (!raw) { click_at(tx * 640.f, ty * g_vr_pic_h + g_vr_pic_y0, 16); st = 0; }
+                else if (fabsf(yaw - y0) > 0.035f || fabsf(pit - p0) > 0.035f) { st = 2; fprintf(stderr, "[vr] dragging the model\n"); }
+            }
+            if (st == 2) {
+                if (!raw) st = 0;
+                else {
+                    float dy = yaw - yp, dp = pit - pp;
+                    if (dy > 0.002f) in->right = 1; else if (dy < -0.002f) in->left = 1;
+                    if (dp > 0.002f) in->up = 1; else if (dp < -0.002f) in->down = 1;
+                    yp = yaw; pp = pit;
+                }
+            }
+            if (st == 3 && !raw) st = 0;
+            if (st == 1 || st == 2) in->a = in->lmb = 0;   // the press itself never reaches the game while you decide / drag
+        }
+        g_scripted = 0;
+    }
     {   // on the computer: tap = A (open a card); press and hold = pick the card up (the game's A+B) and drag it
         static int st, frames, tap;
         int raw = in->a || in->lmb;
