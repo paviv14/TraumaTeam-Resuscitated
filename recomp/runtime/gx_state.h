@@ -55,8 +55,8 @@ typedef struct {
 int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float xo, float yo);
 // VR: the forensics models (body / personal effects) are taken from the game's own draws: model-space vertices,
 // texture coordinates and where each vertex lands on the game's screen (640x528 frame).
-typedef struct { float pos[3], nrm[3], uv[2], sx, sy, w; } VrVert;
-int vr_track(const Setup *s);   // 0 body, 1 personal effects, -1 not tracked
+typedef struct { float pos[3], nrm[3], uv[2], sx, sy, w, col[4]; } VrVert;
+int vr_track(const Setup *s);   // 0 body, 1 personal effects, 2 examination scenery (its tunnel), -1 not tracked
 void vr_capture(int which, const Setup *s, int prim, int n, const VrVert *v, const float M[12]);   // vr.c: leave this draw out (the VR room replaces it)
 
 // GPU backend (gl.c). Coordinates are EFB pixels at 1x (640x528); the backend applies its scale.

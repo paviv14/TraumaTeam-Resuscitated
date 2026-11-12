@@ -1002,6 +1002,7 @@ static void draw_prims(int prim, int vat, int n, u32 *p) {
             static VrVert *vv; static int vcap; if (n > vcap) { free(vv); vcap = n + 1024; vv = malloc(sizeof *vv * (size_t)vcap); }
             for (int k = 0; k < n; k++) {
                 VrVert *q = &vv[k]; memcpy(q->pos, vin[k].pos, 12); memcpy(q->nrm, vin[k].nrm, 12); q->uv[0] = vin[k].tex[0][0]; q->uv[1] = vin[k].tex[0][1];
+                if (vin[k].has_col[0]) memcpy(q->col, vin[k].col[0], 16); else q->col[0] = q->col[1] = q->col[2] = q->col[3] = 1;
                 q->w = vout[k].w; float iw = vout[k].w != 0 ? 1.f / vout[k].w : 0;
                 q->sx = vout[k].x * iw * S.vp[0] + S.vp[3] - 342.f; q->sy = vout[k].y * iw * S.vp[1] + S.vp[4] - 342.f;
             }

@@ -111,7 +111,7 @@ static int g_exam_now, g_morgue_now, g_click_t, g_pending_bed = -1, g_exit_t; st
 typedef struct Ray Ray;
 static int mdl_hit(int k, const Ray *r, float *sx, float *sy, float *dist); static int bed_hit(int k, const Ray *r, float *dist);
 static void morgue_marker(int which, float *x, float *y); static void click_at(float sx, float sy, int frames);
-static void mdl_draw(int k); static void mdl_place(int k);
+static void mdl_draw(int k); static void mdl_place(int k); static void scn_draw(void);
 static int keyed_scene(void);
 static float g_spot[2][3]; static int g_spot_ok[2];   // morgue: where the body [0] and the personal effects [1] lie (bed tops)
 static Mat *g_mat; static int g_nmat;
@@ -292,6 +292,7 @@ static const char *FS =
     "    if (t.x < 0.0 || t.x > 1.0 || t.y < 0.0 || t.y > 1.0) { o = vec4(0.0, 0.0, 0.0, 1.0); return; }\n"
     "    vec2 s = vec2(mix(uCrop.x, uCrop.z, t.x), 1.0 - mix(uCrop.y, uCrop.w, t.y));\n"
     "    vec3 c = texture(uTex, s).rgb; o = vec4(pow(c, vec3(2.2)), 1.0); return; }\n"
+    "  if (uScreen == 3) { vec4 t = texture(uTex, vT) * vC * uBase; o = t; return; }   // the examination tunnel: glowing, see-through\n"
     "  vec4 b = uBase * texture(uTex, vT); if (b.a < uCut) discard;\n"
     "  vec3 c = b.rgb * (uLit.x > 0.0 ? uLit : vC.rgb * 2.0) + uEmis * texture(uETex, vT).rgb;   // baked light was stored at half range\n"
     "  o = vec4(c, 1.0);\n"
@@ -373,6 +374,7 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
         draw_box(vp, at, 0.3f, 0.3f, 0.3f, col);
         vDisable(GL_BLEND); vEnable(GL_DEPTH_TEST); vClear(GL_DEPTH_BUFFER_BIT);
         vUseProgram(g_prog); vUniformMatrix4fv(u_mvp, 1, 0, vp.m);
+        scn_draw();   // the game's own examination background, all around
     }
     if (g_room == 1) {
         if (g_exam_fade > 0.5f) mdl_draw(g_exam_now ? g_exam_now - 1 : 0);   // the model you're examining, in front of you
@@ -955,7 +957,7 @@ static int in_mdl(u32 addr, int k) { addr &= 0x1FFFFFFF; return g_vr_mdl_hi[k] &
 int vr_track(const Setup *s) {
     if (!g_active) return -1;
     for (int m = 0; m < 8; m++) { TexEntry *e = s->tex[m].e; if (!e) continue; for (int k = 0; k < 2; k++) if (in_mdl(e->addr, k)) return k; }
-    return -1;
+    return g_exam_now ? 2 : -1;   // while examining, everything else in 3D is the game's examination background
 }
 static void affine_inv(const float a[12], float o[12]) {   // inverse of [R|t] (3x4 rows)
     float r[9] = { a[0], a[1], a[2], a[4], a[5], a[6], a[8], a[9], a[10] };
@@ -973,8 +975,65 @@ static void aff_mul(const float a[12], const float b[12], float o[12]) {
     for (int i = 0; i < 3; i++) for (int j = 0; j < 4; j++)
         o[i * 4 + j] = a[i * 4] * b[j] + a[i * 4 + 1] * b[4 + j] + a[i * 4 + 2] * b[8 + j] + (j == 3 ? a[i * 4 + 3] : 0);
 }
+// the examination's own background (the game's swirling tunnel): taken fresh every frame, in the game's view space
+typedef struct { float *v; int nv, cap; TexEntry *e; GLuint vao, vbo; } Scn;
+static Scn g_scn[160]; static int g_nscn, g_scn_frame;
+static struct { TexEntry *e; u32 ver; GLuint tex; } g_scn_tex[24];
+static GLuint scn_texture(TexEntry *e) {
+    if (!e || !e->px) return g_white;
+    int k = -1; for (int i = 0; i < 24; i++) if (g_scn_tex[i].e == e) { k = i; break; }
+    if (k < 0) { for (int i = 0; i < 24; i++) if (!g_scn_tex[i].e) { k = i; break; } if (k < 0) k = 0; g_scn_tex[k].e = e; g_scn_tex[k].ver = ~0u; if (!g_scn_tex[k].tex) vGenTextures(1, &g_scn_tex[k].tex); }
+    if (g_scn_tex[k].ver != e->version) {
+        g_scn_tex[k].ver = e->version; size_t np = (size_t)e->w * e->h; u8 *px = malloc(np * 4);
+        for (size_t i = 0; i < np; i++) { u32 c = e->px[i]; px[i * 4] = c >> 24; px[i * 4 + 1] = c >> 16; px[i * 4 + 2] = c >> 8; px[i * 4 + 3] = c; }
+        vBindTexture(GL_TEXTURE_2D, g_scn_tex[k].tex); vTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, e->w, e->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT); free(px);
+    }
+    return g_scn_tex[k].tex;
+}
+static void scn_capture(const Setup *s, int prim, int n, const VrVert *v, const float M[12]) {
+    if (n < 3 || v[0].w == 1.f) return;   // flat interface pieces stay on the pane
+    if (g_scn_frame != g_vr_frame_no) { g_scn_frame = g_vr_frame_no; g_nscn = 0; }
+    if (g_nscn >= 160) return;
+    Scn *sc = &g_scn[g_nscn++]; int need = n * 6 * 9;
+    if (need > sc->cap) { free(sc->v); sc->cap = need + 512; sc->v = malloc(sizeof(float) * (size_t)sc->cap); }
+    int nv = 0;
+    #define CORNER(i) do { const VrVert *q = &v[i]; float *o = sc->v + nv * 9; aff_pt(M, q->pos, o); o[3] = q->uv[0]; o[4] = q->uv[1]; memcpy(o + 5, q->col, 16); nv++; } while (0)
+    switch (prim) {
+    case 0: case 1: for (int k = 0; k + 3 < n; k += 4) { CORNER(k); CORNER(k + 1); CORNER(k + 2); CORNER(k); CORNER(k + 2); CORNER(k + 3); } break;
+    case 2: for (int k = 0; k + 2 < n; k += 3) { CORNER(k); CORNER(k + 1); CORNER(k + 2); } break;
+    case 3: for (int k = 0; k + 2 < n; k++) { CORNER(k); CORNER(k + 1); CORNER(k + 2); } break;
+    case 4: for (int k = 1; k + 1 < n; k++) { CORNER(0); CORNER(k); CORNER(k + 1); } break;
+    default: break;
+    }
+    #undef CORNER
+    sc->nv = nv; sc->e = s->tex[0].e;
+}
+static void scn_draw(void) {   // around you, in the game's view space scaled to the room (called with the room program bound)
+    if (g_scn_frame < g_vr_frame_no - 2 || !g_nscn) return;
+    M4 sc = m4_id(); sc.m[0] = sc.m[5] = sc.m[10] = g_exam_k; M4 W = m4_mul(g_exam_A, sc);
+    static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 };
+    float base[4] = { 1, 1, 1, g_exam_fade };
+    vUniformMatrix4fv(u_model, 1, 0, W.m); vUniform1i(u_screen, 3); vUniform4fv(u_base, 1, base); vUniform3fv(u_emis, 1, zero); (void)one;
+    vEnable(GL_BLEND); vBlendFunc(GL_SRC_ALPHA, GL_ONE); vDisable(GL_DEPTH_TEST); vDisable(GL_CULL_FACE); vDepthMask(0);
+    vActiveTexture(GL_TEXTURE0);
+    for (int i = 0; i < g_nscn; i++) {
+        Scn *q = &g_scn[i]; if (!q->nv) continue;
+        if (!q->vao) { vGenVertexArrays(1, &q->vao); vGenBuffers(1, &q->vbo); vBindVertexArray(q->vao); vBindBuffer(GL_ARRAY_BUFFER, q->vbo);
+            vEnableVertexAttribArray(0); vVertexAttribPointer(0, 3, GL_FLOAT, 0, 36, (void *)0);
+            vEnableVertexAttribArray(1); vVertexAttribPointer(1, 2, GL_FLOAT, 0, 36, (void *)12);
+            vEnableVertexAttribArray(2); vVertexAttribPointer(2, 4, GL_FLOAT, 0, 36, (void *)20); }
+        vBindVertexArray(q->vao); vBindBuffer(GL_ARRAY_BUFFER, q->vbo); vBufferData(GL_ARRAY_BUFFER, 36 * (size_t)q->nv, q->v, GL_STREAM_DRAW);
+        vBindTexture(GL_TEXTURE_2D, scn_texture(q->e)); vDrawArrays(GL_TRIANGLES, 0, q->nv);
+    }
+    vDisable(GL_BLEND); vEnable(GL_DEPTH_TEST); vDepthMask(1); vUniform1i(u_screen, 0);
+    M4 id = m4_id(); vUniformMatrix4fv(u_model, 1, 0, id.m);
+}
 void vr_capture(int which, const Setup *s, int prim, int n, const VrVert *v, const float M[12]) {
-    if (!g_active || which < 0 || which > 1) return;
+    if (!g_active) return;
+    if (which == 2) { scn_capture(s, prim, n, v, M); return; }
+    if (which < 0 || which > 1) return;
     MModel *md = &g_mdl[which];
     if (md->frame != g_vr_frame_no) { md->frame = g_vr_frame_no; md->cur = 0; memcpy(md->ref, M, 48); affine_inv(M, md->ref_inv); }
     g_exam_seen = which + 1;
@@ -1060,9 +1119,16 @@ static void mdl_place(int k) {
     memcpy(md->lit_R, md->R, 36);
     (void)mid;
 }
-static M4 exam_matrix(int k) {   // reference frame -> game view space -> in front of you
+static M4 exam_matrix(int k) {   // turned as the game sees it, but always the same size, floating ~1 m in front of you
     MModel *md = &g_mdl[k]; M4 r = m4_id();
-    for (int i = 0; i < 3; i++) { for (int j = 0; j < 3; j++) r.m[j * 4 + i] = md->ref[i * 4 + j] * g_exam_k; r.m[12 + i] = md->ref[i * 4 + 3] * g_exam_k; }
+    float L = md->hi[md->axis] - md->lo[md->axis], sc = L > 0 ? 1.15f / L : 0.01f;
+    float mid[3] = { (md->lo[0] + md->hi[0]) / 2, (md->lo[1] + md->hi[1]) / 2, (md->lo[2] + md->hi[2]) / 2 };
+    for (int i = 0; i < 3; i++) {
+        float l = sqrtf(md->ref[i * 4] * md->ref[i * 4] + md->ref[i * 4 + 1] * md->ref[i * 4 + 1] + md->ref[i * 4 + 2] * md->ref[i * 4 + 2]); if (l < 1e-6f) l = 1;
+        for (int j = 0; j < 3; j++) r.m[j * 4 + i] = md->ref[i * 4 + j] / l * sc;
+    }
+    const float c[3] = { 0, -0.12f, -1.0f };
+    for (int i = 0; i < 3; i++) r.m[12 + i] = c[i] - (r.m[i] * mid[0] + r.m[4 + i] * mid[1] + r.m[8 + i] * mid[2]);
     return m4_mul(g_exam_A, r);
 }
 static M4 mdl_matrix(int k) {   // model (reference frame) -> world, as a column-major M4
