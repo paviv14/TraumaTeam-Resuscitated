@@ -604,6 +604,7 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
     static GV *buf; static int cap;
     if (n * 7 > cap) { free(buf); cap = n * 7 + 1024; buf = malloc(sizeof *buf * (size_t)cap); }
     float wd = s->vp[0], ht = s->vp[1], zr = s->vp[2], xo = s->vp[3] - 342.f, yo = s->vp[4] - 342.f, fz = s->vp[5];
+    if (vr_draw_skip(s, v, n, wd, ht, xo, yo)) return;
     // ultrawide: 2D (w == 1 everywhere) spanning the game's whole width is stretched to the EFB's
     float xs = 1.f, xm = (float)g_M; int touch_l = 0, touch_r = 0; float tile_w = 0, edge_l = 0, edge_r = 0;
     if (g_M) {
@@ -682,6 +683,7 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
 
 void gpu_clear(int x0, int y0, int w, int h, u32 c, float z, int color, int alpha, int depth) {
     glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo);
+    if (color && vr_key_frame()) c = 0xFF00FFFFu;   // VR office: the frame starts on the key colour (the painting is left out)
     int ex0, ex1; wide_x(x0, x0 + w, &ex0, &ex1);
     glScissor_(ex0 * g_scale, (528 - y0 - h) * g_scale, (ex1 - ex0) * g_scale, h * g_scale);
     glColorMask_(color, color, color, alpha); glDepthMask_(depth ? GL_TRUE : GL_FALSE);
@@ -767,6 +769,7 @@ void gpu_present(int x0, int y0, int w, int h) {
     glDisable_(GL_SCISSOR_TEST);
     glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_fbo); glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, g_last_fbo);
     glBlitFramebuffer_(ex0 * g_scale, (528 - y0 - h) * g_scale, ex1 * g_scale, (528 - y0) * g_scale, 0, 0, lw, lh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    g_vr_pic_y0 = y0; g_vr_pic_h = h;
     if (!vr_frame(g_last_tex, lw, lh, (float)(g_M - (ex0 - 0)) / (ex1 - ex0), (float)(g_M + 640 - ex0) / (ex1 - ex0))) {   // VR draws the headset (and, in preview, the window) from the picture
     glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_last_fbo);
     glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, 0);

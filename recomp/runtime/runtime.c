@@ -347,6 +347,7 @@ static void mission_setup(const char *m) {
     PRESS("A");
     #undef PRESS
     setenv_portable("TTPC_SEQ_AT", "600:32");
+    if (getenv("TTPC_INPUT_MORE")) { strcat(script, getenv("TTPC_INPUT_MORE")); }   /* tests: presses after the menu */
     setenv_portable("TTPC_INPUT", script);
     fprintf(stderr, "[mission] %s: stage select script %s\n", m, script);
 }

@@ -52,6 +52,7 @@ typedef struct {
     float im[6][4];               // 3 matrices x 2 rows: m0 m1 m2 (real values), scale exponent
     float cs[8][2];               // texcoord scale (texels) per texcoord, from BP 0x30-0x3F
 } Setup;
+int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float xo, float yo);   // vr.c: leave this draw out (the VR room replaces it)
 
 // GPU backend (gl.c). Coordinates are EFB pixels at 1x (640x528); the backend applies its scale.
 int  gpu_init(int scale);                       // after the window's GL context exists; 0 = unavailable

@@ -15,6 +15,7 @@
  * colour = base colour x texture x vertex colour (+ emissive), in linear space into sRGB targets. */
 #include "platform.h"
 #include "cpu.h"
+#include "gx_state.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -120,10 +121,25 @@ static GLuint g_desk_tex, g_desk_fbo; static int g_desk_w, g_desk_h;
 static float g_x0f = 0, g_x1f = 1;         // the game's own 640 columns within the picture (ultrawide sides excluded)
 #define DESK_Y0 (22.f / 480) 
 #define DESK_Y1 (462.f / 480)
-static const float g_pan_o[3] = { -2.97f, 2.38f, -0.97f }, g_pan_u[3] = { 0, 0, -1.12f }, g_pan_v[3] = { 0, -0.84f, 0 };   // wall panel (4:3)
-static GLuint g_pan_vao;
+// The pane: a sheet of glass that floats in front of you and shows what the game puts on screen that has no
+// place in the room yet. In the office it shows only the game's interface (speech bubbles, the LIMIT
+// hearts, help pages...), with the painted office removed; elsewhere (map, morgue...) the whole picture.
+static float g_pan_o[3], g_pan_u[3], g_pan_v[3]; static int g_pan_placed;
+static GLuint g_pan_vao, g_pan_vbo;
 static float desk_aspect(void); static int panel_on(void);
-static const float PAINTED_PC[2] = { 0.22f, 0.35f };   // where the computer is in the game's office picture (click = open it)
+// scenes, from what the game draws each frame
+int g_vr_office_seen;                     // the painted office (a red 640x480 picture) was drawn (and skipped)
+static int g_office_now, g_office_hold;
+int g_vr_pic_y0 = 24, g_vr_pic_h = 480;  // the presented picture's rows in the game's 528-row frame (gl.c)
+// office hotspots, in the painted office's own pixels (advmap/aut/aut_room1_stage01.h2d polygons)
+// (the centres of the markers the game puts on them, in its 640x528 frame)
+static const float HS_PC[2] = { 166, 173 }, HS_RECORDER[2] = { 111, 320 }, HS_DOOR[2] = { 576, 152 };
+#define OFFICE_BG_Y 0
+static float g_obj_min[3][3], g_obj_max[3][3]; static int g_obj_ok[3];   // 0 recorder, 1 door, 2 monitor body
+static M4 g_head; static int g_head_ok;
+// where the game's interface is on screen (office): rectangles of the drawn pieces, this frame and last
+typedef struct { float x0, y0, x1, y1; } Rect;
+static Rect g_ui[2][96]; static int g_nui[2], g_uicur;
 static int g_active, g_preview;
 static M4 g_world_from_stage;   // where the play area sits in the room
 static float g_seat[3] = { -0.55f, 0.0f, -1.62f };   // Naomi's chair (glTF frame), facing -x (the desk)
@@ -165,6 +181,7 @@ static int load_room(const char *path) {
     for (cgltf_size ni = 0; ni < d->nodes_count; ni++) {
         cgltf_node *nd = &d->nodes[ni]; if (!nd->mesh) continue;
         float wm[16]; cgltf_node_transform_world(nd, wm); M4 W; memcpy(W.m, wm, 64);
+        int obj = !nd->name ? -1 : !strncmp(nd->name, "recorder", 8) ? 0 : !strncmp(nd->name, "door_exit", 9) ? 1 : !strncmp(nd->name, "monitor", 7) ? 2 : -1;
         for (cgltf_size pi = 0; pi < nd->mesh->primitives_count; pi++) {
             cgltf_primitive *pr = &nd->mesh->primitives[pi];
             const cgltf_accessor *ap = NULL, *at = NULL, *ac = NULL;
@@ -182,6 +199,12 @@ static int load_room(const char *path) {
                 if (at) cgltf_accessor_read_float(at, k, t, 2);
                 if (ac) cgltf_accessor_read_float(ac, k, q, ac->type == cgltf_type_vec3 ? 3 : 4);
                 v[k * 9 + 3] = t[0]; v[k * 9 + 4] = t[1]; memcpy(v + k * 9 + 5, q, 16);
+                if (obj >= 0) for (int c = 0; c < 3; c++) {
+                    float x = v[k * 9 + c];
+                    if (!g_obj_ok[obj] || x < g_obj_min[obj][c]) g_obj_min[obj][c] = x;
+                    if (!g_obj_ok[obj] || x > g_obj_max[obj][c]) g_obj_max[obj][c] = x;
+                    if (c == 2) g_obj_ok[obj] = 1;
+                }
             }
             int ni_ = pr->indices ? (int)pr->indices->count : nv; u32 *ix = malloc(4 * ni_);
             for (int k = 0; k < ni_; k++) ix[k] = pr->indices ? (u32)cgltf_accessor_read_index(pr->indices, k) : (u32)k;
@@ -224,6 +247,13 @@ static const char *FS =
     "in vec2 vT; in vec4 vC; uniform vec4 uBase; uniform vec3 uEmis; uniform sampler2D uTex, uETex; uniform float uCut;\n"
     "uniform int uScreen; uniform vec2 uScrK; uniform vec4 uCrop; out vec4 o;\n"
     "void main() {\n"
+    "  if (uScreen == 2) {   // the game's interface over a magenta key (the office painting was left out)\n"
+    "    vec2 s = vec2(mix(uCrop.x, uCrop.z, vT.x), 1.0 - mix(uCrop.y, uCrop.w, vT.y));\n"
+    "    vec3 c = texture(uTex, s).rgb;\n"
+    "    float a = 1.0 - clamp((min(c.r, c.b) - c.g) * 1.1, 0.0, 1.0);   // how much of it is NOT the key\n"
+    "    if (a < 0.04) discard;\n"
+    "    c = clamp((c - (1.0 - a) * vec3(1.0, 0.0, 1.0)) / a, 0.0, 1.0);   // take the key colour back out of the edges\n"
+    "    o = vec4(pow(c, vec3(2.2)), a); return; }\n"
     "  if (uScreen == 1) {   // the game picture, letterboxed to keep its shape; it holds sRGB values -> linear\n"
     "    vec2 t = (vT - 0.5) * uScrK + 0.5;\n"
     "    if (t.x < 0.0 || t.x > 1.0 || t.y < 0.0 || t.y > 1.0) { o = vec4(0.0, 0.0, 0.0, 1.0); return; }\n"
@@ -285,11 +315,18 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
         vUniform1f(u_cut, m && m->mask ? m->cutoff : -1.f);
         vBindVertexArray(p->vao); vDrawElements(GL_TRIANGLES, p->n, GL_UNSIGNED_INT, 0);
     }
-    if (panel_on() && game_tex) {   // the rest of the game, on the wall panel
+    if (panel_on() && game_tex && g_pan_placed) {   // the pane: the game's interface (office) or the whole picture (elsewhere)
         static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 };
-        vActiveTexture(GL_TEXTURE0); vBindTexture(GL_TEXTURE_2D, game_tex); vUniform1i(u_screen, 1);
+        float q[4][9]; for (int i = 0; i < 4; i++) {
+            float su = (i == 1 || i == 2), sv = (i >= 2);
+            for (int c = 0; c < 3; c++) q[i][c] = g_pan_o[c] + g_pan_u[c] * su + g_pan_v[c] * sv;
+            q[i][3] = su; q[i][4] = sv; q[i][5] = q[i][6] = q[i][7] = q[i][8] = 1; }
+        vBindBuffer(GL_ARRAY_BUFFER, g_pan_vbo); vBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
+        vActiveTexture(GL_TEXTURE0); vBindTexture(GL_TEXTURE_2D, game_tex); vUniform1i(u_screen, g_office_now ? 2 : 1);
+        if (g_office_now) { vEnable(GL_BLEND); vBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); vDepthMask(0); }
         vUniform2f(u_scr_k, 1, 1); vUniform4f(u_crop, g_x0f, 0, g_x1f, 1); vUniform4fv(u_base, 1, one); vUniform3fv(u_emis, 1, zero);
         vBindVertexArray(g_pan_vao); vDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+        vDisable(GL_BLEND); vDepthMask(1);
     }
     vBindVertexArray(g_linevao); vUseProgram(g_lineprog);
     vEnableVertexAttribArray(0);
@@ -336,18 +373,63 @@ static int ray_quad(const float *O, const float *U, const float *V, float ca, co
 }
 static float desk_aspect(void) { return (4.f / 3) * (DESK_Y1 - DESK_Y0 > 0 ? 1.f / (DESK_Y1 - DESK_Y0) : 1); }
 static int panel_on(void) { return !g_desk_now; }
-// what the laser is on: 0 nothing, 1 monitor, 2 panel; px/py = 0..1 across the game's picture (for the pointer)
+static int ray_box(const Ray *r, const float *mn, const float *mx, float pad, float *dist) {
+    float t0 = 0, t1 = 1e9f;
+    for (int c = 0; c < 3; c++) {
+        float lo = mn[c] - pad, hi = mx[c] + pad;
+        if (fabsf(r->d[c]) < 1e-7f) { if (r->o[c] < lo || r->o[c] > hi) return 0; continue; }
+        float a = (lo - r->o[c]) / r->d[c], b = (hi - r->o[c]) / r->d[c]; if (a > b) { float t = a; a = b; b = t; }
+        if (a > t0) t0 = a; if (b < t1) t1 = b; if (t0 > t1) return 0;
+    }
+    *dist = t0; return 1;
+}
+// a spot in the painted office -> the pointer (0..1 across the presented picture)
+static void office_spot(const float *hs, float *gx, float *gy) {
+    *gx = hs[0] / 640.f; *gy = (hs[1] + OFFICE_BG_Y - g_vr_pic_y0) / (float)g_vr_pic_h;
+}
+// what the laser is on: 0 nothing, 1 monitor / room object, 2 pane; gx/gy = 0..1 across the game's picture (the pointer)
 static int laser_target(const Ray *r, float *gx, float *gy, float *dist) {
-    float px, py, d1 = 1e9f, d2 = 1e9f, ax = 0, ay = 0, bx = 0, by = 0; int hit1 = 0, hit2 = 0;
+    float d1 = 1e9f, d2 = 1e9f, ax = 0, ay = 0, bx = 0, by = 0; int hit1 = 0, hit2 = 0;
     if (g_have_screen) hit1 = ray_quad(g_scr_o, g_scr_u, g_scr_v, desk_aspect(), r, &ax, &ay, &d1);
-    if (panel_on()) hit2 = ray_quad(g_pan_o, g_pan_u, g_pan_v, 4.f / 3, r, &bx, &by, &d2);
-    if (hit1 && (!hit2 || d1 < d2)) {
+    if (!hit1 && g_obj_ok[2] && ray_box(r, g_obj_min[2], g_obj_max[2], 0.01f, &d1)) { hit1 = 1; ax = ay = 0.5f; }
+    if (panel_on() && g_pan_placed) hit2 = ray_quad(g_pan_o, g_pan_u, g_pan_v, 4.f / 3, r, &bx, &by, &d2);
+    if (g_office_now && hit2) {   // the pane only takes the laser where an interface piece was drawn last frame
+        float x = bx * 640.f, y = by * g_vr_pic_h + g_vr_pic_y0; int in = 0; const int last = g_uicur ^ 1;
+        for (int k = 0; k < g_nui[last] && !in; k++) { Rect R = g_ui[last][k]; in = x >= R.x0 - 4 && x <= R.x1 + 4 && y >= R.y0 - 4 && y <= R.y1 + 4; }
+        if (!in) hit2 = 0;
+    }
+    float dr = 1e9f, dd = 1e9f;
+    int hr = g_office_now && g_obj_ok[0] && ray_box(r, g_obj_min[0], g_obj_max[0], 0.03f, &dr);
+    int hd = g_office_now && g_obj_ok[1] && ray_box(r, g_obj_min[1], g_obj_max[1], 0.02f, &dd);
+    if (hit2 && (!hit1 || d2 < d1) && (!hr || d2 < dr) && (!hd || d2 < dd)) { *gx = bx; *gy = by; *dist = d2; return 2; }
+    if (hr && (!hit1 || dr < d1) && (!hd || dr < dd)) { office_spot(HS_RECORDER, gx, gy); *dist = dr; return 1; }
+    if (hd && (!hit1 || dd < d1)) { office_spot(HS_DOOR, gx, gy); *dist = dd; return 1; }
+    if (hit1) {
         if (g_desk_now) { *gx = ax; *gy = DESK_Y0 + ay * (DESK_Y1 - DESK_Y0); }
-        else { *gx = PAINTED_PC[0]; *gy = PAINTED_PC[1]; }   // the office scene is up: point at the painted computer
+        else if (g_office_now) office_spot(HS_PC, gx, gy);   // the office is up: point at the painted computer
+        else { *dist = d1; return 0; }
         *dist = d1; return 1;
     }
-    if (hit2) { *gx = bx; *gy = by; *dist = d2; return 2; }
-    (void)px; (void)py; return 0;
+    return 0;
+}
+// the pane follows lazily: it stays put while you look at it, and comes back in front of you when you look away
+static void place_pane(void) {
+    if (!g_head_ok) return;
+    float eye[3] = { g_head.m[12], g_head.m[13], g_head.m[14] }, fw[3] = { -g_head.m[8], 0, -g_head.m[10] };
+    float fl = sqrtf(fw[0] * fw[0] + fw[2] * fw[2]); if (fl < 1e-3f) return; fw[0] /= fl; fw[2] /= fl;
+    float dist = g_office_now ? 0.95f : 1.8f, w = g_office_now ? 0.75f : 1.6f, h = w * 0.75f;
+    float c[3] = { eye[0] + fw[0] * dist, eye[1] - (g_office_now ? 0.32f : 0.0f), eye[2] + fw[2] * dist };
+    if (g_pan_placed) {   // still roughly in view and at the right size? leave it
+        float pc[3] = { g_pan_o[0] + g_pan_u[0] / 2 + g_pan_v[0] / 2, g_pan_o[1] + g_pan_u[1] / 2 + g_pan_v[1] / 2, g_pan_o[2] + g_pan_u[2] / 2 + g_pan_v[2] / 2 };
+        float to[3] = { pc[0] - eye[0], 0, pc[2] - eye[2] }; float tl = sqrtf(to[0] * to[0] + to[2] * to[2]);
+        float cosang = tl > 0 ? (to[0] * fw[0] + to[2] * fw[2]) / tl : 1;
+        if (cosang > 0.8f && fabsf(len3(g_pan_u) - w) < 0.01f && fabsf(tl - dist) < 0.5f) return;
+    }
+    float right[3] = { -fw[2], 0, fw[0] };   // facing the eye: right = forward x up
+    float tilt = g_office_now ? 0.32f : 0.0f;   // lean the pane back so it faces the eye
+    float down[3] = { fw[0] * sinf(tilt), -cosf(tilt), fw[2] * sinf(tilt) };
+    for (int k = 0; k < 3; k++) { g_pan_u[k] = right[k] * w; g_pan_v[k] = down[k] * h; g_pan_o[k] = c[k] - g_pan_u[k] / 2 - g_pan_v[k] / 2; }
+    g_pan_placed = 1;
 }
 // pointer: where the laser meets the screen (0..1 across the game picture), honouring the letterbox
 static int ray_screen(const Ray *r, int gw, int gh, float *px, float *py, float *dist) {
@@ -386,8 +468,8 @@ static int common_init(void) {
             float su = (i == 1 || i == 2), sv = (i >= 2);
             for (int c = 0; c < 3; c++) q[i][c] = g_pan_o[c] + g_pan_u[c] * su + g_pan_v[c] * sv;
             q[i][3] = su; q[i][4] = sv; q[i][5] = q[i][6] = q[i][7] = q[i][8] = 1; }
-        GLuint b; vGenVertexArrays(1, &g_pan_vao); vBindVertexArray(g_pan_vao); vGenBuffers(1, &b); vBindBuffer(GL_ARRAY_BUFFER, b);
-        vBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STATIC_DRAW);
+        vGenVertexArrays(1, &g_pan_vao); vBindVertexArray(g_pan_vao); vGenBuffers(1, &g_pan_vbo); vBindBuffer(GL_ARRAY_BUFFER, g_pan_vbo);
+        vBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
         vEnableVertexAttribArray(0); vVertexAttribPointer(0, 3, GL_FLOAT, 0, 36, (void *)0);
         vEnableVertexAttribArray(1); vVertexAttribPointer(1, 2, GL_FLOAT, 0, 36, (void *)12);
         vEnableVertexAttribArray(2); vVertexAttribPointer(2, 4, GL_FLOAT, 0, 36, (void *)20);
@@ -454,7 +536,7 @@ static int preview_frame(void) {
     float eyeh = k[SDL_SCANCODE_LCTRL] ? 1.15f : 1.55f;   // hold Ctrl: sit down (eye height)
     M4 head = m4_yaw(yaw, px_, eyeh, pz_);
     M4 pit = m4_id(); pit.m[5] = cosf(pitch); pit.m[6] = sinf(pitch); pit.m[9] = -sinf(pitch); pit.m[10] = cosf(pitch);
-    head = m4_mul(head, pit);
+    head = m4_mul(head, pit); g_head = head; g_head_ok = 1;
     float t = tanf(32 * (float)M_PI / 180), a = (float)ww / wh;
     M4 proj = m4_frustum(-t * a, t * a, -t, t, 0.03f, 50.f), view = m4_rigid_inv(head);
     // the laser comes from a hand below-right of the eye and goes to whatever the crosshair (screen centre) is on
@@ -660,6 +742,7 @@ static int xr_frame(void) {
                 vFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, g_depth[e]);
                 vViewport(0, 0, g_scw[e], g_sch[e]); vClearColor(0.02f, 0.01f, 0.01f, 1); vClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
                 M4 eye = m4_mul(g_world_from_stage, m4_pose(&views[e].pose.orientation.x, &views[e].pose.position.x));
+                if (e == 0) { g_head = eye; g_head_ok = 1; }
                 XrFovf f = views[e].fov;
                 M4 proj = m4_frustum(tanf(f.angleLeft), tanf(f.angleRight), tanf(f.angleDown), tanf(f.angleUp), 0.03f, 50.f);
                 draw_scene(proj, m4_rigid_inv(eye), g_game_tex, g_gw, g_gh);
@@ -677,6 +760,41 @@ static int xr_frame(void) {
     return 1;
 }
 #endif
+
+// ---------------------------------------------------------------- per draw (gl.c): leave out what the room replaces
+// Naomi's office painting (sprite/bg/mira_jishitu.tpx, 640x480 CI8): recognised by its texel data
+#define OFFICE_HASH 0x2E0252893EFEE5CCull   // as the runtime hashes it (video.c tex_data_hash)
+static int office_picture(TexEntry *e) {
+    static u64 seen[16]; static int ns;
+    int known = 0; for (int k = 0; k < ns; k++) if (seen[k] == e->data_hash) known = 1;
+    if (!known && ns < 16) { seen[ns++] = e->data_hash; fprintf(stderr, "[vr] 640x480 picture %08X data %016llX%s\n", e->addr, (unsigned long long)e->data_hash, e->data_hash == OFFICE_HASH ? " = Naomi's office" : ""); }
+    return e->data_hash == OFFICE_HASH;
+}
+int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float xo, float yo) {
+    if (!g_active) return 0;
+    float mn = 1e9f, mx = -1e9f;   // screen width of this draw (game pixels)
+    for (int i = 0; i < n; i++) if (v[i].w != 0) { float x = v[i].x / v[i].w * wd + xo; if (x < mn) mn = x; if (x > mx) mx = x; }
+    (void)ht; (void)yo;
+    float ymn = 1e9f, ymx = -1e9f;
+    for (int i = 0; i < n; i++) if (v[i].w != 0) { float y = v[i].y / v[i].w * ht + yo; if (y < ymn) ymn = y; if (y > ymx) ymx = y; }
+    if (g_vr_office_seen) {   // over the office: full-width untextured bars (letterbox) would cover the room
+        int tex = 0; for (int m = 0; m < 8; m++) if (s->tex[m].e || s->tex[m].gl_copy) tex = 1;
+        if (!tex && mx - mn >= 600) return 1;
+    }
+    for (int m = 0; m < 8; m++) {
+        TexEntry *e = s->tex[m].e;
+        // Little Guy's desktop: its 648x440 wallpaper drawn across the screen (help pages show small pictures of it)
+        if (e && e->w == 648 && e->h == 440 && mx - mn > 500) g_vr_desk_seen = 1;
+        if (e && e->w == 640 && e->h == 480 && !e->px) { static int n; if (n++ < 3) fprintf(stderr, "[vr] 640x480 texture without pixels\n"); }
+        if (e && e->w == 640 && e->h == 480 && office_picture(e)) { g_vr_office_seen = 1; return 1; }
+        // over the office: the hotspot markers and the pointer are left out too (the room objects and the laser replace them)
+        if (e && g_vr_office_seen && ((e->w == 56 && e->h == 56) || (e->w == 64 && e->h == 64))) return 1;
+    }
+    if (g_vr_office_seen && g_nui[g_uicur] < 96 && mx > mn && ymx > ymn && mx - mn < 640)   // an interface piece: the pane takes the laser here
+        g_ui[g_uicur][g_nui[g_uicur]++] = (Rect){ mn, ymn, mx, ymx };
+    return 0;
+}
+int vr_key_frame(void) { return g_active && g_office_now; }   // gl.c: clear the frame to the key colour
 
 // ---------------------------------------------------------------- entry points (called from platform.c / gl.c)
 int vr_wanted(void) { const char *v = getenv("TTPC_VR"); return v && *v && *v != '0'; }
@@ -703,6 +821,10 @@ int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
     // desktop up? (seen this frame, or within the last few: some frames skip the wallpaper during fades)
     if (g_vr_desk_seen) g_desk_hold = 4; else if (g_desk_hold > 0) g_desk_hold--;
     g_desk_now = g_desk_hold > 0; int fresh = g_vr_desk_seen; g_vr_desk_seen = 0;
+    if (g_vr_office_seen) g_office_hold = 4; else if (g_office_hold > 0) g_office_hold--;
+    g_office_now = g_office_hold > 0 && !g_desk_now; g_vr_office_seen = 0;
+    g_uicur ^= 1; g_nui[g_uicur] = 0;
+    place_pane();
     gl_chk("enter"); GLSave s; gl_save(&s); gl_chk("save"); int drew = 0;
     if (fresh) {   // keep this desktop frame for the monitor
         if (w != g_desk_w || h != g_desk_h) {
@@ -731,7 +853,12 @@ int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
 void vr_input(Input *in) {
     if (!g_active) return;
     float px, py, dist;
-    if (ray_screen(&g_ray, g_gw, g_gh, &px, &py, &dist)) { in->mouse_x = px; in->mouse_y = py; in->mouse_in = 1; }
+    int what = laser_target(&g_ray, &px, &py, &dist);
+    if (what) { in->mouse_x = px; in->mouse_y = py; in->mouse_in = 1; }
+    { static int prev; int down = in->lmb || in->a;
+      if (down && !prev) fprintf(stderr, "[vr] click: %s at %.3f %.3f (office %d desktop %d)\n", what == 2 ? "pane" : what == 1 ? "room object/monitor" : "nothing", px, py, g_office_now, g_desk_now);
+      prev = down; }
+    if (what) {}
     else in->mouse_in = 0;
     if (g_preview) in->stick_up = in->stick_down = in->stick_left = in->stick_right = 0;   // desktop mode: WASD walks you, not the Nunchuk
 #ifdef TTPC_OPENXR
@@ -749,6 +876,8 @@ int vr_wanted(void) { return 0; }
 int vr_active(void) { return 0; }
 void vr_init(void) {}
 int vr_frame(unsigned t, int w, int h, float a, float b) { (void)t; (void)w; (void)h; (void)a; (void)b; return 0; }
-int g_vr_desk_seen;
+int g_vr_desk_seen, g_vr_office_seen; int g_vr_pic_y0, g_vr_pic_h;
+int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float xo, float yo) { (void)s; (void)v; (void)n; (void)wd; (void)ht; (void)xo; (void)yo; return 0; }
+int vr_key_frame(void) { return 0; }
 void vr_input(Input *in) { (void)in; }
 #endif

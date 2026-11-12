@@ -518,7 +518,6 @@ static void setup_draw(void) {
         S.tex[m].px = NULL; S.tex[m].e = NULL; S.tex[m].gl_copy = 0;
         if (!used[m]) continue;
         Tex t; get_tex(m, &t);
-        if (t.w == 648 && t.h == 440) g_vr_desk_seen = 1;   // Little Guy's desktop wallpaper (VR: the monitor shows the desktop)
         if (g_gpu && (S.tex[m].gl_copy = gpu_copy_lookup(t.addr, t.w, t.h))) {   // render target kept on the GPU
             int b = m < 4 ? 0 : 0x20, mm = m & 3; u32 mode0 = bp[0x80 + b + mm];
             S.tex[m].w = t.w; S.tex[m].h = t.h; S.tex[m].ws = t.wrap_s; S.tex[m].wt = t.wrap_t; S.tex[m].linear = (mode0 >> 4) & 1;
@@ -838,6 +837,10 @@ static void capture_frame_end(void) {
         g_cap_png_at = -1;
     }
     if (g_cap_end >= 0 && (long)g_copies >= g_cap_end) { fclose(g_dlf); g_dlf = stderr; g_dl_from = -1; g_cap_end = -1; fprintf(stderr, "[capture] done\n"); }
+    {   // tests: TTPC_CAPTURE_AT="f1,f2,..." takes an F9 capture (picture + draw log) at those frames
+        static const char *e; static int init; if (!init) { init = 1; e = getenv("TTPC_CAPTURE_AT"); }
+        if (e && g_cap_end < 0) { const char *q = e; while (q && *q) { long f = atol(q); if ((long)g_copies == f) { video_capture_request(); break; } q = strchr(q, ','); if (q) q++; } }
+    }
 }
 static void efb_copy(u32 v) {
     int to_xfb = (v >> 14) & 1, clear = (v >> 11) & 1;
