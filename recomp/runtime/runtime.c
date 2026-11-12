@@ -316,9 +316,50 @@ static const char *find_disc(const char *exe) {
     return "disc/DATA";
 }
 
+static void setenv_portable(const char *k, const char *v) {
+#ifdef _WIN32
+    _putenv_s(k, v);
+#else
+    setenv(k, v, 1);
+#endif
+}
+
+/* --mission su110 (or TTPC_MISSION): go straight to one mission's gameplay part for testing.
+   The game boots as usual, switches to the developer STAGE SELECT (sequence 32) and the
+   menu is driven by scripted presses: mode, chapter, story, then the gameplay item.
+   Names are mode + chapter + story as on the disc: su (CR-S01), em (Maria), or (Hank),
+   en (Tomoe), di (Gabriel), au (Naomi); e.g. su110 = chapter 1, story 0x10. */
+static void mission_setup(const char *m) {
+    static const char *modes[] = { "su", "em", "or", "en", "di", "au" };
+    int mode = -1;
+    for (int k = 0; k < 6; k++) if (!strncmp(m, modes[k], 2)) mode = k;
+    unsigned ch = 0, st = 0;
+    if (mode < 0 || strlen(m) != 5 || sscanf(m + 2, "%1x%2x", &ch, &st) != 2) {
+        fprintf(stderr, "[mission] '%s' is not a mission name (su110, em110, or110, en110, di110, au110...)\n", m); return;
+    }
+    static char script[2048]; char *p = script; long t = 900;
+    #define PRESS(btn) do { p += sprintf(p, "%ld+6:%s;", t, btn); t += 40; } while (0)
+    PRESS("down");                                   /* difficulty -> mode */
+    for (int k = 0; k < mode; k++) PRESS("right");
+    PRESS("down"); for (unsigned k = 0; k < ch; k++) PRESS("right");
+    PRESS("down"); for (unsigned k = 0; k < st / 0x10; k++) PRESS("right");
+    for (int k = 0; k < 5; k++) PRESS("down");       /* PLAY ALL, STORY TITLE, EVENT, CONFERENCE -> the gameplay part */
+    PRESS("A");
+    #undef PRESS
+    setenv_portable("TTPC_SEQ_AT", "600:32");
+    setenv_portable("TTPC_INPUT", script);
+    fprintf(stderr, "[mission] %s: stage select script %s\n", m, script);
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[argc - 1], "--prepare-textures")) { int texpack_prepare(void); return texpack_prepare(); }
     setvbuf(stderr, NULL, _IONBF, 0);   // the log survives a crash or a forced exit (Windows buffers redirected stderr)
+    for (int k = 1; k < argc; k++) if (!strcmp(argv[k], "--mission") && k + 1 < argc) {
+        mission_setup(argv[k + 1]);
+        for (int j = k; j + 2 <= argc; j++) argv[j] = argv[j + 2];
+        argc -= 2; k--;
+    }
+    if (getenv("TTPC_MISSION") && *getenv("TTPC_MISSION")) mission_setup(getenv("TTPC_MISSION"));
     const char *disc = find_disc(argv[0]);
     char dolpath[1200];
     if (argc > 1) snprintf(dolpath, sizeof dolpath, "%s", argv[1]);

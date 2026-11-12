@@ -25,7 +25,12 @@ static int g_scale = 1;
 static int EW, EH;                  // EFB size in host pixels
 static u32 *efb_c; static float *efb_z;
 static const char *g_dump_dir; static int g_dump_every = 30; static u64 g_copies;
-static int g_render = 1;
+static int g_render = 1; static u64 g_dump_from = 0, g_burst_period = 0, g_burst_len = 0;
+/* dump frame n? (TTPC_FRAMES_FROM, TTPC_FRAME_EVERY, TTPC_FRAME_BURST=period:len for short clips spread over a long run) */
+static int dump_wanted(u64 n) {
+    if (n < g_dump_from || n % g_dump_every) return 0;
+    return !g_burst_period || (n - g_dump_from) % g_burst_period < g_burst_len;
+}
 // Draw log (TTPC_DRAWLOG=frame, or F9 in the window): every draw's pipeline state for two frames.
 long g_dl_from = -2; FILE *g_dlf;
 static long dl_frame(void) { if (g_dl_from == -2) { g_dl_from = getenv("TTPC_DRAWLOG") ? atol(getenv("TTPC_DRAWLOG")) : -1; g_dlf = stderr; } return g_dl_from; }
@@ -62,6 +67,8 @@ void video_init(void) {
     tmem = calloc(1, 1 << 20);
     g_dump_dir = getenv("TTPC_FRAMES");
     if (getenv("TTPC_FRAME_EVERY")) g_dump_every = atoi(getenv("TTPC_FRAME_EVERY"));
+    if (getenv("TTPC_FRAMES_FROM")) g_dump_from = strtoull(getenv("TTPC_FRAMES_FROM"), 0, 10);   // skip dumping (and rendering) before this frame
+    if (getenv("TTPC_FRAME_BURST")) sscanf(getenv("TTPC_FRAME_BURST"), "%llu:%llu", (unsigned long long *)&g_burst_period, (unsigned long long *)&g_burst_len);
     g_render = g_dump_dir != NULL || g_window_open;   // rasterize only when frames are being looked at
 }
 
@@ -842,7 +849,7 @@ static void efb_copy(u32 v) {
         capture_frame_end();
         g_copies++;
         perf_title();
-        if (g_render && g_copies % g_dump_every == 0) dump_frame();
+        if (g_render && dump_wanted(g_copies)) dump_frame();
         if (getenv("TTPC_TEXLOG") && g_copies % 300 == 0) {
             fprintf(stderr, "[tex] frame %llu: %llu decodes, %.1f Mpixels decoded, %.1f MB hashed per frame (last 300 frames)\n", (unsigned long long)g_copies,
                     (unsigned long long)g_st_decodes, g_st_decoded_px / 1e6, g_st_hashed / 300.0 / 1e6);
@@ -864,7 +871,7 @@ static void efb_copy(u32 v) {
         u64 now = host_now_ns();
         int skip = !g_gpu && g_window_open && !skipped && last && now - last > 18000000ull && !getenv("TTPC_NOSKIP");
         skipped = skip; last = now;
-        g_render = g_gpu || (g_window_open && !skip) || (g_dump_dir && ((g_copies + 1) % g_dump_every == 0));
+        g_render = g_gpu || (g_window_open && !skip) || (g_dump_dir && dump_wanted(g_copies + 1));
     }
     if (clear) {
         u32 ar = bp[0x4F], gb = bp[0x50];

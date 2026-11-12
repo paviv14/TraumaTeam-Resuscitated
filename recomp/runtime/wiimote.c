@@ -126,6 +126,9 @@ void wiimote_frame(void) {
     if (in->push) h |= PUSH_FLAG;
     if (in->pull) h |= PULL_FLAG;
     if (in->swing) h |= SWING_FLAG;
+    { static u64 script_end; static int got;   // while a TTPC_INPUT script is still driving a menu (e.g. --mission), ignore the real controls
+      if (!got) { got = 1; for (int k = 0; k < g_nscript; k++) if (g_script[k].from + g_script[k].len > script_end) script_end = g_script[k].from + g_script[k].len; }
+      if (g_reads < script_end + 30) h = 0; }
     g_host_hold = h;
     g_ppx = g_px; g_ppy = g_py;
     if (g_window_open && !getenv("TTPC_POINTER")) {
