@@ -421,7 +421,12 @@ static int laser_target(const Ray *r, float *gx, float *gy, float *dist) {
         for (int k = 0; k < g_nui[last] && !in; k++) { Rect R = g_ui[last][k]; in = x >= R.x0 - 4 && x <= R.x1 + 4 && y >= R.y0 - 4 && y <= R.y1 + 4; }
         if (!in) hit2 = 0;
     }
-    float dr = 1e9f, dd = 1e9f;
+    float dr = 1e9f, dd = 1e9f, dm = 1e9f; int hm = 0;
+    if (g_office_now && g_obj_ok[3]) {   // the desk mouse stands for the computer: pointing at it = pointing at the PC
+        float mn[3], mx[3]; for (int c = 0; c < 3; c++) { float o = c == 0 ? g_mouse_off[0] : c == 2 ? g_mouse_off[1] : 0; mn[c] = g_obj_min[3][c] + o; mx[c] = g_obj_max[3][c] + o; }
+        hm = ray_box(r, mn, mx, 0.035f, &dm);
+    }
+    if (hm && (!hit1 || dm < d1)) { office_spot(HS_PC, gx, gy); *dist = dm; g_last_kind = 5; return 1; }
     int hr = g_office_now && g_obj_ok[0] && ray_box(r, g_obj_min[0], g_obj_max[0], 0.03f, &dr);
     int hd = g_office_now && g_obj_ok[1] && ray_box(r, g_obj_min[1], g_obj_max[1], 0.02f, &dd);
     g_last_kind = 0;
@@ -558,7 +563,7 @@ static int preview_frame(void) {
         float mc[3]; for (int c = 0; c < 3; c++) mc[c] = (g_obj_min[3][c] + g_obj_max[3][c]) / 2;
         float ddx = px_ - (mc[0] + g_mouse_off[0]), ddz = pz_ - (mc[2] + g_mouse_off[1]);
         if (k[SDL_SCANCODE_T] || ddx * ddx + ddz * ddz > 1.1f * 1.1f) { g_mouse_held = -1; fprintf(stderr, "[vr] let go of the mouse\n"); }
-    } else if ((mb & SDL_BUTTON_LMASK) && !lmb_prev && g_obj_ok[3] && g_head_ok) {   // click on the desk mouse: take it
+    } else if (0) {
         Ray er; float el[3] = { 0, 0, 0 }, fl[3] = { 0, 0, -1 }; m4_point(g_head, el, er.o); m4_dir(g_head, fl, er.d); er.valid = 1;
         float mn[3], mx[3], d; for (int c = 0; c < 3; c++) { mn[c] = g_obj_min[3][c] + (c == 0 ? g_mouse_off[0] : c == 2 ? g_mouse_off[1] : 0); mx[c] = g_obj_max[3][c] + (c == 0 ? g_mouse_off[0] : c == 2 ? g_mouse_off[1] : 0); }
         if (ray_box(&er, mn, mx, 0.03f, &d) && d < 1.5f) { g_mouse_held = 2; fprintf(stderr, "[vr] took the mouse (T lets go)\n"); }
@@ -740,8 +745,7 @@ static void xr_input(XrTime t) {
             float d2 = (hp[0] - mc[0]) * (hp[0] - mc[0]) + (hp[1] - mc[1]) * (hp[1] - mc[1]) + (hp[2] - mc[2]) * (hp[2] - mc[2]);
             if (g_mouse_held < 0 && g_gripb[h] && d2 < 0.12f * 0.12f) { g_mouse_held = h; memcpy(g_mouse_grab, hp, 12); memcpy(g_mouse_grab_off, g_mouse_off, 8); }
             if (g_mouse_held == h) {
-                if (!g_gripb[h]) g_mouse_held = -1;
-                else { g_mouse_off[0] = g_mouse_grab_off[0] + hp[0] - g_mouse_grab[0]; g_mouse_off[1] = g_mouse_grab_off[1] + hp[2] - g_mouse_grab[2]; }
+                { g_mouse_off[0] = g_mouse_grab_off[0] + hp[0] - g_mouse_grab[0]; g_mouse_off[1] = g_mouse_grab_off[1] + hp[2] - g_mouse_grab[2]; }
                 if (g_mouse_off[0] < -0.12f) g_mouse_off[0] = -0.12f; if (g_mouse_off[0] > 0.12f) g_mouse_off[0] = 0.12f;
                 if (g_mouse_off[1] < -0.16f) g_mouse_off[1] = -0.16f; if (g_mouse_off[1] > 0.16f) g_mouse_off[1] = 0.16f;
             }
@@ -912,11 +916,20 @@ void vr_input(Input *in) {
     float px, py, dist;
     int what = laser_target(&g_ray, &px, &py, &dist);
     if (g_mouse_held == 2) in->rmb = 0;   // desktop mode: right mouse is for looking around while you hold the desk mouse
-    if (g_mouse_held >= 0 && (g_desk_now || g_office_now)) {   // the held desk mouse is the computer's pointer
-        if (g_desk_now) { px = 0.5f - g_mouse_off[1] / 0.32f * 1.0f; py = DESK_Y0 + (0.5f + g_mouse_off[0] / 0.24f) * (DESK_Y1 - DESK_Y0);
-                          px = px < 0 ? 0 : px > 1 ? 1 : px; }
-        else office_spot(HS_PC, &px, &py);   // in the office: using the mouse wakes the computer
-        what = 1; g_last_kind = 1;
+    {   static int desk_prev;
+        if (desk_prev && !g_desk_now && g_mouse_held >= 0) { g_mouse_held = -1; fprintf(stderr, "[vr] computer closed: let go of the mouse\n"); }
+        desk_prev = g_desk_now; }
+    if (g_mouse_held < 0 && g_desk_now) {   // the computer came up some other way: your hand goes to the mouse
+#ifdef TTPC_OPENXR
+        g_mouse_held = g_preview ? 2 : g_point_hand;
+        if (g_mouse_held < 2 && g_hand_ok[g_mouse_held]) { g_mouse_grab[0] = g_hand[g_mouse_held].m[12]; g_mouse_grab[1] = g_hand[g_mouse_held].m[13]; g_mouse_grab[2] = g_hand[g_mouse_held].m[14]; memcpy(g_mouse_grab_off, g_mouse_off, 8); }
+#else
+        g_mouse_held = 2;
+#endif
+    }
+    if (g_mouse_held >= 0 && g_desk_now) {   // the held desk mouse is the computer's pointer
+        px = 0.5f - g_mouse_off[1] / 0.32f; py = DESK_Y0 + (0.5f + g_mouse_off[0] / 0.24f) * (DESK_Y1 - DESK_Y0);
+        px = px < 0 ? 0 : px > 1 ? 1 : px; what = 1; g_last_kind = 1;
     }
 #ifdef TTPC_OPENXR
     if (!g_preview && panel_on() && g_pan_placed) for (int h = 0; h < 2; h++) if (g_hand_ok[h]) {   // touch the pane with a controller
@@ -932,6 +945,15 @@ void vr_input(Input *in) {
     if (what) { in->mouse_x = px; in->mouse_y = py; in->mouse_in = 1; }
     { static int prev; int down = in->lmb || in->a;
       if (down && !prev && g_last_kind == 4 && g_office_now) g_door_req = 1;   // the door: if the game lets you go, it opens
+      if (down && !prev && g_last_kind == 5 && g_office_now && g_mouse_held < 0) {   // using the mouse turns the computer on; you keep hold of it
+#ifdef TTPC_OPENXR
+          g_mouse_held = g_preview ? 2 : g_point_hand;
+#else
+          g_mouse_held = 2;
+#endif
+          if (g_mouse_held < 2 && g_hand_ok[g_mouse_held]) { g_mouse_grab[0] = g_hand[g_mouse_held].m[12]; g_mouse_grab[1] = g_hand[g_mouse_held].m[13]; g_mouse_grab[2] = g_hand[g_mouse_held].m[14]; memcpy(g_mouse_grab_off, g_mouse_off, 8); }
+          fprintf(stderr, "[vr] took the mouse: computer on\n");
+      }
       if (down && !prev) fprintf(stderr, "[vr] click: %s at %.3f %.3f (office %d desktop %d)\n", what == 2 ? "pane" : what == 1 ? "room object/monitor" : "nothing", px, py, g_office_now, g_desk_now);
       prev = down; }
     if (what) {}
