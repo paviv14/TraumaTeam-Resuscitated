@@ -518,6 +518,7 @@ static void setup_draw(void) {
         S.tex[m].px = NULL; S.tex[m].e = NULL; S.tex[m].gl_copy = 0;
         if (!used[m]) continue;
         Tex t; get_tex(m, &t);
+        if (t.w == 648 && t.h == 440) g_vr_desk_seen = 1;   // Little Guy's desktop wallpaper (VR: the monitor shows the desktop)
         if (g_gpu && (S.tex[m].gl_copy = gpu_copy_lookup(t.addr, t.w, t.h))) {   // render target kept on the GPU
             int b = m < 4 ? 0 : 0x20, mm = m & 3; u32 mode0 = bp[0x80 + b + mm];
             S.tex[m].w = t.w; S.tex[m].h = t.h; S.tex[m].ws = t.wrap_s; S.tex[m].wt = t.wrap_t; S.tex[m].linear = (mode0 >> 4) & 1;

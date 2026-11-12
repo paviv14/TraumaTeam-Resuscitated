@@ -767,7 +767,7 @@ void gpu_present(int x0, int y0, int w, int h) {
     glDisable_(GL_SCISSOR_TEST);
     glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_fbo); glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, g_last_fbo);
     glBlitFramebuffer_(ex0 * g_scale, (528 - y0 - h) * g_scale, ex1 * g_scale, (528 - y0) * g_scale, 0, 0, lw, lh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-    if (!vr_frame(g_last_tex, lw, lh)) {   // VR draws the headset (and, in preview, the window) from the picture
+    if (!vr_frame(g_last_tex, lw, lh, (float)(g_M - (ex0 - 0)) / (ex1 - ex0), (float)(g_M + 640 - ex0) / (ex1 - ex0))) {   // VR draws the headset (and, in preview, the window) from the picture
     glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_last_fbo);
     glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, 0);
     glClearColor_(0, 0, 0, 1); glColorMask_(1, 1, 1, 1); glClear_(GL_COLOR_BUFFER_BIT);

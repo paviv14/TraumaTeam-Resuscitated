@@ -53,14 +53,14 @@
     X(void, GenTextures, (GLsizei, GLuint *)) X(void, BindTexture, (GLenum, GLuint)) X(void, ActiveTexture, (GLenum)) \
     X(void, TexImage2D, (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *)) X(void, TexParameteri, (GLenum, GLenum, GLint)) \
     X(void, GenerateMipmap, (GLenum)) X(void, PixelStorei, (GLenum, GLint)) \
-    X(void, GenFramebuffers, (GLsizei, GLuint *)) X(void, BindFramebuffer, (GLenum, GLuint)) X(void, FramebufferTexture2D, (GLenum, GLenum, GLenum, GLuint, GLint)) \
+    X(void, GenFramebuffers, (GLsizei, GLuint *)) X(void, DeleteFramebuffers, (GLsizei, const GLuint *)) X(void, BindFramebuffer, (GLenum, GLuint)) X(void, FramebufferTexture2D, (GLenum, GLenum, GLenum, GLuint, GLint)) \
     X(void, GenRenderbuffers, (GLsizei, GLuint *)) X(void, BindRenderbuffer, (GLenum, GLuint)) X(void, RenderbufferStorage, (GLenum, GLenum, GLsizei, GLsizei)) \
     X(void, FramebufferRenderbuffer, (GLenum, GLenum, GLenum, GLuint)) X(void, BlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum)) \
     X(GLuint, CreateShader, (GLenum)) X(void, ShaderSource, (GLuint, GLsizei, const GLchar *const *, const GLint *)) X(void, CompileShader, (GLuint)) \
     X(void, GetShaderiv, (GLuint, GLenum, GLint *)) X(void, GetShaderInfoLog, (GLuint, GLsizei, GLsizei *, GLchar *)) X(GLuint, CreateProgram, (void)) \
     X(void, AttachShader, (GLuint, GLuint)) X(void, LinkProgram, (GLuint)) X(void, UseProgram, (GLuint)) X(GLint, GetUniformLocation, (GLuint, const GLchar *)) \
     X(void, BindAttribLocation, (GLuint, GLuint, const GLchar *)) \
-    X(void, Uniform1i, (GLint, GLint)) X(void, Uniform1f, (GLint, GLfloat)) X(void, Uniform2f, (GLint, GLfloat, GLfloat)) X(void, Uniform4fv, (GLint, GLsizei, const GLfloat *)) \
+    X(void, Uniform1i, (GLint, GLint)) X(void, Uniform1f, (GLint, GLfloat)) X(void, Uniform2f, (GLint, GLfloat, GLfloat)) X(void, Uniform4f, (GLint, GLfloat, GLfloat, GLfloat, GLfloat)) X(void, Uniform4fv, (GLint, GLsizei, const GLfloat *)) \
     X(void, Uniform3fv, (GLint, GLsizei, const GLfloat *)) X(void, UniformMatrix4fv, (GLint, GLsizei, GLboolean, const GLfloat *)) \
     X(void, GenVertexArrays, (GLsizei, GLuint *)) X(void, BindVertexArray, (GLuint)) X(void, GenBuffers, (GLsizei, GLuint *)) X(void, BindBuffer, (GLenum, GLuint)) \
     X(void, BufferData, (GLenum, GLsizeiptr, const void *, GLenum)) X(void, VertexAttribPointer, (GLuint, GLint, GLenum, GLboolean, GLsizei, const void *)) \
@@ -108,9 +108,22 @@ typedef struct { GLuint vao; int n; int mat; } Prim;
 static Mat *g_mat; static int g_nmat;
 static Prim *g_prim; static int g_nprim;
 static GLuint g_white, g_prog, g_lineprog, g_linevao, g_linevbo;
-static GLint u_mvp, u_base, u_emis, u_tex, u_etex, u_cut, u_screen, u_scr_k, u_line_mvp, u_line_col;
+static GLint u_mvp, u_base, u_emis, u_tex, u_etex, u_cut, u_screen, u_scr_k, u_crop, u_line_mvp, u_line_col;
 static float g_scr_o[3], g_scr_u[3], g_scr_v[3];   // screen: top-left corner, right edge, down edge (world)
 static int g_have_screen;
+// What shows where. The monitor always shows Little Guy's desktop: the last frame in which the game drew the
+// desktop wallpaper (a 648x440 texture) is kept and shown there. Everything else the game draws (the office
+// scene, dialogue, the morgue...) goes on a panel on the wall above the desk, for now.
+int g_vr_desk_seen;                       // set by video.c when the desktop wallpaper is drawn this frame
+static int g_desk_now, g_desk_have, g_desk_hold;
+static GLuint g_desk_tex, g_desk_fbo; static int g_desk_w, g_desk_h;
+static float g_x0f = 0, g_x1f = 1;         // the game's own 640 columns within the picture (ultrawide sides excluded)
+#define DESK_Y0 (22.f / 480) 
+#define DESK_Y1 (462.f / 480)
+static const float g_pan_o[3] = { -2.97f, 2.38f, -0.97f }, g_pan_u[3] = { 0, 0, -1.12f }, g_pan_v[3] = { 0, -0.84f, 0 };   // wall panel (4:3)
+static GLuint g_pan_vao;
+static float desk_aspect(void); static int panel_on(void);
+static const float PAINTED_PC[2] = { 0.22f, 0.35f };   // where the computer is in the game's office picture (click = open it)
 static int g_active, g_preview;
 static M4 g_world_from_stage;   // where the play area sits in the room
 static float g_seat[3] = { -0.55f, 0.0f, -1.62f };   // Naomi's chair (glTF frame), facing -x (the desk)
@@ -209,12 +222,13 @@ static const char *VS =
 static const char *FS =
     "#version 330 core\n"
     "in vec2 vT; in vec4 vC; uniform vec4 uBase; uniform vec3 uEmis; uniform sampler2D uTex, uETex; uniform float uCut;\n"
-    "uniform int uScreen; uniform vec2 uScrK; out vec4 o;\n"
+    "uniform int uScreen; uniform vec2 uScrK; uniform vec4 uCrop; out vec4 o;\n"
     "void main() {\n"
     "  if (uScreen == 1) {   // the game picture, letterboxed to keep its shape; it holds sRGB values -> linear\n"
     "    vec2 t = (vT - 0.5) * uScrK + 0.5;\n"
     "    if (t.x < 0.0 || t.x > 1.0 || t.y < 0.0 || t.y > 1.0) { o = vec4(0.0, 0.0, 0.0, 1.0); return; }\n"
-    "    vec3 c = texture(uTex, vec2(t.x, 1.0 - t.y)).rgb; o = vec4(pow(c, vec3(2.2)), 1.0); return; }\n"
+    "    vec2 s = vec2(mix(uCrop.x, uCrop.z, t.x), 1.0 - mix(uCrop.y, uCrop.w, t.y));\n"
+    "    vec3 c = texture(uTex, s).rgb; o = vec4(pow(c, vec3(2.2)), 1.0); return; }\n"
     "  vec4 b = uBase * texture(uTex, vT); if (b.a < uCut) discard;\n"
     "  vec3 c = b.rgb * vC.rgb * 2.0 + uEmis * texture(uETex, vT).rgb;   // baked light was stored at half range\n"
     "  o = vec4(c, 1.0);\n"
@@ -256,19 +270,26 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
     // keep the game's shape on the screen: shrink the longer side of the screen's UV range
     float sw = sqrtf(g_scr_u[0] * g_scr_u[0] + g_scr_u[1] * g_scr_u[1] + g_scr_u[2] * g_scr_u[2]);
     float sh = sqrtf(g_scr_v[0] * g_scr_v[0] + g_scr_v[1] * g_scr_v[1] + g_scr_v[2] * g_scr_v[2]);
-    float qa = sh > 0 ? sw / sh : 1, ga = gh > 0 ? (float)gw / gh : 4.f / 3;
+    float qa = sh > 0 ? sw / sh : 1, ga = desk_aspect();
     float kx = qa > ga ? qa / ga : 1, ky = qa > ga ? 1 : ga / qa;
-    vUniform2f(u_scr_k, kx, ky);
+    vUniform2f(u_scr_k, kx, ky); vUniform4f(u_crop, g_x0f, DESK_Y0, g_x1f, DESK_Y1);
     for (int i = 0; i < g_nprim; i++) {
         Prim *p = &g_prim[i]; Mat *m = p->mat < g_nmat ? &g_mat[p->mat] : NULL;
         static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 };
         vActiveTexture(GL_TEXTURE1); vBindTexture(GL_TEXTURE_2D, m && m->etex ? m->etex : g_white);
         vActiveTexture(GL_TEXTURE0);
-        if (m && m->screen && game_tex) { vBindTexture(GL_TEXTURE_2D, game_tex); vUniform1i(u_screen, 1); }
+        if (m && m->screen) { vBindTexture(GL_TEXTURE_2D, g_desk_have ? g_desk_tex : g_white); vUniform1i(u_screen, g_desk_have ? 1 : 0);
+                              if (!g_desk_have) { static const float off[4] = { 0.01f, 0.012f, 0.015f, 1 }; vUniform4fv(u_base, 1, off); vUniform3fv(u_emis, 1, zero); vUniform1f(u_cut, -1.f); vBindVertexArray(p->vao); vDrawElements(GL_TRIANGLES, p->n, GL_UNSIGNED_INT, 0); continue; } }
         else { vBindTexture(GL_TEXTURE_2D, m && m->tex ? m->tex : g_white); vUniform1i(u_screen, 0); }
         vUniform4fv(u_base, 1, m ? m->base : one); vUniform3fv(u_emis, 1, m ? m->emis : zero);
         vUniform1f(u_cut, m && m->mask ? m->cutoff : -1.f);
         vBindVertexArray(p->vao); vDrawElements(GL_TRIANGLES, p->n, GL_UNSIGNED_INT, 0);
+    }
+    if (panel_on() && game_tex) {   // the rest of the game, on the wall panel
+        static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 };
+        vActiveTexture(GL_TEXTURE0); vBindTexture(GL_TEXTURE_2D, game_tex); vUniform1i(u_screen, 1);
+        vUniform2f(u_scr_k, 1, 1); vUniform4f(u_crop, g_x0f, 0, g_x1f, 1); vUniform4fv(u_base, 1, one); vUniform3fv(u_emis, 1, zero);
+        vBindVertexArray(g_pan_vao); vDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     }
     vBindVertexArray(g_linevao); vUseProgram(g_lineprog);
     vEnableVertexAttribArray(0);
@@ -298,8 +319,41 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
     vBindVertexArray(0);
 }
 
+static float len3(const float *a) { return sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]); }
+// where a ray meets a quad (o + u*s + v*t), as 0..1 across content of aspect `ca` letterboxed into it
+static int ray_quad(const float *O, const float *U, const float *V, float ca, const Ray *r, float *px, float *py, float *dist) {
+    if (!r->valid) return 0;
+    float n[3] = { U[1] * V[2] - U[2] * V[1], U[2] * V[0] - U[0] * V[2], U[0] * V[1] - U[1] * V[0] };
+    float dn = n[0] * r->d[0] + n[1] * r->d[1] + n[2] * r->d[2]; if (fabsf(dn) < 1e-6f) return 0;
+    float w[3] = { O[0] - r->o[0], O[1] - r->o[1], O[2] - r->o[2] };
+    float t = (n[0] * w[0] + n[1] * w[1] + n[2] * w[2]) / dn; if (t <= 0) return 0;
+    float h[3] = { r->o[0] + r->d[0] * t - O[0], r->o[1] + r->d[1] * t - O[1], r->o[2] + r->d[2] * t - O[2] };
+    float uu = (h[0] * U[0] + h[1] * U[1] + h[2] * U[2]) / (U[0] * U[0] + U[1] * U[1] + U[2] * U[2]);
+    float vv = (h[0] * V[0] + h[1] * V[1] + h[2] * V[2]) / (V[0] * V[0] + V[1] * V[1] + V[2] * V[2]);
+    if (uu < -0.02f || uu > 1.02f || vv < -0.02f || vv > 1.02f) return 0;
+    float qa = len3(U) / len3(V), kx = qa > ca ? qa / ca : 1, ky = qa > ca ? 1 : ca / qa;
+    *px = (uu - 0.5f) * kx + 0.5f; *py = (vv - 0.5f) * ky + 0.5f; *dist = t; return 1;
+}
+static float desk_aspect(void) { return (4.f / 3) * (DESK_Y1 - DESK_Y0 > 0 ? 1.f / (DESK_Y1 - DESK_Y0) : 1); }
+static int panel_on(void) { return !g_desk_now; }
+// what the laser is on: 0 nothing, 1 monitor, 2 panel; px/py = 0..1 across the game's picture (for the pointer)
+static int laser_target(const Ray *r, float *gx, float *gy, float *dist) {
+    float px, py, d1 = 1e9f, d2 = 1e9f, ax = 0, ay = 0, bx = 0, by = 0; int hit1 = 0, hit2 = 0;
+    if (g_have_screen) hit1 = ray_quad(g_scr_o, g_scr_u, g_scr_v, desk_aspect(), r, &ax, &ay, &d1);
+    if (panel_on()) hit2 = ray_quad(g_pan_o, g_pan_u, g_pan_v, 4.f / 3, r, &bx, &by, &d2);
+    if (hit1 && (!hit2 || d1 < d2)) {
+        if (g_desk_now) { *gx = ax; *gy = DESK_Y0 + ay * (DESK_Y1 - DESK_Y0); }
+        else { *gx = PAINTED_PC[0]; *gy = PAINTED_PC[1]; }   // the office scene is up: point at the painted computer
+        *dist = d1; return 1;
+    }
+    if (hit2) { *gx = bx; *gy = by; *dist = d2; return 2; }
+    (void)px; (void)py; return 0;
+}
 // pointer: where the laser meets the screen (0..1 across the game picture), honouring the letterbox
 static int ray_screen(const Ray *r, int gw, int gh, float *px, float *py, float *dist) {
+    (void)gw; (void)gh; return laser_target(r, px, py, dist) != 0;
+}
+static int ray_screen_old(const Ray *r, int gw, int gh, float *px, float *py, float *dist) {
     if (!g_have_screen || !r->valid) return 0;
     float n[3] = { g_scr_u[1] * g_scr_v[2] - g_scr_u[2] * g_scr_v[1], g_scr_u[2] * g_scr_v[0] - g_scr_u[0] * g_scr_v[2], g_scr_u[0] * g_scr_v[1] - g_scr_u[1] * g_scr_v[0] };
     float dn = n[0] * r->d[0] + n[1] * r->d[1] + n[2] * r->d[2]; if (fabsf(dn) < 1e-6f) return 0;
@@ -321,12 +375,24 @@ static int common_init(void) {
     g_prog = build(VS, FS); g_lineprog = build(LVS, LFS);
     u_mvp = vGetUniformLocation(g_prog, "uMVP"); u_base = vGetUniformLocation(g_prog, "uBase"); u_emis = vGetUniformLocation(g_prog, "uEmis");
     u_tex = vGetUniformLocation(g_prog, "uTex"); u_etex = vGetUniformLocation(g_prog, "uETex"); u_cut = vGetUniformLocation(g_prog, "uCut");
-    u_screen = vGetUniformLocation(g_prog, "uScreen"); u_scr_k = vGetUniformLocation(g_prog, "uScrK");
+    u_screen = vGetUniformLocation(g_prog, "uScreen"); u_scr_k = vGetUniformLocation(g_prog, "uScrK"); u_crop = vGetUniformLocation(g_prog, "uCrop");
     u_line_mvp = vGetUniformLocation(g_lineprog, "uMVP"); u_line_col = vGetUniformLocation(g_lineprog, "uCol");
     vGenVertexArrays(1, &g_linevao); vGenBuffers(1, &g_linevbo);
     static const u8 white[4] = { 255, 255, 255, 255 };
     vGenTextures(1, &g_white); vBindTexture(GL_TEXTURE_2D, g_white); vTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
     vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    {   // wall panel quad: pos, uv, colour
+        float q[4][9]; for (int i = 0; i < 4; i++) {
+            float su = (i == 1 || i == 2), sv = (i >= 2);
+            for (int c = 0; c < 3; c++) q[i][c] = g_pan_o[c] + g_pan_u[c] * su + g_pan_v[c] * sv;
+            q[i][3] = su; q[i][4] = sv; q[i][5] = q[i][6] = q[i][7] = q[i][8] = 1; }
+        GLuint b; vGenVertexArrays(1, &g_pan_vao); vBindVertexArray(g_pan_vao); vGenBuffers(1, &b); vBindBuffer(GL_ARRAY_BUFFER, b);
+        vBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STATIC_DRAW);
+        vEnableVertexAttribArray(0); vVertexAttribPointer(0, 3, GL_FLOAT, 0, 36, (void *)0);
+        vEnableVertexAttribArray(1); vVertexAttribPointer(1, 2, GL_FLOAT, 0, 36, (void *)12);
+        vEnableVertexAttribArray(2); vVertexAttribPointer(2, 4, GL_FLOAT, 0, 36, (void *)20);
+        vBindVertexArray(0);
+    }
     const char *room = getenv("TTPC_VR_SCENE"); if (!room || !*room) room = "vr/naomi_office.glb";
     if (!load_room(room)) return 0;
     g_world_from_stage = m4_yaw(g_turn, g_seat[0], g_seat[1], g_seat[2]);
@@ -631,10 +697,28 @@ void vr_init(void) {
 }
 
 // After the game frame is in game_tex (w x h). Returns 1 if the desktop window was drawn by VR (preview).
-int vr_frame(unsigned game_tex, int w, int h) {
-    if (!g_active) return 0;
-    g_game_tex = game_tex; g_gw = w; g_gh = h;
+int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
+    if (!g_active) { g_vr_desk_seen = 0; return 0; }
+    g_game_tex = game_tex; g_gw = w; g_gh = h; g_x0f = x0f; g_x1f = x1f;
+    // desktop up? (seen this frame, or within the last few: some frames skip the wallpaper during fades)
+    if (g_vr_desk_seen) g_desk_hold = 4; else if (g_desk_hold > 0) g_desk_hold--;
+    g_desk_now = g_desk_hold > 0; int fresh = g_vr_desk_seen; g_vr_desk_seen = 0;
     gl_chk("enter"); GLSave s; gl_save(&s); gl_chk("save"); int drew = 0;
+    if (fresh) {   // keep this desktop frame for the monitor
+        if (w != g_desk_w || h != g_desk_h) {
+            if (!g_desk_fbo) { vGenFramebuffers(1, &g_desk_fbo); vGenTextures(1, &g_desk_tex); }
+            vBindTexture(GL_TEXTURE_2D, g_desk_tex); vTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            vBindFramebuffer(GL_FRAMEBUFFER, g_desk_fbo); vFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_desk_tex, 0);
+            g_desk_w = w; g_desk_h = h;
+        }
+        GLuint src; vGenFramebuffers(1, &src); vBindFramebuffer(0x8CA8, src); vFramebufferTexture2D(0x8CA8, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, game_tex, 0);
+        vBindFramebuffer(0x8CA9, g_desk_fbo); vDisable(GL_SCISSOR_TEST); vDisable(GL_FRAMEBUFFER_SRGB);
+        vBlitFramebuffer(0, 0, w, h, 0, 0, w, h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        vBindFramebuffer(0x8CA8, 0); vDeleteFramebuffers(1, &src);
+        if (!g_desk_have) fprintf(stderr, "[vr] Little Guy's desktop seen: it stays on the monitor now\n");
+        g_desk_have = 1;
+    }
     if (g_preview) drew = preview_frame();
 #ifdef TTPC_OPENXR
     else xr_frame();
@@ -664,6 +748,7 @@ void vr_input(Input *in) {
 int vr_wanted(void) { return 0; }
 int vr_active(void) { return 0; }
 void vr_init(void) {}
-int vr_frame(unsigned t, int w, int h) { (void)t; (void)w; (void)h; return 0; }
+int vr_frame(unsigned t, int w, int h, float a, float b) { (void)t; (void)w; (void)h; (void)a; (void)b; return 0; }
+int g_vr_desk_seen;
 void vr_input(Input *in) { (void)in; }
 #endif

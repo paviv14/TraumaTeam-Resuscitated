@@ -18,7 +18,8 @@ extern Input g_input;
 int vr_wanted(void);
 int vr_active(void);
 void vr_init(void);
-int vr_frame(unsigned game_tex, int w, int h);
+int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f);
+extern int g_vr_desk_seen;
 void vr_input(Input *in);
 
 // Settings (settings.ini, options menu in menu.c)
