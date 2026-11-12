@@ -599,12 +599,30 @@ static int tile_seen(u64 sig, int add) {   // returns last frame's count
         if (!g_tsig[g_tcur][j]) { g_tsig[g_tcur][j] = sig; g_tcnt[g_tcur][j] = 1; break; } }
     return r;
 }
+// VR: HUD pieces the room shows somewhere else (the LIMIT hearts) are drawn into their own layer, keyed like the frame
+static GLuint g_lay_fbo, g_lay_color, g_lay_last_fbo, g_lay_last; static int g_lay_w, g_lay_h, g_lay_lw, g_lay_lh, g_lay_used;
+static void lay_clear(void) {
+    glBindFramebuffer_(GL_FRAMEBUFFER, g_lay_fbo); glDisable_(GL_SCISSOR_TEST); glColorMask_(1, 1, 1, 1);
+    glClearColor_(1, 0, 1, 1); glClear_(GL_COLOR_BUFFER_BIT); glEnable_(GL_SCISSOR_TEST); glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo);
+}
+static void lay_ensure(void) {
+    if (g_lay_fbo && g_lay_w == g_W && g_lay_h == g_H) return;
+    if (!g_lay_fbo) { glGenFramebuffers_(1, &g_lay_fbo); glGenTextures_(1, &g_lay_color); }
+    glBindTexture_(GL_TEXTURE_2D, g_lay_color);
+    glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, g_W, g_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindFramebuffer_(GL_FRAMEBUFFER, g_lay_fbo);
+    glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_lay_color, 0);
+    glFramebufferRenderbuffer_(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, g_depth);
+    g_lay_w = g_W; g_lay_h = g_H; lay_clear();
+}
 static void tile_frame(void) { g_tcur ^= 1; memset(g_tsig[g_tcur], 0, sizeof g_tsig[0]); memset(g_tcnt[g_tcur], 0, sizeof g_tcnt[0]); }
 void gpu_draw(const Setup *s, const Out *v, int n) {
     static GV *buf; static int cap;
     if (n * 7 > cap) { free(buf); cap = n * 7 + 1024; buf = malloc(sizeof *buf * (size_t)cap); }
     float wd = s->vp[0], ht = s->vp[1], zr = s->vp[2], xo = s->vp[3] - 342.f, yo = s->vp[4] - 342.f, fz = s->vp[5];
-    if (vr_draw_skip(s, v, n, wd, ht, xo, yo)) return;
+    int vr_sk = vr_draw_skip(s, v, n, wd, ht, xo, yo); if (vr_sk == 1) return;
+    if (vr_sk == 2) lay_ensure();
     // ultrawide: 2D (w == 1 everywhere) spanning the game's whole width is stretched to the EFB's
     float xs = 1.f, xm = (float)g_M; int touch_l = 0, touch_r = 0; float tile_w = 0, edge_l = 0, edge_r = 0;
     if (g_M) {
@@ -668,13 +686,14 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
         }
         n = m;
     }
-    glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo);
+    glBindFramebuffer_(GL_FRAMEBUFFER, vr_sk == 2 && g_lay_fbo ? g_lay_fbo : g_fbo);
     glViewport_(0, 0, g_W, g_H);
     set_state(s);
     glBufferData_(GL_ARRAY_BUFFER, (GLsizeiptr)n * sizeof(GV), buf, GL_STREAM_DRAW);
     static int od = -1; static GLuint oq; if (od < 0) { od = getenv("TTPC_OVERDRAW") != NULL; if (od) glGenQueries_(1, &oq); }
     if (od) glBeginQuery_(0x8914 /* GL_SAMPLES_PASSED */, oq);
     glDrawArrays_(GL_TRIANGLES, 0, n);
+    if (vr_sk == 2) { glBindFramebuffer_(GL_FRAMEBUFFER, g_fbo); g_lay_used = 1; }
     if (od) { glEndQuery_(0x8914); GLint r = 0; glGetQueryObjectiv_(oq, 0x8866, &r);
         extern u64 g_pf_frags; g_pf_frags += (u64)r;
         if (getenv("TTPC_OVERDRAW")[0] == '2' && r > 50000 * g_scale * g_scale)
@@ -770,6 +789,20 @@ void gpu_present(int x0, int y0, int w, int h) {
     glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_fbo); glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, g_last_fbo);
     glBlitFramebuffer_(ex0 * g_scale, (528 - y0 - h) * g_scale, ex1 * g_scale, (528 - y0) * g_scale, 0, 0, lw, lh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
     g_vr_pic_y0 = y0; g_vr_pic_h = h;
+    if (g_lay_fbo && g_lay_used) {
+        if (!g_lay_last_fbo) { glGenFramebuffers_(1, &g_lay_last_fbo); glGenTextures_(1, &g_lay_last); }
+        if (lw != g_lay_lw || lh != g_lay_lh) {
+            glBindTexture_(GL_TEXTURE_2D, g_lay_last);
+            glTexImage2D_(GL_TEXTURE_2D, 0, GL_RGBA8, lw, lh, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); glTexParameteri_(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            glBindFramebuffer_(GL_FRAMEBUFFER, g_lay_last_fbo);
+            glFramebufferTexture2D_(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, g_lay_last, 0);
+            g_lay_lw = lw; g_lay_lh = lh;
+        }
+        glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_lay_fbo); glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, g_lay_last_fbo);
+        glBlitFramebuffer_(ex0 * g_scale, (528 - y0 - h) * g_scale, ex1 * g_scale, (528 - y0) * g_scale, 0, 0, lw, lh, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        vr_set_layer(g_lay_last); g_lay_used = 0; lay_clear(); glDisable_(GL_SCISSOR_TEST);
+    } else vr_set_layer(0);
     if (!vr_frame(g_last_tex, lw, lh, (float)(g_M - (ex0 - 0)) / (ex1 - ex0), (float)(g_M + 640 - ex0) / (ex1 - ex0))) {   // VR draws the headset (and, in preview, the window) from the picture
     glBindFramebuffer_(GL_READ_FRAMEBUFFER, g_last_fbo);
     glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, 0);

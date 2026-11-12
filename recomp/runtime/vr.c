@@ -109,7 +109,7 @@ typedef struct { GLuint vao; int n; int mat; int grp; } Prim;   // grp: 1 door, 
 static Mat *g_mat; static int g_nmat;
 static Prim *g_prim; static int g_nprim;
 static GLuint g_white, g_prog, g_lineprog, g_linevao, g_linevbo;
-static GLint u_mvp, u_base, u_emis, u_tex, u_etex, u_cut, u_screen, u_scr_k, u_crop, u_line_mvp, u_line_col;
+static GLint u_lit, u_mvp, u_base, u_emis, u_tex, u_etex, u_cut, u_screen, u_scr_k, u_crop, u_line_mvp, u_line_col;
 static float g_scr_o[3], g_scr_u[3], g_scr_v[3];   // screen: top-left corner, right edge, down edge (world)
 static int g_have_screen;
 // What shows where. The monitor always shows Little Guy's desktop: the last frame in which the game drew the
@@ -144,6 +144,7 @@ static const float HINGE[3] = { -0.8f, 0, -7.25f };
 static float g_mouse_off[2]; static int g_mouse_held = -1; static float g_mouse_grab[3], g_mouse_grab_off[2];
 static GLint u_model, u_hole;
 // the LIMIT hearts: their spot in the game's picture (pixels) and their plaque on the wall
+static unsigned g_lay_tex;   // gl.c's HUD layer this frame (the LIMIT hearts, keyed like the frame)
 static float HEARTS_PX[4] = { 44, 68, 256, 116 };   // measured each frame from the HUD draws in the top-left corner
 static float g_hr[4] = { 1e9f, 1e9f, -1e9f, -1e9f };
 static GLuint g_saver_tex;
@@ -260,7 +261,7 @@ static const char *VS =
     "void main() { gl_Position = uMVP * uModel * vec4(aP, 1.0); vT = aT; vC = aC; }\n";
 static const char *FS =
     "#version 330 core\n"
-    "in vec2 vT; in vec4 vC; uniform vec4 uBase; uniform vec3 uEmis; uniform sampler2D uTex, uETex; uniform float uCut;\n"
+    "in vec2 vT; in vec4 vC; uniform vec4 uBase; uniform vec3 uEmis; uniform sampler2D uTex, uETex; uniform vec3 uLit; uniform float uCut;\n"
     "uniform int uScreen; uniform vec2 uScrK; uniform vec4 uCrop; uniform vec4 uHole; out vec4 o;\n"
     "void main() {\n"
     "  if (uScreen == 2) {   // the game's interface over a magenta key (the office painting was left out)\n"
@@ -277,7 +278,7 @@ static const char *FS =
     "    vec2 s = vec2(mix(uCrop.x, uCrop.z, t.x), 1.0 - mix(uCrop.y, uCrop.w, t.y));\n"
     "    vec3 c = texture(uTex, s).rgb; o = vec4(pow(c, vec3(2.2)), 1.0); return; }\n"
     "  vec4 b = uBase * texture(uTex, vT); if (b.a < uCut) discard;\n"
-    "  vec3 c = b.rgb * vC.rgb * 2.0 + uEmis * texture(uETex, vT).rgb;   // baked light was stored at half range\n"
+    "  vec3 c = b.rgb * (uLit.x > 0.0 ? uLit : vC.rgb * 2.0) + uEmis * texture(uETex, vT).rgb;   // baked light was stored at half range\n"
     "  o = vec4(c, 1.0);\n"
     "}\n";
 static const char *LVS = "#version 330 core\nlayout(location=0) in vec3 aP; uniform mat4 uMVP; void main() { gl_Position = uMVP * vec4(aP, 1.0); }\n";
@@ -342,9 +343,11 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
         else { vBindTexture(GL_TEXTURE_2D, m && m->tex ? m->tex : g_white); vUniform1i(u_screen, 0); }
         vUniform4fv(u_base, 1, m ? m->base : one); vUniform3fv(u_emis, 1, m ? m->emis : zero);
         vUniform1f(u_cut, m && m->mask ? m->cutoff : -1.f);
+        { static const float lamp[3] = { 1.08f, 1.02f, 0.92f }, no[3] = { 0, 0, 0 }; vUniform3fv(u_lit, 1, m && m->name_paper ? lamp : no); }   // the report sits in the desk lamp's light
         vBindVertexArray(p->vao); vDrawElements(GL_TRIANGLES, p->n, GL_UNSIGNED_INT, 0);
     }
     vUniformMatrix4fv(u_model, 1, 0, ident.m); vUniform4f(u_hole, 2, 2, 2, 2);
+    { static const float no[3] = { 0, 0, 0 }; vUniform3fv(u_lit, 1, no); }
     if (g_door_t > 0.02f) {   // the void beyond the open door
         static const float black[4] = { 0, 0, 0, 1 }, zero3[3] = { 0, 0, 0 };
         float q[4][9] = { { -0.8f, 2.2f, -7.272f, 0, 0, 1, 1, 1, 1 }, { 0.2f, 2.2f, -7.272f, 1, 0, 1, 1, 1, 1 },
@@ -354,7 +357,8 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
         vUniform4fv(u_base, 1, black); vUniform3fv(u_emis, 1, zero3); vUniform1f(u_cut, -1.f);
         vBindVertexArray(g_pan_vao); vDrawArrays(GL_TRIANGLE_FAN, 0, 4);
     }
-    if (panel_on() && game_tex && g_pan_placed) {   // the pane: the game's interface (office) or the whole picture (elsewhere)
+    int wiimote_script_active(void);
+    if (panel_on() && game_tex && g_pan_placed && !wiimote_script_active()) {   // the pane (hidden while --mission drives the developer menu)
         static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 };
         float q[4][9]; for (int i = 0; i < 4; i++) {
             float su = (i == 1 || i == 2), sv = (i >= 2);
@@ -362,12 +366,13 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
             q[i][3] = su; q[i][4] = sv; q[i][5] = q[i][6] = q[i][7] = q[i][8] = 1; }
         vBindBuffer(GL_ARRAY_BUFFER, g_pan_vbo); vBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
         vActiveTexture(GL_TEXTURE0); vBindTexture(GL_TEXTURE_2D, game_tex); vUniform1i(u_screen, g_office_now ? 2 : 1);
-        { float hy = (float)g_vr_pic_h; vUniform4f(u_hole, HEARTS_PX[0] / 640.f, (HEARTS_PX[1] - g_vr_pic_y0) / hy, HEARTS_PX[2] / 640.f, (HEARTS_PX[3] - g_vr_pic_y0) / hy); }
+        vUniform4f(u_hole, 2, 2, 2, 2);
         if (g_office_now) { vEnable(GL_BLEND); vBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); vDepthMask(0); }
         vUniform2f(u_scr_k, 1, 1); vUniform4f(u_crop, g_x0f, 0, g_x1f, 1); vUniform4fv(u_base, 1, one); vUniform3fv(u_emis, 1, zero);
         vBindVertexArray(g_pan_vao); vDrawArrays(GL_TRIANGLE_FAN, 0, 4);
         vUniform4f(u_hole, 2, 2, 2, 2);
-        if (g_office_now) {   // the hearts plaque on the wall, left of the desk
+        if (g_office_now && g_lay_tex) {   // the hearts plaque on the wall, left of the desk (from the HUD layer)
+            vBindTexture(GL_TEXTURE_2D, g_lay_tex); vUniform1i(u_screen, 2);
             const float w = 0.75f, h = w * (HEARTS_PX[3] - HEARTS_PX[1]) / (HEARTS_PX[2] - HEARTS_PX[0]);
             float q[4][9] = { { -2.97f, 2.1f, -0.95f, 0, 0, 1, 1, 1, 1 }, { -2.97f, 2.1f, -0.95f - w, 1, 0, 1, 1, 1, 1 },
                               { -2.97f, 2.1f - h, -0.95f - w, 1, 1, 1, 1, 1, 1 }, { -2.97f, 2.1f - h, -0.95f, 0, 1, 1, 1, 1, 1 } };
@@ -524,7 +529,7 @@ static GLuint g_game_tex; static int g_gw = 640, g_gh = 480;
 static int common_init(void) {
     g_prog = build(VS, FS); g_lineprog = build(LVS, LFS);
     u_mvp = vGetUniformLocation(g_prog, "uMVP"); u_model = vGetUniformLocation(g_prog, "uModel"); u_hole = vGetUniformLocation(g_prog, "uHole"); u_base = vGetUniformLocation(g_prog, "uBase"); u_emis = vGetUniformLocation(g_prog, "uEmis");
-    u_tex = vGetUniformLocation(g_prog, "uTex"); u_etex = vGetUniformLocation(g_prog, "uETex"); u_cut = vGetUniformLocation(g_prog, "uCut");
+    u_tex = vGetUniformLocation(g_prog, "uTex"); u_etex = vGetUniformLocation(g_prog, "uETex"); u_cut = vGetUniformLocation(g_prog, "uCut"); u_lit = vGetUniformLocation(g_prog, "uLit");
     u_screen = vGetUniformLocation(g_prog, "uScreen"); u_scr_k = vGetUniformLocation(g_prog, "uScrK"); u_crop = vGetUniformLocation(g_prog, "uCrop");
     u_line_mvp = vGetUniformLocation(g_lineprog, "uMVP"); u_line_col = vGetUniformLocation(g_lineprog, "uCol");
     vGenVertexArrays(1, &g_linevao); vGenBuffers(1, &g_linevbo);
@@ -895,16 +900,20 @@ int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float 
         // over the office: the hotspot markers and the pointer are left out too (the room objects and the laser replace them)
         if (e && g_vr_office_seen && ((e->w == 56 && e->h == 56) || (e->w == 64 && e->h == 64))) return 1;
     }
-    int heart = 0;
-    for (int m = 0; m < 8; m++) { TexEntry *e = s->tex[m].e; if (e && e->w == 128 && e->h == 128 && ((e->addr & 0x1FFFFFFF) == 0x1111C6C0 || (e->addr & 0x1FFFFFFF) == 0x112B2BA0)) heart = 1; }
-    if (heart && g_vr_office_seen && mx > mn && ymx > ymn && mx < 300 && ymx < 150) {   // the LIMIT hearts (and their glow)
+    // the LIMIT label and hearts (top-left HUD): drawn into their own layer, which the wall plaque shows
+    int hud = 0;
+    if (getenv("TTPC_VR_HUDDBG") && g_vr_office_seen && mx < 320 && ymx < 140) for (int m = 0; m < 8; m++) { TexEntry *e = s->tex[m].e; if (e) fprintf(stderr, "[hud] %.0f,%.0f-%.0f,%.0f tex %08X %dx%d st %dx%d\n", mn, ymn, mx, ymx, e->addr, e->w, e->h, s->tex[m].w, s->tex[m].h); }
+    for (int m = 0; m < 8; m++) { TexEntry *e = s->tex[m].e; if (e && ((e->w == 72 && e->h == 64) || (e->w == 104 && e->h == 80))) hud = 1; }
+    if (hud && g_vr_office_seen && mx > mn && ymx > ymn && mx < 320 && ymx < 140) {
         if (mn < g_hr[0]) g_hr[0] = mn; if (ymn < g_hr[1]) g_hr[1] = ymn; if (mx > g_hr[2]) g_hr[2] = mx; if (ymx > g_hr[3]) g_hr[3] = ymx;
+        return 2;
     }
     if (g_vr_office_seen && g_nui[g_uicur] < 96 && mx > mn && ymx > ymn && mx - mn < 640)   // an interface piece: the pane takes the laser here
         g_ui[g_uicur][g_nui[g_uicur]++] = (Rect){ mn, ymn, mx, ymx };
     return 0;
 }
-int vr_key_frame(void) { return g_active && g_office_now; }   // gl.c: clear the frame to the key colour
+int vr_key_frame(void) { return g_active && g_office_now; }
+void vr_set_layer(unsigned tex) { g_lay_tex = tex; }   // gl.c: clear the frame to the key colour
 
 // ---------------------------------------------------------------- entry points (called from platform.c / gl.c)
 int vr_wanted(void) { const char *v = getenv("TTPC_VR"); return v && *v && *v != '0'; }
@@ -1066,6 +1075,7 @@ int vr_active(void) { return 0; }
 void vr_init(void) {}
 int vr_frame(unsigned t, int w, int h, float a, float b) { (void)t; (void)w; (void)h; (void)a; (void)b; return 0; }
 int g_vr_desk_seen, g_vr_office_seen; int g_vr_pic_y0, g_vr_pic_h; int g_vr_case; int g_vr_close_comp;
+void vr_set_layer(unsigned tex) { (void)tex; }
 int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float xo, float yo) { (void)s; (void)v; (void)n; (void)wd; (void)ht; (void)xo; (void)yo; return 0; }
 int vr_key_frame(void) { return 0; }
 void vr_input(Input *in) { (void)in; }

@@ -50,6 +50,8 @@ static u64 g_vi;
 
 typedef struct { u64 from, len; u32 mask; int stick, has_ptr; float px, py; float sx, sy; } ScriptEv;
 static ScriptEv g_script[4096]; static int g_nscript;
+static u64 script_end;
+int wiimote_script_active(void) { return g_nscript && g_reads < script_end + 30; }   // VR hides the scripted menu
 
 static u32 name_mask(const char *s, int n) {
     static const struct { const char *n; u32 m; } t[] = {
@@ -126,7 +128,7 @@ void wiimote_frame(void) {
     if (in->push) h |= PUSH_FLAG;
     if (in->pull) h |= PULL_FLAG;
     if (in->swing) h |= SWING_FLAG;
-    { static u64 script_end; static int got;   // while a TTPC_INPUT script is still driving a menu (e.g. --mission), ignore the real controls
+    { static int got;   // while a TTPC_INPUT script is still driving a menu (e.g. --mission), ignore the real controls
       if (!got) { got = 1; for (int k = 0; k < g_nscript; k++) if (g_script[k].from + g_script[k].len > script_end) script_end = g_script[k].from + g_script[k].len; }
       if (g_reads < script_end + 30) h = 0; }
     g_host_hold = h;

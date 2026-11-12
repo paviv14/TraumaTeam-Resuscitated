@@ -66,6 +66,16 @@ HLE(80007690, cadSequenceTask) {
     static long at = -2; static int at_seq;
     if (at == -2) { const char *e = getenv("TTPC_SEQ_AT"); at = -1; if (e) sscanf(e, "%ld:%d", &at, &at_seq); }   // read:seq (tests)
     if (at >= 0 && wiimote_reads() >= (u64)at) { g_dev_seq_request = at_seq; at = -1; }
+    {   // tests: log sequence changes; TTPC_MEMDUMP="read,read" writes RAM snapshots (mem_<read>.bin)
+        static int last = -99; int cur = (int)R32(c->r[13] - 32760u);
+        if (cur != last) { fprintf(stderr, "[seq] now %d (read %llu)\n", cur, (unsigned long long)wiimote_reads()); last = cur; }
+        static const char *md; static int mdi; if (!mdi) { mdi = 1; md = getenv("TTPC_MEMDUMP"); }
+        static unsigned done; int k = 0;
+        if (md) { const char *q = md; while (q && *q) { long r = atol(q); if ((long)wiimote_reads() >= r && !(done & (1u << k))) { done |= 1u << k;
+            char fn[64]; snprintf(fn, sizeof fn, "mem_%ld.bin", r); FILE *f = fopen(fn, "wb");
+            if (f) { extern u8 *g_mem; fwrite(g_mem, 1, 0x01800000, f); fclose(f); fprintf(stderr, "[seq] dumped %s\n", fn); } }
+            q = strchr(q, ','); if (q) q++; k++; } }
+    }
     int r = g_dev_seq_request;
     if (r >= 0) {
         g_dev_seq_request = -1;

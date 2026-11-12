@@ -337,8 +337,9 @@ static void mission_setup(const char *m) {
     if (mode < 0 || strlen(m) != 5 || sscanf(m + 2, "%1x%2x", &ch, &st) != 2) {
         fprintf(stderr, "[mission] '%s' is not a mission name (su110, em110, or110, en110, di110, au110...)\n", m); return;
     }
-    static char script[2048]; char *p = script; long t = 900;
-    #define PRESS(btn) do { p += sprintf(p, "%ld+6:%s;", t, btn); t += 40; } while (0)
+    static char script[2048]; char *p = script; long t = getenv("TTPC_MISSION_T0") ? atol(getenv("TTPC_MISSION_T0")) : 90;
+    long step = getenv("TTPC_MISSION_STEP") ? atol(getenv("TTPC_MISSION_STEP")) : 8;
+    #define PRESS(btn) do { p += sprintf(p, "%ld+%ld:%s;", t, step / 3 > 6 ? 6L : step / 3, btn); t += step; } while (0)
     PRESS("down");                                   /* difficulty -> mode */
     for (int k = 0; k < mode; k++) PRESS("right");
     PRESS("down"); for (unsigned k = 0; k < ch; k++) PRESS("right");
@@ -346,7 +347,7 @@ static void mission_setup(const char *m) {
     for (int k = 0; k < 5; k++) PRESS("down");       /* PLAY ALL, STORY TITLE, EVENT, CONFERENCE -> the gameplay part */
     PRESS("A");
     #undef PRESS
-    setenv_portable("TTPC_SEQ_AT", "600:32");
+    { char at[32]; snprintf(at, sizeof at, "%s:32", getenv("TTPC_MISSION_SEQ") ? getenv("TTPC_MISSION_SEQ") : "60"); setenv_portable("TTPC_SEQ_AT", at); }
     if (getenv("TTPC_INPUT_MORE")) { strcat(script, getenv("TTPC_INPUT_MORE")); }   /* tests: presses after the menu */
     setenv_portable("TTPC_INPUT", script);
     fprintf(stderr, "[mission] %s: stage select script %s\n", m, script);

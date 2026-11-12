@@ -101,9 +101,9 @@ static int read_host(u64 off, u32 len, u8 *buf) {
         pthread_mutex_unlock(&g_io);
         if (!h) { fprintf(stderr, "[disc] MISSING %s (needed by the game)\n", f->path); return 2; }
         if (got < n) memset(buf + got, 0, n - got);
-        {   // VR: which forensics case is loaded (autopsy/<lang>/<stage>/...) -> its autopsy report on the desk
+        {   // VR: which forensics case is loaded (autopsy/<lang>/<stage>/start.bf; other cases' card text gets read too) -> its autopsy report on the desk
             extern int g_vr_case; const char *q = strstr(f->path, "autopsy/");
-            if (q && (q[8] == 'e' || q[8] == 'j') && q[11] == '/' && q[12] >= '0' && q[12] <= '9' && q[15] == '/') { int c = atoi(q + 12); if (c > 0) g_vr_case = c; }
+            if (q && (q[8] == 'e' || q[8] == 'j') && q[11] == '/' && q[12] >= '0' && q[12] <= '9' && q[15] == '/' && !strcmp(q + 16, "start.bf")) { int c = atoi(q + 12); if (c > 0 && c != g_vr_case) { g_vr_case = c; fprintf(stderr, "[disc] case %d from %s\n", c, f->path); } }
         }
         if (g_log && !f->logged) { f->logged = 1; fprintf(stderr, "[disc] %s +%llX (%u bytes)\n", f->path, (unsigned long long)in, n); }
         off += n; len -= n; buf += n;
