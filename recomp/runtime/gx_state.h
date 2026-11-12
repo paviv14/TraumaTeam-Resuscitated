@@ -52,7 +52,12 @@ typedef struct {
     float im[6][4];               // 3 matrices x 2 rows: m0 m1 m2 (real values), scale exponent
     float cs[8][2];               // texcoord scale (texels) per texcoord, from BP 0x30-0x3F
 } Setup;
-int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float xo, float yo);   // vr.c: leave this draw out (the VR room replaces it)
+int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float xo, float yo);
+// VR: the forensics models (body / personal effects) are taken from the game's own draws: model-space vertices,
+// texture coordinates and where each vertex lands on the game's screen (640x528 frame).
+typedef struct { float pos[3], nrm[3], uv[2], sx, sy, w; } VrVert;
+int vr_track(const Setup *s);   // 0 body, 1 personal effects, -1 not tracked
+void vr_capture(int which, const Setup *s, int prim, int n, const VrVert *v, const float M[12]);   // vr.c: leave this draw out (the VR room replaces it)
 
 // GPU backend (gl.c). Coordinates are EFB pixels at 1x (640x528); the backend applies its scale.
 int  gpu_init(int scale);                       // after the window's GL context exists; 0 = unavailable

@@ -105,7 +105,15 @@ static void m4_dir(M4 a, const float p[3], float o[3]) { for (int i = 0; i < 3; 
 
 // ---------------------------------------------------------------- the room (glTF)
 typedef struct { float base[4], emis[3]; GLuint tex, etex; int blend, mask; float cutoff; int screen, name_paper; } Mat;
-typedef struct { GLuint vao; int n; int mat; int grp; } Prim;   // grp: 1 door, 3 mouse (moved at draw time)
+typedef struct { GLuint vao; int n; int mat; int grp; int room; } Prim;   // grp: 1 door, 3 mouse (moved at draw time); room: 0 office, 1 morgue
+static int g_room;                         // which room is shown
+static int g_exam_now, g_morgue_now, g_click_t, g_pending_bed = -1, g_exit_t; static float g_click_px[2];
+typedef struct Ray Ray;
+static int mdl_hit(int k, const Ray *r, float *sx, float *sy, float *dist); static int bed_hit(int k, const Ray *r, float *dist);
+static void morgue_marker(int which, float *x, float *y); static void click_at(float sx, float sy, int frames);
+static void mdl_draw(int k); static void mdl_place(int k);
+static int keyed_scene(void);
+static float g_spot[2][3]; static int g_spot_ok[2];   // morgue: where the body [0] and the personal effects [1] lie (bed tops)
 static Mat *g_mat; static int g_nmat;
 static Prim *g_prim; static int g_nprim;
 static GLuint g_white, g_prog, g_lineprog, g_linevao, g_linevbo;
@@ -161,6 +169,7 @@ static int g_active, g_preview;
 static M4 g_world_from_stage;   // where the play area sits in the room
 static float g_seat[3] = { -0.55f, 0.0f, -1.62f };   // Naomi's chair (glTF frame), facing -x (the desk)
 static float g_turn = (float)(M_PI / 2);   // play area yaw (stage -z -> room -x)
+static int g_arrive;   // a room change: put the player at that room's arrival spot
 
 static GLuint upload_image(const cgltf_image *im, int srgb) {
     if (!im || !im->buffer_view) return 0;
@@ -177,15 +186,16 @@ static GLuint upload_image(const cgltf_image *im, int srgb) {
     free(px); return t;
 }
 
-static int load_room(const char *path) {
+static int load_room(const char *path, int room) {
     cgltf_options opt = {0}; cgltf_data *d = NULL;
     if (cgltf_parse_file(&opt, path, &d) != cgltf_result_success || cgltf_load_buffers(&opt, d, path) != cgltf_result_success) {
         fprintf(stderr, "[vr] can't load %s\n", path); if (d) cgltf_free(d); return 0;
     }
     GLuint *img_lin = calloc(d->images_count + 1, sizeof *img_lin);
-    g_nmat = (int)d->materials_count; g_mat = calloc(g_nmat + 1, sizeof *g_mat);
-    for (int i = 0; i < g_nmat; i++) {
-        cgltf_material *m = &d->materials[i]; Mat *o = &g_mat[i];
+    int mbase = g_nmat; g_nmat += (int)d->materials_count; g_mat = realloc(g_mat, (g_nmat + 1) * sizeof *g_mat);
+    memset(g_mat + mbase, 0, (g_nmat + 1 - mbase) * sizeof *g_mat);
+    for (int i = mbase; i < g_nmat; i++) {
+        cgltf_material *m = &d->materials[i - mbase]; Mat *o = &g_mat[i];
         memcpy(o->base, m->pbr_metallic_roughness.base_color_factor, 16); memcpy(o->emis, m->emissive_factor, 12);
         if (m->has_emissive_strength) for (int k = 0; k < 3; k++) o->emis[k] *= m->emissive_strength.emissive_strength;
         const cgltf_texture *bt = m->pbr_metallic_roughness.base_color_texture.texture, *et = m->emissive_texture.texture;
@@ -194,11 +204,16 @@ static int load_room(const char *path) {
         if (o->blend) { o->mask = 1; o->cutoff = 0.5f; o->blend = 0; }   // leaves: cut-out reads better than sorting in VR
         o->screen = m->name && !strcmp(m->name, "screen"); o->name_paper = m->name && !strcmp(m->name, "paper");
     }
-    int cap = 0;
+    static int cap;   // shared by every room loaded
     for (cgltf_size ni = 0; ni < d->nodes_count; ni++) {
-        cgltf_node *nd = &d->nodes[ni]; if (!nd->mesh) continue;
+        cgltf_node *nd = &d->nodes[ni];
         float wm[16]; cgltf_node_transform_world(nd, wm); M4 W; memcpy(W.m, wm, 64);
-        int obj = !nd->name ? -1 : !strncmp(nd->name, "recorder", 8) ? 0 : !strncmp(nd->name, "door_exit", 9) ? 1 : !strncmp(nd->name, "monitor", 7) ? 2 : !strncmp(nd->name, "mouse", 5) ? 3 : -1;
+        if (!nd->mesh) {   // the morgue's bed markers: where the body and the personal effects are laid
+            int k = !nd->name ? -1 : !strcmp(nd->name, "bed_body_spot") ? 0 : !strcmp(nd->name, "bed_effects_spot") ? 1 : -1;
+            if (k >= 0) { memcpy(g_spot[k], W.m + 12, 12); g_spot_ok[k] = 1; }
+            continue;
+        }
+        int obj = room != 0 || !nd->name ? -1 : !strncmp(nd->name, "recorder", 8) ? 0 : !strncmp(nd->name, "door_exit", 9) ? 1 : !strncmp(nd->name, "monitor", 7) ? 2 : !strncmp(nd->name, "mouse", 5) ? 3 : -1;
         for (cgltf_size pi = 0; pi < nd->mesh->primitives_count; pi++) {
             cgltf_primitive *pr = &nd->mesh->primitives[pi];
             const cgltf_accessor *ap = NULL, *at = NULL, *ac = NULL;
@@ -225,8 +240,8 @@ static int load_room(const char *path) {
             }
             int ni_ = pr->indices ? (int)pr->indices->count : nv; u32 *ix = malloc(4 * ni_);
             for (int k = 0; k < ni_; k++) ix[k] = pr->indices ? (u32)cgltf_accessor_read_index(pr->indices, k) : (u32)k;
-            int mi = pr->material ? (int)(pr->material - d->materials) : g_nmat;
-            if (mi < g_nmat && g_mat[mi].screen && !g_have_screen) {   // corners from the UVs: (0,0) top-left, u right, v down
+            int mi = pr->material ? mbase + (int)(pr->material - d->materials) : -1;
+            if (mi >= 0 && g_mat[mi].screen && !g_have_screen) {   // corners from the UVs: (0,0) top-left, u right, v down
                 float best[3] = { 1e9f, 1e9f, 1e9f }; float *P00 = NULL, *P10 = NULL, *P01 = NULL;
                 for (int k = 0; k < nv; k++) {
                     float u = v[k * 9 + 3], w = v[k * 9 + 4];
@@ -239,7 +254,7 @@ static int load_room(const char *path) {
                         sqrtf(g_scr_u[0] * g_scr_u[0] + g_scr_u[1] * g_scr_u[1] + g_scr_u[2] * g_scr_u[2]), sqrtf(g_scr_v[0] * g_scr_v[0] + g_scr_v[1] * g_scr_v[1] + g_scr_v[2] * g_scr_v[2]));
             }
             if (g_nprim == cap) { cap = cap ? cap * 2 : 256; g_prim = realloc(g_prim, cap * sizeof *g_prim); }
-            Prim *o = &g_prim[g_nprim++]; o->n = ni_; o->mat = mi; o->grp = obj == 1 || obj == 3 ? obj : 0;
+            Prim *o = &g_prim[g_nprim++]; o->n = ni_; o->mat = mi; o->grp = obj == 1 || obj == 3 ? obj : 0; o->room = room;
             GLuint vb, ib; vGenVertexArrays(1, &o->vao); vBindVertexArray(o->vao);
             vGenBuffers(1, &vb); vBindBuffer(GL_ARRAY_BUFFER, vb); vBufferData(GL_ARRAY_BUFFER, sizeof(float) * 9 * nv, v, GL_STATIC_DRAW);
             vGenBuffers(1, &ib); vBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib); vBufferData(GL_ELEMENT_ARRAY_BUFFER, 4 * ni_, ix, GL_STATIC_DRAW);
@@ -250,7 +265,7 @@ static int load_room(const char *path) {
         }
     }
     free(img_lin); cgltf_free(d);
-    fprintf(stderr, "[vr] room %s: %d materials, %d draws%s\n", path, g_nmat, g_nprim, g_have_screen ? "" : " (no 'screen' material!)");
+    fprintf(stderr, "[vr] room %s: %d materials, %d draws%s\n", path, g_nmat, g_nprim, room == 0 && !g_have_screen ? " (no 'screen' material!)" : "");
     return g_nprim > 0;
 }
 
@@ -296,7 +311,7 @@ static GLuint build(const char *vs, const char *fs) {
 }
 
 // ---------------------------------------------------------------- drawing
-typedef struct { float o[3], d[3]; int valid; } Ray;
+typedef struct Ray { float o[3], d[3]; int valid; } Ray;
 static Ray g_ray;                 // the pointing hand's laser (world)
 static float g_ray_len = 2.0f;
 static int g_ray_on_screen;
@@ -327,7 +342,8 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
     mouse_m.m[12] = g_mouse_off[0]; mouse_m.m[14] = g_mouse_off[1];
     int cur_grp = -1;
     for (int i = 0; i < g_nprim; i++) {
-        Prim *p = &g_prim[i]; Mat *m = p->mat < g_nmat ? &g_mat[p->mat] : NULL;
+        Prim *p = &g_prim[i]; if (p->room != g_room) continue;
+        Mat *m = p->mat >= 0 && p->mat < g_nmat ? &g_mat[p->mat] : NULL;
         if (p->grp != cur_grp) { cur_grp = p->grp; vUniformMatrix4fv(u_model, 1, 0, (p->grp == 1 ? door_m : p->grp == 3 ? mouse_m : ident).m); }
         static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 };
         vActiveTexture(GL_TEXTURE1); vBindTexture(GL_TEXTURE_2D, m && m->etex ? m->etex : g_white);
@@ -348,6 +364,7 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
     }
     vUniformMatrix4fv(u_model, 1, 0, ident.m); vUniform4f(u_hole, 2, 2, 2, 2);
     { static const float no[3] = { 0, 0, 0 }; vUniform3fv(u_lit, 1, no); }
+    if (g_room == 1) { mdl_draw(0); mdl_draw(1); }   // the body and the personal effects on their beds
     if (g_door_t > 0.02f) {   // the void beyond the open door
         static const float black[4] = { 0, 0, 0, 1 }, zero3[3] = { 0, 0, 0 };
         float q[4][9] = { { -0.8f, 2.2f, -7.272f, 0, 0, 1, 1, 1, 1 }, { 0.2f, 2.2f, -7.272f, 1, 0, 1, 1, 1, 1 },
@@ -365,9 +382,9 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
             for (int c = 0; c < 3; c++) q[i][c] = g_pan_o[c] + g_pan_u[c] * su + g_pan_v[c] * sv;
             q[i][3] = su; q[i][4] = sv; q[i][5] = q[i][6] = q[i][7] = q[i][8] = 1; }
         vBindBuffer(GL_ARRAY_BUFFER, g_pan_vbo); vBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
-        vActiveTexture(GL_TEXTURE0); vBindTexture(GL_TEXTURE_2D, game_tex); vUniform1i(u_screen, g_office_now ? 2 : 1);
+        vActiveTexture(GL_TEXTURE0); vBindTexture(GL_TEXTURE_2D, game_tex); vUniform1i(u_screen, keyed_scene() ? 2 : 1);
         vUniform4f(u_hole, 2, 2, 2, 2);
-        if (g_office_now) { vEnable(GL_BLEND); vBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); vDepthMask(0); }
+        if (keyed_scene()) { vEnable(GL_BLEND); vBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); vDepthMask(0); }
         vUniform2f(u_scr_k, 1, 1); vUniform4f(u_crop, g_x0f, 0, g_x1f, 1); vUniform4fv(u_base, 1, one); vUniform3fv(u_emis, 1, zero);
         vBindVertexArray(g_pan_vao); vDrawArrays(GL_TRIANGLE_FAN, 0, 4);
         vUniform4f(u_hole, 2, 2, 2, 2);
@@ -428,6 +445,7 @@ static int ray_quad(const float *O, const float *U, const float *V, float ca, co
 }
 static float desk_aspect(void) { return (4.f / 3) * (DESK_Y1 - DESK_Y0 > 0 ? 1.f / (DESK_Y1 - DESK_Y0) : 1); }
 static int panel_on(void) { return !g_desk_now; }
+static int keyed_scene(void) { return g_office_now || g_morgue_now || g_exam_now; }
 static int ray_box(const Ray *r, const float *mn, const float *mx, float pad, float *dist) {
     float t0 = 0, t1 = 1e9f;
     for (int c = 0; c < 3; c++) {
@@ -448,7 +466,7 @@ static int laser_target(const Ray *r, float *gx, float *gy, float *dist) {
     if (g_have_screen) hit1 = ray_quad(g_scr_o, g_scr_u, g_scr_v, desk_aspect(), r, &ax, &ay, &d1);
     if (!hit1 && g_obj_ok[2] && ray_box(r, g_obj_min[2], g_obj_max[2], 0.01f, &d1)) { hit1 = 1; ax = ay = 0.5f; }
     if (panel_on() && g_pan_placed) hit2 = ray_quad(g_pan_o, g_pan_u, g_pan_v, 4.f / 3, r, &bx, &by, &d2);
-    if (g_office_now && hit2) {   // the pane only takes the laser where an interface piece was drawn last frame
+    if (keyed_scene() && hit2) {   // the pane only takes the laser where an interface piece was drawn last frame
         float x = bx * 640.f, y = by * g_vr_pic_h + g_vr_pic_y0; int in = 0; const int last = g_uicur ^ 1;
         for (int k = 0; k < g_nui[last] && !in; k++) { Rect R = g_ui[last][k]; in = x >= R.x0 - 4 && x <= R.x1 + 4 && y >= R.y0 - 4 && y <= R.y1 + 4; }
         if (!in) hit2 = 0;
@@ -462,6 +480,16 @@ static int laser_target(const Ray *r, float *gx, float *gy, float *dist) {
     int hr = g_office_now && g_obj_ok[0] && ray_box(r, g_obj_min[0], g_obj_max[0], 0.03f, &dr);
     int hd = g_office_now && g_obj_ok[1] && ray_box(r, g_obj_min[1], g_obj_max[1], 0.02f, &dd);
     g_last_kind = 0;
+    if (g_room == 1) {   // the morgue: 6 the model under examination, 7/8 the body / personal-effects bed
+        float sx, sy, d;
+        if (g_exam_now) {
+            int k = g_exam_now - 1, o = 1 - k;
+            if (mdl_hit(k, r, &sx, &sy, &d) && (!hit2 || d < d2)) { *gx = sx / 640.f; *gy = (sy - g_vr_pic_y0) / (float)g_vr_pic_h; *dist = d; g_last_kind = 6; return 1; }
+            if (bed_hit(o, r, &d) && (!hit2 || d < d2)) { *gx = 0.5f; *gy = 0.08f; *dist = d; g_last_kind = 7 + o; return 1; }   // the other bed: leave this one first
+        } else if (!hit2) for (int k = 0; k < 2; k++) if (bed_hit(k, r, &d)) {
+            float mx_, my_; morgue_marker(k, &mx_, &my_); *gx = mx_ / 640.f; *gy = (my_ - g_vr_pic_y0) / (float)g_vr_pic_h; *dist = d; g_last_kind = 7 + k; return 1;
+        }
+    }
     if (hit2 && (!hit1 || d2 < d1) && (!hr || d2 < dr) && (!hd || d2 < dd)) { *gx = bx; *gy = by; *dist = d2; g_last_kind = 2; return 2; }
     if (hr && (!hit1 || dr < d1) && (!hd || dr < dd)) { office_spot(HS_RECORDER, gx, gy); *dist = dr; g_last_kind = 3; return 1; }
     if (hd && (!hit1 || dd < d1)) { office_spot(HS_DOOR, gx, gy); *dist = dd; g_last_kind = 4; return 1; }
@@ -470,7 +498,7 @@ static int laser_target(const Ray *r, float *gx, float *gy, float *dist) {
 }
 // the pane follows lazily: it stays put while you look at it, and comes back in front of you when you look away
 static void place_pane(void) {
-    if (!g_office_now && !g_desk_now && g_door_t > 0.5f) {   // the other screens show in the doorway
+    if (!keyed_scene() && !g_desk_now && g_door_t > 0.5f) {   // the other screens show in the doorway
         const float w = 0.9f, h = 0.675f;
         g_pan_o[0] = -0.3f - w / 2; g_pan_o[1] = 1.3f + h / 2; g_pan_o[2] = -7.268f;
         g_pan_u[0] = w; g_pan_u[1] = 0; g_pan_u[2] = 0; g_pan_v[0] = 0; g_pan_v[1] = -h; g_pan_v[2] = 0;
@@ -478,7 +506,7 @@ static void place_pane(void) {
     }
     if (g_pan_placed == 2) g_pan_placed = 0;
     if (!g_head_ok) return;
-    if (g_office_now) {   // the comic bubbles ride in front of your face (smoothed a little so they don't jitter)
+    if (keyed_scene()) {   // the comic bubbles ride in front of your face (smoothed a little so they don't jitter)
         const float dist = 0.95f, w = 0.95f, h = w * 0.75f;
         float eye[3] = { g_head.m[12], g_head.m[13], g_head.m[14] };
         float fwd[3] = { -g_head.m[8], -g_head.m[9], -g_head.m[10] }, up[3] = { g_head.m[4], g_head.m[5], g_head.m[6] }, rt[3] = { g_head.m[0], g_head.m[1], g_head.m[2] };
@@ -549,7 +577,8 @@ static int common_init(void) {
         vBindVertexArray(0);
     }
     const char *room = getenv("TTPC_VR_SCENE"); if (!room || !*room) room = "vr/naomi_office.glb";
-    if (!load_room(room)) return 0;
+    if (!load_room(room, 0)) return 0;
+    if (!load_room("vr/morgue.glb", 1)) fprintf(stderr, "[vr] no morgue room (vr/morgue.glb)\n");
     {   // extra pictures next to the room (made from the game's own files)
         int w, h, c; u8 *px = stbi_load("vr/screensaver.png", &w, &h, &c, 4);
         if (px) { vGenTextures(1, &g_saver_tex); vBindTexture(GL_TEXTURE_2D, g_saver_tex); vTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
@@ -605,6 +634,7 @@ static int preview_frame(void) {
     // desktop controls: mouse looks (captured; F2 frees it), WASD walks, left mouse = trigger
     static int init; static float px_, pz_, yaw, pitch = -0.15f; static int captured = 1, f2_prev;
     if (!init) { init = 1; px_ = g_seat[0] + 0.1f; pz_ = g_seat[2]; yaw = g_turn; SDL_SetRelativeMouseMode(SDL_TRUE); SDL_GetRelativeMouseState(NULL, NULL); }
+    if (g_arrive) { g_arrive = 0; px_ = g_seat[0]; pz_ = g_seat[2]; yaw = g_turn; }
     const u8 *k = SDL_GetKeyboardState(NULL);
     if (k[SDL_SCANCODE_F2] && !f2_prev) { captured = !captured; SDL_SetRelativeMouseMode(captured ? SDL_TRUE : SDL_FALSE); }
     f2_prev = k[SDL_SCANCODE_F2];
@@ -880,6 +910,217 @@ static int office_picture(TexEntry *e) {
     if (!known && ns < 16) { seen[ns++] = e->data_hash; fprintf(stderr, "[vr] 640x480 picture %08X data %016llX%s\n", e->addr, (unsigned long long)e->data_hash, e->data_hash == OFFICE_HASH ? " = Naomi's office" : ""); }
     return e->data_hash == OFFICE_HASH;
 }
+
+// ---------------------------------------------------------------- the morgue: the body and the personal effects
+// The game draws them only while you examine them (a floating model in a dark tunnel). VR takes them from those
+// draws: model-space triangles (kept once) and, every frame, where each vertex lands on the game's screen. They
+// lie on their beds in the morgue, turned the way the game is looking at them (the side the game sees faces up),
+// and touching a spot clicks exactly that spot in the game's view. disc.c says where the two model files sit in
+// memory, so their draws are told apart from everything else by their textures.
+extern u32 g_vr_mdl_lo[2], g_vr_mdl_hi[2];
+typedef struct {
+    int ntri; float *pos, *nrm, *uv;   // per triangle corner, in the model's reference frame
+    float *scr; u8 *vis;               // per corner: game screen x/y this frame, w > 0
+    GLuint tex, vao, vbo; float *cpu; int frame;
+} MPart;
+typedef struct {
+    MPart part[48]; int nparts, cur, frame;
+    float ref[12], ref_inv[12];        // the first part's model->view matrix this frame (and its inverse)
+    float lo[3], hi[3]; int axis;      // bounds in the reference frame, longest axis
+    float R[9], scale, T[3]; int placed; float lit_R[9];
+} MModel;
+static MModel g_mdl[2];
+static int g_vr_frame_no, g_exam_seen, g_exam_now, g_exam_hold;   // examining: 1 body, 2 personal effects
+static int g_vr_morgue_seen, g_morgue_now, g_morgue_hold;
+static float g_mk[8][2]; static int g_nmk, g_nmk_last; static float g_mk_last[8][2];   // the morgue's hotspot markers (centres)
+
+
+static int in_mdl(u32 addr, int k) { addr &= 0x1FFFFFFF; return g_vr_mdl_hi[k] && addr >= g_vr_mdl_lo[k] && addr < g_vr_mdl_hi[k]; }
+int vr_track(const Setup *s) {
+    if (!g_active) return -1;
+    for (int m = 0; m < 8; m++) { TexEntry *e = s->tex[m].e; if (!e) continue; for (int k = 0; k < 2; k++) if (in_mdl(e->addr, k)) return k; }
+    return -1;
+}
+static void affine_inv(const float a[12], float o[12]) {   // inverse of [R|t] (3x4 rows)
+    float r[9] = { a[0], a[1], a[2], a[4], a[5], a[6], a[8], a[9], a[10] };
+    float det = r[0] * (r[4] * r[8] - r[5] * r[7]) - r[1] * (r[3] * r[8] - r[5] * r[6]) + r[2] * (r[3] * r[7] - r[4] * r[6]);
+    if (fabsf(det) < 1e-12f) det = 1e-12f; float id = 1.f / det, inv[9];
+    inv[0] = (r[4] * r[8] - r[5] * r[7]) * id; inv[1] = (r[2] * r[7] - r[1] * r[8]) * id; inv[2] = (r[1] * r[5] - r[2] * r[4]) * id;
+    inv[3] = (r[5] * r[6] - r[3] * r[8]) * id; inv[4] = (r[0] * r[8] - r[2] * r[6]) * id; inv[5] = (r[2] * r[3] - r[0] * r[5]) * id;
+    inv[6] = (r[3] * r[7] - r[4] * r[6]) * id; inv[7] = (r[1] * r[6] - r[0] * r[7]) * id; inv[8] = (r[0] * r[4] - r[1] * r[3]) * id;
+    for (int i = 0; i < 3; i++) { o[i * 4] = inv[i * 3]; o[i * 4 + 1] = inv[i * 3 + 1]; o[i * 4 + 2] = inv[i * 3 + 2];
+        o[i * 4 + 3] = -(inv[i * 3] * a[3] + inv[i * 3 + 1] * a[7] + inv[i * 3 + 2] * a[11]); }
+}
+static void aff_pt(const float a[12], const float p[3], float o[3]) { for (int i = 0; i < 3; i++) o[i] = a[i * 4] * p[0] + a[i * 4 + 1] * p[1] + a[i * 4 + 2] * p[2] + a[i * 4 + 3]; }
+static void aff_dir(const float a[12], const float p[3], float o[3]) { for (int i = 0; i < 3; i++) o[i] = a[i * 4] * p[0] + a[i * 4 + 1] * p[1] + a[i * 4 + 2] * p[2]; }
+static void aff_mul(const float a[12], const float b[12], float o[12]) {
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 4; j++)
+        o[i * 4 + j] = a[i * 4] * b[j] + a[i * 4 + 1] * b[4 + j] + a[i * 4 + 2] * b[8 + j] + (j == 3 ? a[i * 4 + 3] : 0);
+}
+void vr_capture(int which, const Setup *s, int prim, int n, const VrVert *v, const float M[12]) {
+    if (!g_active || which < 0 || which > 1) return;
+    MModel *md = &g_mdl[which];
+    if (md->frame != g_vr_frame_no) { md->frame = g_vr_frame_no; md->cur = 0; memcpy(md->ref, M, 48); affine_inv(M, md->ref_inv); }
+    g_exam_seen = which + 1;
+    if (md->cur >= 48) return;
+    MPart *pt = &md->part[md->cur++];
+    // the draw's triangles, in the same order the game assembles them (video.c draw_prims)
+    static int *ix; static int cap; if (n * 6 > cap) { free(ix); cap = n * 6 + 64; ix = malloc(sizeof *ix * (size_t)cap); }
+    int nt = 0;
+    switch (prim) {
+    case 0: case 1: for (int k = 0; k + 3 < n; k += 4) { int t[6] = { k, k + 1, k + 2, k, k + 2, k + 3 }; memcpy(ix + nt * 3, t, 24); nt += 2; } break;
+    case 2: for (int k = 0; k + 2 < n; k += 3) { ix[nt * 3] = k; ix[nt * 3 + 1] = k + 1; ix[nt * 3 + 2] = k + 2; nt++; } break;
+    case 3: for (int k = 0; k + 2 < n; k++) { if (k & 1) { ix[nt * 3] = k + 1; ix[nt * 3 + 1] = k; } else { ix[nt * 3] = k; ix[nt * 3 + 1] = k + 1; } ix[nt * 3 + 2] = k + 2; nt++; } break;
+    case 4: for (int k = 1; k + 1 < n; k++) { ix[nt * 3] = 0; ix[nt * 3 + 1] = k; ix[nt * 3 + 2] = k + 1; nt++; } break;
+    default: return;
+    }
+    if (pt->ntri != nt) {   // first time (or a different mesh): keep its shape in the reference frame
+        GLSave sv; gl_save(&sv);   // the game's own GL state stays as it was
+        free(pt->pos); free(pt->nrm); free(pt->uv); free(pt->scr); free(pt->vis); free(pt->cpu);
+        pt->ntri = nt; pt->pos = malloc(36 * (size_t)nt); pt->nrm = malloc(36 * (size_t)nt); pt->uv = malloc(24 * (size_t)nt);
+        pt->scr = malloc(24 * (size_t)nt); pt->vis = malloc(3 * (size_t)nt); pt->cpu = malloc(36 * 3 * (size_t)nt);
+        float rel[12]; aff_mul(md->ref_inv, M, rel);
+        for (int c = 0; c < nt * 3; c++) {
+            const VrVert *q = &v[ix[c]]; aff_pt(rel, q->pos, pt->pos + c * 3); aff_dir(rel, q->nrm, pt->nrm + c * 3);
+            float *nn = pt->nrm + c * 3; float l = sqrtf(nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]); if (l > 0) for (int i = 0; i < 3; i++) nn[i] /= l;
+            pt->uv[c * 2] = q->uv[0]; pt->uv[c * 2 + 1] = q->uv[1];
+        }
+        // its texture: the biggest one the draw uses (the clothes' colour maps); the body itself is lit skin
+        TexEntry *best = NULL;
+        if (which == 1) for (int m = 0; m < 8; m++) { TexEntry *e = s->tex[m].e; if (e && e->px && (!best || e->w * e->h > best->w * best->h)) best = e; }
+        if (best) {
+            u8 *px = malloc((size_t)best->w * best->h * 4);
+            for (int i = 0; i < best->w * best->h; i++) { u32 c = best->px[i]; px[i * 4] = c >> 24; px[i * 4 + 1] = c >> 16; px[i * 4 + 2] = c >> 8; px[i * 4 + 3] = c; }
+            if (!pt->tex) vGenTextures(1, &pt->tex);
+            vBindTexture(GL_TEXTURE_2D, pt->tex); vTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, best->w, best->h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            vGenerateMipmap(GL_TEXTURE_2D); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT); free(px);
+        }
+        if (!pt->vao) { vGenVertexArrays(1, &pt->vao); vGenBuffers(1, &pt->vbo); }
+        vBindVertexArray(pt->vao); vBindBuffer(GL_ARRAY_BUFFER, pt->vbo); vBufferData(GL_ARRAY_BUFFER, 36 * 3 * (size_t)nt, NULL, GL_DYNAMIC_DRAW);
+        vEnableVertexAttribArray(0); vVertexAttribPointer(0, 3, GL_FLOAT, 0, 36, (void *)0);
+        vEnableVertexAttribArray(1); vVertexAttribPointer(1, 2, GL_FLOAT, 0, 36, (void *)12);
+        vEnableVertexAttribArray(2); vVertexAttribPointer(2, 4, GL_FLOAT, 0, 36, (void *)20);
+        vBindVertexArray(0);
+        if (md->cur > md->nparts) md->nparts = md->cur;
+        // bounds of the whole model (reference frame)
+        for (int c = 0; c < nt * 3; c++) for (int i = 0; i < 3; i++) {
+            float x = pt->pos[c * 3 + i];
+            if (md->hi[0] <= md->lo[0] && c == 0 && md->cur == 1) { md->lo[i] = md->hi[i] = x; }
+            if (x < md->lo[i]) md->lo[i] = x; if (x > md->hi[i]) md->hi[i] = x;
+        }
+        float ext[3] = { md->hi[0] - md->lo[0], md->hi[1] - md->lo[1], md->hi[2] - md->lo[2] };
+        md->axis = ext[0] > ext[1] ? (ext[0] > ext[2] ? 0 : 2) : (ext[1] > ext[2] ? 1 : 2);
+        md->placed = 0;
+        fprintf(stderr, "[vr] %s part %d: %d triangles%s\n", which ? "personal effects" : "body", md->cur - 1, nt, best ? " (textured)" : "");
+        gl_restore(&sv);
+    }
+    for (int c = 0; c < nt * 3; c++) { const VrVert *q = &v[ix[c]]; pt->scr[c * 2] = q->sx; pt->scr[c * 2 + 1] = q->sy; pt->vis[c] = q->w > 0; }
+    pt->frame = g_vr_frame_no;
+}
+// turn the model so the side the game is looking at faces up, its long axis along the bed (head toward the doors)
+static void mdl_place(int k) {
+    MModel *md = &g_mdl[k]; if (!md->nparts || !g_spot_ok[k]) return;
+    float a[3] = { 0, 0, 0 }; a[md->axis] = 1;
+    float c[3] = { md->ref[8], md->ref[9], md->ref[10] };   // toward the game's camera, in model space (3rd row of the view rotation)
+    float cl = sqrtf(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]); if (cl < 1e-6f) return; for (int i = 0; i < 3; i++) c[i] /= cl;
+    float d = c[0] * a[0] + c[1] * a[1] + c[2] * a[2]; float up[3] = { c[0] - d * a[0], c[1] - d * a[1], c[2] - d * a[2] };
+    float ul = sqrtf(up[0] * up[0] + up[1] * up[1] + up[2] * up[2]); if (ul < 1e-4f) return; for (int i = 0; i < 3; i++) up[i] /= ul;
+    float sd[3] = { a[1] * up[2] - a[2] * up[1], a[2] * up[0] - a[0] * up[2], a[0] * up[1] - a[1] * up[0] };
+    // model basis (sd, up, a) -> world (+x, +y, -z): R = Bw * Bm^T
+    for (int i = 0; i < 3; i++) { md->R[i * 3 + 0] = sd[i]; md->R[i * 3 + 1] = up[i]; md->R[i * 3 + 2] = -a[i]; }   // stored as columns of Bm, used transposed below
+    float L = md->hi[md->axis] - md->lo[md->axis];
+    if (k == 0) md->scale = L > 0 ? 1.78f / L : 0.01f;
+    else md->scale = g_mdl[0].scale > 0 ? g_mdl[0].scale : (L > 0 ? 1.6f / L : 0.01f);
+    // lowest point toward the bed, centred on the bed
+    float mid[3] = { (md->lo[0] + md->hi[0]) / 2, (md->lo[1] + md->hi[1]) / 2, (md->lo[2] + md->hi[2]) / 2 }, lowest = 1e9f;
+    for (int p = 0; p < md->nparts; p++) { MPart *pt = &md->part[p]; for (int c = 0; c < pt->ntri * 3; c += 7) {
+        float *q = pt->pos + c * 3; float h = (q[0] - mid[0]) * up[0] + (q[1] - mid[1]) * up[1] + (q[2] - mid[2]) * up[2]; if (h < lowest) lowest = h; } }
+    for (int i = 0; i < 3; i++) md->T[i] = g_spot[k][i];
+    md->T[1] += -lowest * md->scale + 0.005f;
+    // world = T + scale * (sd.(p-mid)) x + (up.(p-mid)) y - (a.(p-mid)) z
+    float w_mid[3]; (void)w_mid;
+    md->T[0] -= 0; md->placed = 1;
+    memcpy(md->lit_R, md->R, 36);
+    (void)mid;
+}
+static M4 mdl_matrix(int k) {   // model (reference frame) -> world, as a column-major M4
+    MModel *md = &g_mdl[k]; M4 m = m4_id(); float s = md->scale;
+    float mid[3] = { (md->lo[0] + md->hi[0]) / 2, (md->lo[1] + md->hi[1]) / 2, (md->lo[2] + md->hi[2]) / 2 };
+    // rows of the rotation: world x = sd, world y = up, world z = -a  (R holds sd, up, -a as columns -> those are the rows of Bm^T)
+    for (int j = 0; j < 3; j++) { m.m[j * 4 + 0] = md->R[j * 3 + 0] * s; m.m[j * 4 + 1] = md->R[j * 3 + 1] * s; m.m[j * 4 + 2] = md->R[j * 3 + 2] * s; }
+    for (int i = 0; i < 3; i++) m.m[12 + i] = md->T[i] - (m.m[i] * mid[0] + m.m[4 + i] * mid[1] + m.m[8 + i] * mid[2]);
+    return m;
+}
+static void mdl_draw(int k) {
+    MModel *md = &g_mdl[k]; if (!md->nparts || !md->placed) return;
+    M4 W = mdl_matrix(k); vUniformMatrix4fv(u_model, 1, 0, W.m);
+    static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 }, skin[4] = { 0.86f, 0.74f, 0.66f, 1 };
+    vUniform1i(u_screen, 0); vUniform3fv(u_emis, 1, zero); vUniform1f(u_cut, 0.3f);
+    { static const float no[3] = { 0, 0, 0 }; vUniform3fv(u_lit, 1, no); }
+    vActiveTexture(GL_TEXTURE1); vBindTexture(GL_TEXTURE_2D, g_white); vActiveTexture(GL_TEXTURE0);
+    const float Ld[3] = { 0.25f, 0.9f, -0.35f }; float ll = sqrtf(Ld[0] * Ld[0] + Ld[1] * Ld[1] + Ld[2] * Ld[2]);
+    for (int p = 0; p < md->nparts; p++) {
+        MPart *pt = &md->part[p]; if (!pt->ntri) continue;
+        for (int c = 0; c < pt->ntri * 3; c++) {   // light it where it lies (the lamp above)
+            float *q = pt->cpu + c * 9, *nn = pt->nrm + c * 3;
+            float nw[3]; for (int i = 0; i < 3; i++) nw[i] = W.m[i] * nn[0] + W.m[4 + i] * nn[1] + W.m[8 + i] * nn[2];
+            float nl = sqrtf(nw[0] * nw[0] + nw[1] * nw[1] + nw[2] * nw[2]); float dd = nl > 0 ? (nw[0] * Ld[0] + nw[1] * Ld[1] + nw[2] * Ld[2]) / (nl * ll) : 0;
+            float I = 0.5f * (0.42f + 0.58f * (dd > 0 ? dd : 0));
+            memcpy(q, pt->pos + c * 3, 12); q[3] = pt->uv[c * 2]; q[4] = pt->uv[c * 2 + 1]; q[5] = q[6] = q[7] = I; q[8] = 1;
+        }
+        vBindBuffer(GL_ARRAY_BUFFER, pt->vbo); vBufferData(GL_ARRAY_BUFFER, 36 * 3 * (size_t)pt->ntri, pt->cpu, GL_DYNAMIC_DRAW);
+        vBindTexture(GL_TEXTURE_2D, pt->tex ? pt->tex : g_white); vUniform4fv(u_base, 1, pt->tex ? one : skin);
+        vBindVertexArray(pt->vao); vDrawArrays(GL_TRIANGLES, 0, pt->ntri * 3);
+    }
+    M4 id = m4_id(); vUniformMatrix4fv(u_model, 1, 0, id.m);
+}
+// the laser on the model being examined: the spot -> where it is on the game's screen (640x528 frame)
+static int mdl_hit(int k, const Ray *r, float *sx, float *sy, float *dist) {
+    MModel *md = &g_mdl[k]; if (!md->nparts || !md->placed) return 0;
+    M4 W = mdl_matrix(k); float s = md->scale;
+    // ray into model space: p_m = W^-1 p (W = s * R, R orthonormal)
+    float o[3] = { r->o[0] - W.m[12], r->o[1] - W.m[13], r->o[2] - W.m[14] }, om[3], dm[3];
+    for (int i = 0; i < 3; i++) { om[i] = (W.m[i * 4] * o[0] + W.m[i * 4 + 1] * o[1] + W.m[i * 4 + 2] * o[2]) / (s * s);
+                                  dm[i] = (W.m[i * 4] * r->d[0] + W.m[i * 4 + 1] * r->d[1] + W.m[i * 4 + 2] * r->d[2]) / s; }
+    float best = 1e30f; int hp = -1, ht = -1; float hb[2] = { 0, 0 };
+    for (int p = 0; p < md->nparts; p++) { MPart *pt = &md->part[p]; if (pt->frame != md->frame) continue;
+        for (int t = 0; t < pt->ntri; t++) {
+            const float *A = pt->pos + t * 9, *B = A + 3, *C = A + 6;
+            float e1[3] = { B[0] - A[0], B[1] - A[1], B[2] - A[2] }, e2[3] = { C[0] - A[0], C[1] - A[1], C[2] - A[2] };
+            float pv[3] = { dm[1] * e2[2] - dm[2] * e2[1], dm[2] * e2[0] - dm[0] * e2[2], dm[0] * e2[1] - dm[1] * e2[0] };
+            float det = e1[0] * pv[0] + e1[1] * pv[1] + e1[2] * pv[2]; if (fabsf(det) < 1e-12f) continue;
+            float id = 1.f / det, tv[3] = { om[0] - A[0], om[1] - A[1], om[2] - A[2] };
+            float u = (tv[0] * pv[0] + tv[1] * pv[1] + tv[2] * pv[2]) * id; if (u < 0 || u > 1) continue;
+            float qv[3] = { tv[1] * e1[2] - tv[2] * e1[1], tv[2] * e1[0] - tv[0] * e1[2], tv[0] * e1[1] - tv[1] * e1[0] };
+            float w = (dm[0] * qv[0] + dm[1] * qv[1] + dm[2] * qv[2]) * id; if (w < 0 || u + w > 1) continue;
+            float tt = (e2[0] * qv[0] + e2[1] * qv[1] + e2[2] * qv[2]) * id; if (tt <= 0 || tt >= best) continue;
+            best = tt; hp = p; ht = t; hb[0] = u; hb[1] = w;
+        } }
+    if (hp < 0) return 0;
+    MPart *pt = &md->part[hp]; int c = ht * 3; if (!pt->vis[c] || !pt->vis[c + 1] || !pt->vis[c + 2]) return 0;
+    float a0 = 1 - hb[0] - hb[1];
+    *sx = a0 * pt->scr[c * 2] + hb[0] * pt->scr[c * 2 + 2] + hb[1] * pt->scr[c * 2 + 4];
+    *sy = a0 * pt->scr[c * 2 + 1] + hb[0] * pt->scr[c * 2 + 3] + hb[1] * pt->scr[c * 2 + 5];
+    *dist = best; return 1;
+}
+// the morgue's markers: body (right bed), personal effects (left bed), door (top) -- this frame's or the usual spots
+static void morgue_marker(int which, float *x, float *y) {   // which: 0 body, 1 effects, 2 door
+    static const float def[3][2] = { { 386, 330 }, { 211, 285 }, { 381, 150 } };
+    float bx = def[which][0], by = def[which][1], bd = 90 * 90;
+    for (int i = 0; i < g_nmk_last; i++) { float dx = g_mk_last[i][0] - def[which][0], dy = g_mk_last[i][1] - def[which][1];
+        if (dx * dx + dy * dy < bd) { bd = dx * dx + dy * dy; bx = g_mk_last[i][0]; by = g_mk_last[i][1]; } }
+    *x = bx; *y = by;
+}
+static int bed_hit(int k, const Ray *r, float *dist) {   // the bed (and whatever lies on it) in the morgue room
+    if (!g_spot_ok[k]) return 0;
+    float mn[3] = { g_spot[k][0] - 0.42f, g_spot[k][1] - 0.1f, g_spot[k][2] - 1.1f }, mx[3] = { g_spot[k][0] + 0.42f, g_spot[k][1] + 0.45f, g_spot[k][2] + 1.1f };
+    return ray_box(r, mn, mx, 0.0f, dist);
+}
+static void click_at(float sx, float sy, int frames) {   // press A at a spot of the game's screen for a moment
+    g_click_px[0] = sx; g_click_px[1] = sy; g_click_t = frames;
+}
+
 int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float xo, float yo) {
     if (!g_active) return 0;
     float mn = 1e9f, mx = -1e9f;   // screen width of this draw (game pixels)
@@ -887,6 +1128,22 @@ int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float 
     (void)ht; (void)yo;
     float ymn = 1e9f, ymx = -1e9f;
     for (int i = 0; i < n; i++) if (v[i].w != 0) { float y = v[i].y / v[i].w * ht + yo; if (y < ymn) ymn = y; if (y > ymx) ymx = y; }
+    if (g_exam_now && !g_office_now) {   // examining: the game's floating model and its tunnel are the VR bed now; only the flat interface stays
+        int flat = 1; for (int i = 0; i < n && flat; i++) if (v[i].w != 1.f) flat = 0;
+        if (!flat) return 1;
+    }
+    {   // the morgue room: a 640x480 painting while the forensics models are loaded (and it isn't the office)
+        int pic = 0; for (int m = 0; m < 8; m++) { TexEntry *e = s->tex[m].e; if (e && e->w == 640 && e->h == 480 && !office_picture(e)) pic = 1; }
+        if (pic && (g_vr_mdl_hi[0] || g_vr_mdl_hi[1])) { g_vr_morgue_seen = 1; return 1; }
+        if (g_morgue_now && !g_exam_now) {
+            for (int m = 0; m < 8; m++) { TexEntry *e = s->tex[m].e; if (!e) continue;
+                if ((e->w == 264 && e->h == 208) || (e->w == 288 && e->h == 168)) return 1;   // the painted body / clothes on the beds
+                if (e->w == 56 && e->h == 56) { if (g_nmk < 8) { g_mk[g_nmk][0] = (mn + mx) / 2; g_mk[g_nmk][1] = (ymn + ymx) / 2; g_nmk++; } return 1; }
+                if ((e->w == 64 && e->h == 64) || (e->w == 144 && e->h == 144) || (e->w == 96 && e->h == 96)) return 1;   // marker rings + the pointer
+                if (e->w >= 150 && e->h >= 150 && e->w != 640) { static int nlog; if (nlog++ < 12) fprintf(stderr, "[vr] morgue: 2D picture %dx%d at %.0f,%.0f (shown)\n", e->w, e->h, mn, ymn); }
+            }
+        }
+    }
     if (g_vr_office_seen) {   // over the office: full-width untextured bars (letterbox) would cover the room
         int tex = 0; for (int m = 0; m < 8; m++) if (s->tex[m].e || s->tex[m].gl_copy) tex = 1;
         if (!tex && mx - mn >= 600) return 1;
@@ -908,11 +1165,11 @@ int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float 
         if (mn < g_hr[0]) g_hr[0] = mn; if (ymn < g_hr[1]) g_hr[1] = ymn; if (mx > g_hr[2]) g_hr[2] = mx; if (ymx > g_hr[3]) g_hr[3] = ymx;
         return 2;
     }
-    if (g_vr_office_seen && g_nui[g_uicur] < 96 && mx > mn && ymx > ymn && mx - mn < 640)   // an interface piece: the pane takes the laser here
+    if ((g_vr_office_seen || g_morgue_now || g_exam_now) && g_nui[g_uicur] < 96 && mx > mn && ymx > ymn && mx - mn < 640)   // an interface piece: the pane takes the laser here
         g_ui[g_uicur][g_nui[g_uicur]++] = (Rect){ mn, ymn, mx, ymx };
     return 0;
 }
-int vr_key_frame(void) { return g_active && g_office_now; }
+int vr_key_frame(void) { return g_active && (g_office_now || g_morgue_now || g_exam_now); }
 void vr_set_layer(unsigned tex) { g_lay_tex = tex; }   // gl.c: clear the frame to the key colour
 
 // ---------------------------------------------------------------- entry points (called from platform.c / gl.c)
@@ -950,6 +1207,33 @@ int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
             for (int i = 0; i < g_nmat; i++) if (g_mat[i].name_paper) g_mat[i].tex = g_case_tex;
             free(px); fprintf(stderr, "[vr] case %d: its autopsy report is on the desk\n", g_vr_case);
         }
+    }
+    g_vr_frame_no++;
+    if (g_vr_morgue_seen) g_morgue_hold = 4; else if (g_morgue_hold > 0) g_morgue_hold--;
+    g_morgue_now = g_morgue_hold > 0; g_vr_morgue_seen = 0;
+    if (g_exam_seen) { g_exam_hold = 4; g_exam_now = g_exam_seen; } else if (g_exam_hold > 0 && --g_exam_hold == 0) g_exam_now = 0;
+    g_exam_seen = 0;
+    memcpy(g_mk_last, g_mk, sizeof g_mk); g_nmk_last = g_nmk; g_nmk = 0;
+    for (int k = 0; k < 2; k++) if (g_mdl[k].nparts && (!g_mdl[k].placed || g_exam_now == k + 1)) mdl_place(k);
+    g_room = (g_morgue_now || g_exam_now) ? 1 : 0;
+    {   static int force = -1; if (force < 0) force = getenv("TTPC_VR_ROOM") ? atoi(getenv("TTPC_VR_ROOM")) : 0; if (force) g_room = force; }   // tests: show a room
+    {   static int lr = -1; if (g_room != lr) {   // arriving in a room: the morgue starts by the door you came in, facing the beds
+            int first = lr < 0; lr = g_room; fprintf(stderr, "[vr] room: %s\n", g_room ? "morgue" : "office");
+            if (g_room == 1) { g_seat[0] = -0.1f; g_seat[1] = 0; g_seat[2] = -0.45f; g_turn = 0; }
+            else { g_seat[0] = -0.55f; g_seat[1] = 0; g_seat[2] = -1.62f; g_turn = (float)(M_PI / 2); }
+            if (!first) { g_world_from_stage = m4_yaw(g_turn, g_seat[0], g_seat[1], g_seat[2]); g_arrive = 1; }
+        } }
+    {   static int le = -1; if (g_exam_now != le) { le = g_exam_now; if (g_exam_now) fprintf(stderr, "[vr] examining the %s\n", g_exam_now == 1 ? "body" : "personal effects"); } }
+    // leaving: walk away from the bed you're examining (or reach for the other one) and the game's EXIT is pressed
+    if (g_exam_now && g_head_ok && g_spot_ok[g_exam_now - 1] && g_exit_t == 0 && g_click_t == 0) {
+        float dx = g_head.m[12] - g_spot[g_exam_now - 1][0], dz = g_head.m[14] - g_spot[g_exam_now - 1][2];
+        if (dx * dx + dz * dz > 1.6f * 1.6f) { g_exit_t = 1; fprintf(stderr, "[vr] stepped away from the %s\n", g_exam_now == 1 ? "body" : "personal effects"); }
+    }
+    if (g_exit_t == 1 && g_exam_now) { click_at(527, 424, 24); g_exit_t = 2; }   // the EXIT button (lower right)
+    if (g_exit_t && !g_exam_now) g_exit_t = 0;
+    if (g_exit_t == 2 && g_click_t == 0) g_exit_t = 1;   // still there: press again
+    if (g_pending_bed >= 0 && g_morgue_now && !g_exam_now && g_click_t == 0) {   // then open the bed you reached for
+        float x, y; morgue_marker(g_pending_bed, &x, &y); click_at(x, y, 24); g_pending_bed = -1;
     }
     if (g_vr_office_seen) g_office_hold = 4; else if (g_office_hold > 0) g_office_hold--;
     g_office_now = g_office_hold > 0 && !g_desk_now; g_vr_office_seen = 0;
@@ -1023,6 +1307,10 @@ void vr_input(Input *in) {
         if (hit && fabsf(d) < 0.03f && bx >= 0 && bx <= 1 && by >= 0 && by <= 1) { px = bx; py = by; what = 2; in->lmb = in->a = 1; }
     }
 #endif
+    if (g_click_t > 0) {   // a press the VR layer makes for you (EXIT, then opening the other bed)
+        px = g_click_px[0] / 640.f; py = (g_click_px[1] - g_vr_pic_y0) / (float)g_vr_pic_h; what = 1;
+        in->a = in->lmb = (g_click_t <= 14 && g_click_t > 6); g_click_t--;
+    }
     if (g_auto_exit > 0 && g_desk_now) {
         px = EXIT_BTN[0]; py = EXIT_BTN[1]; what = 1;
         if (g_auto_exit <= 18 && g_auto_exit > 10) { in->a = 1; in->lmb = 1; }
@@ -1052,7 +1340,9 @@ void vr_input(Input *in) {
         }
     }
     { static int prev; int down = in->lmb || in->a;
-      if (down && !prev && g_last_kind == 4 && g_office_now) g_door_req = 1;   // the door: if the game lets you go, it opens
+      if (down && !prev && g_last_kind == 4 && g_office_now) g_door_req = 1;
+      if (down && !prev && g_exam_now && (g_last_kind == 7 || g_last_kind == 8) && g_last_kind - 7 != g_exam_now - 1) {
+          g_pending_bed = g_last_kind - 7; g_exit_t = 1; fprintf(stderr, "[vr] switching to the %s\n", g_pending_bed ? "personal effects" : "body"); }   // the door: if the game lets you go, it opens
       if (down && !prev && g_last_kind == 5 && g_office_now && g_mouse_held < 0) {   // using the mouse turns the computer on; you keep hold of it
 #ifdef TTPC_OPENXR
           g_mouse_held = g_preview ? 2 : g_point_hand;
@@ -1079,4 +1369,6 @@ void vr_set_layer(unsigned tex) { (void)tex; }
 int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float xo, float yo) { (void)s; (void)v; (void)n; (void)wd; (void)ht; (void)xo; (void)yo; return 0; }
 int vr_key_frame(void) { return 0; }
 void vr_input(Input *in) { (void)in; }
+int vr_track(const Setup *s) { (void)s; return -1; }
+void vr_capture(int which, const Setup *s, int prim, int n, const VrVert *v, const float M[12]) { (void)which; (void)s; (void)prim; (void)n; (void)v; (void)M; }
 #endif

@@ -997,6 +997,18 @@ static void draw_prims(int prim, int vat, int n, u32 *p) {
     #pragma omp parallel for schedule(static) if (n >= 512)
     for (int k = 0; k < n; k++) transform(&vin[k], &vout[k]);
     u64 t3 = host_now_ns(); g_pt_xform += t3 - t2;
+    {   int which = vr_track(&S);   // VR: the body / personal effects, straight from the game's draw
+        if (which >= 0) {
+            static VrVert *vv; static int vcap; if (n > vcap) { free(vv); vcap = n + 1024; vv = malloc(sizeof *vv * (size_t)vcap); }
+            for (int k = 0; k < n; k++) {
+                VrVert *q = &vv[k]; memcpy(q->pos, vin[k].pos, 12); memcpy(q->nrm, vin[k].nrm, 12); q->uv[0] = vin[k].tex[0][0]; q->uv[1] = vin[k].tex[0][1];
+                q->w = vout[k].w; float iw = vout[k].w != 0 ? 1.f / vout[k].w : 0;
+                q->sx = vout[k].x * iw * S.vp[0] + S.vp[3] - 342.f; q->sy = vout[k].y * iw * S.vp[1] + S.vp[4] - 342.f;
+            }
+            float M[12]; u32 b = (u32)vin[0].pnmtx * 4; for (int i = 0; i < 12; i++) M[i] = xf_f(b + (u32)i);
+            vr_capture(which, &S, prim, n, vv, M);
+        }
+    }
     void (*tri)(const Out *, const Out *, const Out *) = (g_gpu || bench) ? collect_tri : draw_tri;
     g_ntris = 0;
     switch (prim) {

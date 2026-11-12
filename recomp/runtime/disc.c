@@ -116,11 +116,21 @@ static void to_guest(u32 dst, const u8 *buf, u32 len) {
     else for (u32 k = 0; k < len; k++) W8(dst + k, buf[k]);
 }
 
+// VR: where the forensics models (model/autopsy/kensiNN_body / _things.brres) sit in guest memory, so the VR
+// layer can tell their draws apart (any texture inside a file's range belongs to that model).
+u32 g_vr_mdl_lo[2], g_vr_mdl_hi[2];   // [0] body, [1] personal effects (physical addresses)
+static void note_model(u64 off, u32 dst) {
+    DiscFile *f = find_file(off); if (!f || !strstr(f->path, "model/autopsy/kensi") || strstr(f->path, "collision")) return;
+    int k = strstr(f->path, "_body.brres") ? 0 : strstr(f->path, "_things.brres") ? 1 : -1; if (k < 0) return;
+    u32 base = (dst & 0x1FFFFFFF) - (u32)(off - f->off);
+    if (g_vr_mdl_lo[k] != base) { g_vr_mdl_lo[k] = base; g_vr_mdl_hi[k] = base + (u32)f->size; fprintf(stderr, "[disc] VR: %s at %08X\n", f->path, base); }
+}
+
 // Read `len` bytes at disc byte offset `off` into guest memory at `dst`. Returns 1 (drive success) or 2.
 int disc_read(u64 off, u32 len, u32 dst) {
     u8 *buf = malloc(len ? len : 1);
     int r = read_host(off, len, buf);
-    if (r == 1) to_guest(dst, buf, len);
+    if (r == 1) { to_guest(dst, buf, len); note_model(off, dst); }
     free(buf);
     return r;
 }
@@ -157,7 +167,7 @@ DiscJob *disc_read_async(u64 off, u32 len, u32 dst) {
 int disc_job_done(DiscJob *j) { return __atomic_load_n(&j->done, __ATOMIC_ACQUIRE); }
 int disc_job_finish(DiscJob *j) {   // copy into guest memory, free; returns the drive result
     int r = j->result;
-    if (r == 1) to_guest(j->dst, j->buf, j->len);
+    if (r == 1) { to_guest(j->dst, j->buf, j->len); note_model(j->off, j->dst); }
     free(j->buf); free(j);
     return r;
 }
