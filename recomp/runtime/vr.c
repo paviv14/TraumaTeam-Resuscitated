@@ -1423,28 +1423,60 @@ void vr_input(Input *in) {
         in->minus |= g_ab[0]; in->plus |= g_bb[0];
     }
 #endif
-    {   // examining: tap the model = A on that spot; hold and drag = turn it (the game's Rotate / Scroll on the D-pad)
-        static int st; static float y0, p0, yp, pp, tx, ty;
-        int raw = (in->a || in->lmb) && !g_scripted;
-        float yaw = atan2f(g_ray.d[0], -g_ray.d[2]), pit = asinf(g_ray.d[1] < -1 ? -1 : g_ray.d[1] > 1 ? 1 : g_ray.d[1]);
+    {   // examining: tap the model = A on that spot; grab it (grip, or hold the trigger and drag) = turn it with your hand.
+        // The grabbed spot follows your hand around the body's long axis: each frame the body's real angle is read
+        // back from the game and its Rotate (D-pad left/right) is held until it matches. Let go and it stays.
+        static int st, gsign = 1, probe; static float d0, phi0, th0, txp, typ, thp; static float pr_th; static int pr_dir, pr_n;
+        int trig = (in->a || in->lmb) && !g_scripted, grip = 0;
+#ifdef TTPC_OPENXR
+        if (!g_preview) grip = g_gripb[g_point_hand];
+#endif
         if (!g_exam_now || !g_exam_anchored) st = 0;
         else {
-            if (st == 0 && raw) { if (g_last_kind == 6) { st = 1; y0 = yp = yaw; p0 = pp = pit; tx = px; ty = py; } else st = 3; }
-            if (st == 1) {
-                if (!raw) { click_at(tx * 640.f, ty * g_vr_pic_h + g_vr_pic_y0, 16); st = 0; }
-                else if (fabsf(yaw - y0) > 0.035f || fabsf(pit - p0) > 0.035f) { st = 2; fprintf(stderr, "[vr] dragging the model\n"); }
+            int k = g_exam_now - 1; MModel *md = &g_mdl[k];
+            M4 W = exam_matrix(k);
+            float A[3] = { W.m[md->axis * 4], W.m[md->axis * 4 + 1], W.m[md->axis * 4 + 2] }, al = sqrtf(A[0] * A[0] + A[1] * A[1] + A[2] * A[2]);
+            for (int i = 0; i < 3; i++) A[i] /= al > 0 ? al : 1;
+            float mid[3] = { (md->lo[0] + md->hi[0]) / 2, (md->lo[1] + md->hi[1]) / 2, (md->lo[2] + md->hi[2]) / 2 }, C[3]; m4_point(W, mid, C);
+            // a basis around the axis: u = world up (or forward) made perpendicular, v = A x u
+            float up[3] = { 0, 1, 0 }; if (fabsf(A[1]) > 0.9f) { up[1] = 0; up[2] = -1; }
+            float dd = up[0] * A[0] + up[1] * A[1] + up[2] * A[2], u[3] = { up[0] - dd * A[0], up[1] - dd * A[1], up[2] - dd * A[2] };
+            float ul = sqrtf(u[0] * u[0] + u[1] * u[1] + u[2] * u[2]); for (int i = 0; i < 3; i++) u[i] /= ul;
+            float v[3] = { A[1] * u[2] - A[2] * u[1], A[2] * u[0] - A[0] * u[2], A[0] * u[1] - A[1] * u[0] };
+            #define ANG(P) atan2f(((P)[0] - C[0]) * v[0] + ((P)[1] - C[1]) * v[1] + ((P)[2] - C[2]) * v[2], ((P)[0] - C[0]) * u[0] + ((P)[1] - C[1]) * u[1] + ((P)[2] - C[2]) * u[2])
+            // the body's displayed roll: where a fixed model direction (perpendicular to the axis) points now
+            float q[3] = { 0, 0, 0 }; q[(md->axis + 1) % 3] = (md->hi[(md->axis + 1) % 3] - md->lo[(md->axis + 1) % 3]) * 0.5f + 1e-3f;
+            float qm[3] = { mid[0] + q[0], mid[1] + q[1], mid[2] + q[2] }, Q[3]; m4_point(W, qm, Q);
+            float th = ANG(Q);
+            float hand[3] = { g_ray.o[0] + g_ray.d[0] * d0, g_ray.o[1] + g_ray.d[1] * d0, g_ray.o[2] + g_ray.d[2] * d0 };
+            if (st == 0 && (trig || grip)) {
+                if (g_last_kind == 6) { d0 = dist; st = grip ? 2 : 1; txp = px; typ = py;
+                    float h0[3] = { g_ray.o[0] + g_ray.d[0] * d0, g_ray.o[1] + g_ray.d[1] * d0, g_ray.o[2] + g_ray.d[2] * d0 };
+                    phi0 = ANG(h0); th0 = th; thp = th; pr_n = 0; }
+                else st = 3;
+            }
+            if (st == 1) {   // trigger: a tap examines the spot, moving the hand turns it into a grab
+                float dphi = ANG(hand) - phi0; while (dphi > M_PI) dphi -= 2 * M_PI; while (dphi < -M_PI) dphi += 2 * M_PI;
+                if (!trig) { click_at(txp * 640.f, typ * g_vr_pic_h + g_vr_pic_y0, 16); st = 0; }
+                else if (fabsf(dphi) > 0.06f) { st = 2; fprintf(stderr, "[vr] turning the %s by hand\n", k ? "personal effects" : "body"); }
             }
             if (st == 2) {
-                if (!raw) st = 0;
+                if (!trig && !grip) { st = 0; }
                 else {
-                    float dy = yaw - yp, dp = pit - pp;
-                    if (dy > 0.002f) in->right = 1; else if (dy < -0.002f) in->left = 1;
-                    if (dp > 0.002f) in->up = 1; else if (dp < -0.002f) in->down = 1;
-                    yp = yaw; pp = pit;
+                    float target = th0 + (ANG(hand) - phi0), err = target - th;
+                    while (err > M_PI) err -= 2 * M_PI; while (err < -M_PI) err += 2 * M_PI;
+                    int dir = err > 0.06f ? 1 : err < -0.06f ? -1 : 0;
+                    // learn which way the game's Rotate turns it (the first few frames of a press tell)
+                    if (dir && dir == pr_dir) { if (++pr_n == 8) { float moved = th - pr_th; while (moved > M_PI) moved -= 2 * M_PI; while (moved < -M_PI) moved += 2 * M_PI;
+                        if (fabsf(moved) > 0.01f && (moved > 0) != (dir > 0)) { gsign = -gsign; fprintf(stderr, "[vr] rotate direction flipped\n"); } } }
+                    else { pr_dir = dir; pr_n = 0; pr_th = th; }
+                    if (dir * gsign > 0) in->right = 1; else if (dir * gsign < 0) in->left = 1;
                 }
             }
-            if (st == 3 && !raw) st = 0;
-            if (st == 1 || st == 2) in->a = in->lmb = 0;   // the press itself never reaches the game while you decide / drag
+            if (st == 3 && !trig && !grip) st = 0;
+            if (st == 1 || st == 2) { in->a = in->lmb = 0; in->b = in->rmb = 0; }   // the grab never reaches the game as a press
+            #undef ANG
+            (void)thp; (void)probe;
         }
         g_scripted = 0;
     }
