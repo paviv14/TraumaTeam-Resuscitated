@@ -134,7 +134,8 @@ int platform_init(void) {
             // made for game streaming, may have no OpenGL driver)
             int disp = attempt < 4 ? 0 : (attempt - 4) % ndisp;
             SDL_GL_ResetAttributes();
-            SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3); SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
+            { int vr45 = vr_wanted() && attempt < 2;   // VR: SteamVR's OpenXR wants a newer OpenGL; fall back to 3.3
+              SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, vr45 ? 4 : 3); SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, vr45 ? 5 : 3); }
             SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
             SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
             SDL_GL_SetAttribute(SDL_GL_ACCELERATED_VISUAL, 1);   // never the Windows generic (GDI) OpenGL 1.1
@@ -154,6 +155,7 @@ int platform_init(void) {
                 settings_load();
                 if (gpu_init(g_cfg.scale)) {
                     settings_apply();
+                    vr_init();
                     SDL_ShowCursor(SDL_DISABLE);
                     g_window_open = 1;
                     return 1;
@@ -292,6 +294,7 @@ void platform_poll(void) {
 #undef PB
     }
     if (g_pointer_pad) { g_input.mouse_x = g_pad_px; g_input.mouse_y = g_pad_py; g_input.mouse_in = 1; }
+    vr_input(&g_input);
 }
 
 #else   // headless build

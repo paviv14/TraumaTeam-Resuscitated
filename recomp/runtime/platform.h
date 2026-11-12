@@ -14,6 +14,13 @@ typedef struct {
 } Input;
 extern Input g_input;
 
+// VR (vr.c)
+int vr_wanted(void);
+int vr_active(void);
+void vr_init(void);
+int vr_frame(unsigned game_tex, int w, int h);
+void vr_input(Input *in);
+
 // Settings (settings.ini, options menu in menu.c)
 typedef struct { int scale, fullscreen, stretch, sharp, vsync, textures, volume, pointer_speed, wide_fill, tex_limit, tex_compress, tex_vram_mb; } Settings;
 extern Settings g_cfg;

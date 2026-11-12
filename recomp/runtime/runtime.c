@@ -359,6 +359,11 @@ int main(int argc, char **argv) {
         for (int j = k; j + 2 <= argc; j++) argv[j] = argv[j + 2];
         argc -= 2; k--;
     }
+    for (int k = 1; k < argc; k++) if (!strcmp(argv[k], "--vr") || !strcmp(argv[k], "--vr-desktop")) {   // VR mode (vr.c)
+        setenv_portable(!strcmp(argv[k], "--vr") ? "TTPC_VR" : "TTPC_VR_PREVIEW", "1");
+        for (int j = k; j + 1 <= argc; j++) argv[j] = argv[j + 1];
+        argc -= 1; k--;
+    }
     if (getenv("TTPC_MISSION") && *getenv("TTPC_MISSION")) mission_setup(getenv("TTPC_MISSION"));
     const char *disc = find_disc(argv[0]);
     char dolpath[1200];
