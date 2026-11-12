@@ -293,6 +293,7 @@ static const char *FS =
     "    vec2 s = vec2(mix(uCrop.x, uCrop.z, t.x), 1.0 - mix(uCrop.y, uCrop.w, t.y));\n"
     "    vec3 c = texture(uTex, s).rgb; o = vec4(pow(c, vec3(2.2)), 1.0); return; }\n"
     "  if (uScreen == 3) { vec4 t = texture(uTex, vT) * vC * uBase; o = t; return; }   // the examination tunnel: glowing, see-through\n"
+    "  if (uScreen == 4) { vec4 t = texture(uTex, vT); o = vec4(mix(vC.rgb * 2.0, t.rgb, t.a * 0.9), 1.0); return; }   // the body: its marks over the glow\n"
     "  vec4 b = uBase * texture(uTex, vT); if (b.a < uCut) discard;\n"
     "  vec3 c = b.rgb * (uLit.x > 0.0 ? uLit : vC.rgb * 2.0) + uEmis * texture(uETex, vT).rgb;   // baked light was stored at half range\n"
     "  o = vec4(c, 1.0);\n"
@@ -965,7 +966,9 @@ static int g_vr_frame_no, g_exam_seen, g_exam_now, g_exam_hold;   // examining: 
 static float g_exam_fade; static M4 g_exam_A; static float g_exam_k; static int g_exam_anchored, g_exam_exit_cd, g_scripted;
 static int g_vr_morgue_seen, g_morgue_now, g_morgue_hold;
 static int g_hit_part, g_hit_tri; static float g_hit_b[2];   // the last spot the laser found on the model
-static int g_bubble_seen, g_bubble_now;                      // a speech bubble is up (its font sheets were drawn)
+static int g_bubble_seen, g_bubble_now;                      // a speech bubble is up (its frame was drawn)
+static int g_stick_cmd;                                      // examining: the Nunchuk stick left/right the grab is holding (-1/0/1)
+static float g_chk_ref[12]; static int g_chk_frozen;          // the model's pose when you tapped (the game's zoom swings its camera)
 // a tap checks the spot directly: the game zooms in on a click, so VR clicks again on the same spot once it has
 // zoomed (CHECK), and when the remark is over backs out of the close-up (B)
 static int g_chk_st, g_chk_t, g_chk_part, g_chk_tri, g_chk_quiet, g_press_b; static float g_chk_b[2], g_chk_d0, g_chk_prevd;
@@ -1012,7 +1015,7 @@ static GLuint scn_texture(TexEntry *e) {
     return g_scn_tex[k].tex;
 }
 static void scn_capture(const Setup *s, int prim, int n, const VrVert *v, const float M[12]) {
-    if (n < 3 || v[0].w == 1.f) return;   // flat interface pieces stay on the pane
+    if (n < 3 || v[0].w == 1.f || !s->tex[0].e) return;   // flat interface pieces stay on the pane; untextured cards (the black backdrop) are left out
     if (g_scn_frame != g_vr_frame_no) { g_scn_frame = g_vr_frame_no; g_nscenery = 0; }
     if (g_nscenery >= 160) return;
     Scn *sc = &g_scenery[g_nscenery++]; int need = n * 6 * 9;
@@ -1081,7 +1084,7 @@ void vr_capture(int which, const Setup *s, int prim, int n, const VrVert *v, con
         }
         // its texture: the biggest one the draw uses (the clothes' colour maps); the body itself is lit skin
         TexEntry *best = NULL;
-        if (which == 1) for (int m = 0; m < 8; m++) { TexEntry *e = s->tex[m].e; if (e && e->px && (!best || e->w * e->h > best->w * best->h)) best = e; }
+        for (int m = 0; m < 8; m++) { TexEntry *e = s->tex[m].e; if (e && e->px && (!best || e->w * e->h > best->w * best->h)) best = e; }   // clothes: colour map; body: its marks
         if (best) {
             u8 *px = malloc((size_t)best->w * best->h * 4);
             for (int i = 0; i < best->w * best->h; i++) { u32 c = best->px[i]; px[i * 4] = c >> 24; px[i * 4 + 1] = c >> 16; px[i * 4 + 2] = c >> 8; px[i * 4 + 3] = c; }
@@ -1138,15 +1141,15 @@ static void mdl_place(int k) {
     memcpy(md->lit_R, md->R, 36);
     (void)mid;
 }
-static M4 exam_matrix(int k) {   // turned as the game sees it, but always the same size, floating ~1 m in front of you
-    MModel *md = &g_mdl[k]; M4 r = m4_id();
-    float L = md->hi[md->axis] - md->lo[md->axis], sc = L > 0 ? 1.15f / L : 0.01f;
+static M4 exam_matrix(int k) {   // turned as the game sees it, but always the same size, floating ~1.1 m in front of you
+    MModel *md = &g_mdl[k]; M4 r = m4_id(); const float *ref = g_chk_frozen ? g_chk_ref : md->ref;
+    float L = md->hi[md->axis] - md->lo[md->axis], sc = L > 0 ? 0.95f / L : 0.01f;
     float mid[3] = { (md->lo[0] + md->hi[0]) / 2, (md->lo[1] + md->hi[1]) / 2, (md->lo[2] + md->hi[2]) / 2 };
     for (int i = 0; i < 3; i++) {
-        float l = sqrtf(md->ref[i * 4] * md->ref[i * 4] + md->ref[i * 4 + 1] * md->ref[i * 4 + 1] + md->ref[i * 4 + 2] * md->ref[i * 4 + 2]); if (l < 1e-6f) l = 1;
-        for (int j = 0; j < 3; j++) r.m[j * 4 + i] = md->ref[i * 4 + j] / l * sc;
+        float l = sqrtf(ref[i * 4] * ref[i * 4] + ref[i * 4 + 1] * ref[i * 4 + 1] + ref[i * 4 + 2] * ref[i * 4 + 2]); if (l < 1e-6f) l = 1;
+        for (int j = 0; j < 3; j++) r.m[j * 4 + i] = ref[i * 4 + j] / l * sc;
     }
-    const float c[3] = { 0, -0.12f, -1.0f };
+    const float c[3] = { 0, -0.18f, -1.15f };
     for (int i = 0; i < 3; i++) r.m[12 + i] = c[i] - (r.m[i] * mid[0] + r.m[4 + i] * mid[1] + r.m[8 + i] * mid[2]);
     return m4_mul(g_exam_A, r);
 }
@@ -1186,9 +1189,10 @@ static void mdl_draw(int k) {
         }
         vBindBuffer(GL_ARRAY_BUFFER, pt->vbo); vBufferData(GL_ARRAY_BUFFER, 36 * 3 * (size_t)pt->ntri, pt->cpu, GL_DYNAMIC_DRAW);
         vBindTexture(GL_TEXTURE_2D, pt->tex ? pt->tex : g_white); vUniform4fv(u_base, 1, pt->tex ? one : (k == 0 && scan) ? white : skin);
+        vUniform1i(u_screen, k == 0 && pt->tex ? 4 : 0);
         vBindVertexArray(pt->vao); vDrawArrays(GL_TRIANGLES, 0, pt->ntri * 3);
     }
-    M4 id = m4_id(); vUniformMatrix4fv(u_model, 1, 0, id.m);
+    vUniform1i(u_screen, 0); M4 id = m4_id(); vUniformMatrix4fv(u_model, 1, 0, id.m);
 }
 // the laser on the model being examined: the spot -> where it is on the game's screen (640x528 frame)
 static int mdl_hit(int k, const Ray *r, float *sx, float *sy, float *dist) {
@@ -1251,7 +1255,7 @@ int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float 
     (void)ht; (void)yo;
     float ymn = 1e9f, ymx = -1e9f;
     for (int i = 0; i < n; i++) if (v[i].w != 0) { float y = v[i].y / v[i].w * ht + yo; if (y < ymn) ymn = y; if (y > ymx) ymx = y; }
-    for (int m = 0; m < 8; m++) { TexEntry *e = s->tex[m].e; if (e && e->w == 256 && e->h == 128) g_bubble_seen = 1; }
+    for (int m = 0; m < 8; m++) { TexEntry *e = s->tex[m].e; if (e && e->w == 512 && e->h == 256) g_bubble_seen = 1; }
     if (g_exam_now && !g_office_now) {   // examining: the game's floating model and its tunnel are the VR bed now; only the flat interface stays
         int flat = 1; for (int i = 0; i < n && flat; i++) if (v[i].w != 1.f) flat = 0;
         if (!flat) return 1;
@@ -1375,6 +1379,10 @@ int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
                 else if (g_chk_t > 1200) g_chk_st = 0;
             }
         } else if (!g_exam_now) g_chk_st = 0;
+        if (!g_chk_st && g_chk_frozen) {   // un-freeze once the game's camera is back where it was
+            MModel *md = g_exam_now ? &g_mdl[g_exam_now - 1] : NULL; static int wait;
+            if (!md || fabsf(md->camd - g_chk_d0) < 3 || ++wait > 90) { g_chk_frozen = 0; wait = 0; }
+        }
         float target = g_exam_now && g_exam_anchored ? 1.f : 0.f; g_exam_fade += (target - g_exam_fade) * 0.12f;
         if (fabsf(target - g_exam_fade) < 0.01f) g_exam_fade = target;
         // stepping back out of it presses the game's EXIT
@@ -1515,6 +1523,7 @@ void vr_input(Input *in) {
                 if (!trig) {   // a tap: check that spot (the zoom the game does is undone for you)
                     click_at(txp * 640.f, typ * g_vr_pic_h + g_vr_pic_y0, 16); st = 0;
                     g_chk_st = 1; g_chk_t = 0; g_chk_part = tpart; g_chk_tri = ttri; g_chk_b[0] = tb[0]; g_chk_b[1] = tb[1]; g_chk_d0 = md->camd; g_chk_prevd = md->camd;
+                    memcpy(g_chk_ref, md->ref, 48); g_chk_frozen = 1;
                 }
                 else if (mv > 0.025f) { st = 2; fprintf(stderr, "[vr] turning the %s by hand\n", k ? "personal effects" : "body"); }
             }
@@ -1530,7 +1539,7 @@ void vr_input(Input *in) {
                     if (dir && dir == pr_dir) { if (++pr_n == 8) { float moved = th - pr_th; while (moved > M_PI) moved -= 2 * M_PI; while (moved < -M_PI) moved += 2 * M_PI;
                         if (fabsf(moved) > 0.01f && (moved > 0) != (dir > 0)) { gsign = -gsign; fprintf(stderr, "[vr] rotate direction flipped\n"); } } }
                     else { pr_dir = dir; pr_n = 0; pr_th = th; }
-                    if (dir * gsign > 0) in->right = 1; else if (dir * gsign < 0) in->left = 1;
+                    g_stick_cmd = dir * gsign;
                 }
             }
             if (st == 3 && !trig && !grip) st = 0;
@@ -1571,6 +1580,8 @@ void vr_input(Input *in) {
     if (what) {}
     else in->mouse_in = 0;
     if (g_preview) in->stick_up = in->stick_down = in->stick_left = in->stick_right = 0;   // desktop mode: WASD walks you, not the Nunchuk
+    if (g_stick_cmd) { in->stick_right = g_stick_cmd > 0; in->stick_left = g_stick_cmd < 0; in->nx = (float)g_stick_cmd; in->ny = 0; in->has_analog = 1; }   // the grab turns the model
+    g_stick_cmd = 0;
 }
 
 #else   // headless build
