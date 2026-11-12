@@ -104,7 +104,7 @@ static void m4_point(M4 a, const float p[3], float o[3]) { for (int i = 0; i < 3
 static void m4_dir(M4 a, const float p[3], float o[3]) { for (int i = 0; i < 3; i++) o[i] = a.m[i] * p[0] + a.m[4 + i] * p[1] + a.m[8 + i] * p[2]; }
 
 // ---------------------------------------------------------------- the room (glTF)
-typedef struct { float base[4], emis[3]; GLuint tex, etex; int blend, mask; float cutoff; int screen; } Mat;
+typedef struct { float base[4], emis[3]; GLuint tex, etex; int blend, mask; float cutoff; int screen, name_paper; } Mat;
 typedef struct { GLuint vao; int n; int mat; int grp; } Prim;   // grp: 1 door, 3 mouse (moved at draw time)
 static Mat *g_mat; static int g_nmat;
 static Prim *g_prim; static int g_nprim;
@@ -142,7 +142,12 @@ static float g_door_t; static int g_door_req, g_last_kind;   // g_last_kind: wha
 static const float HINGE[3] = { -0.8f, 0, -7.25f };
 // the desk mouse: hold it (grip near it, or E on the keyboard) and it moves the computer's pointer
 static float g_mouse_off[2]; static int g_mouse_held = -1; static float g_mouse_grab[3], g_mouse_grab_off[2];
-static GLint u_model;
+static GLint u_model, u_hole;
+// the LIMIT hearts: their spot in the game's picture (pixels) and their plaque on the wall
+static const float HEARTS_PX[4] = { 44, 68, 256, 116 };
+static GLuint g_saver_tex;
+// stepping away from the desk while the computer is on presses its EXIT button for you
+static int g_auto_exit; static const float EXIT_BTN[2] = { 0.823f, 0.875f };   // vr/screensaver.png: the monitor when the computer is off
 static M4 g_head; static int g_head_ok;
 // where the game's interface is on screen (office): rectangles of the drawn pieces, this frame and last
 typedef struct { float x0, y0, x1, y1; } Rect;
@@ -182,7 +187,7 @@ static int load_room(const char *path) {
         o->tex = bt ? upload_image(bt->image, 1) : 0; o->etex = et ? upload_image(et->image, 1) : 0;
         o->blend = m->alpha_mode == cgltf_alpha_mode_blend; o->mask = m->alpha_mode == cgltf_alpha_mode_mask; o->cutoff = m->alpha_cutoff;
         if (o->blend) { o->mask = 1; o->cutoff = 0.5f; o->blend = 0; }   // leaves: cut-out reads better than sorting in VR
-        o->screen = m->name && !strcmp(m->name, "screen");
+        o->screen = m->name && !strcmp(m->name, "screen"); o->name_paper = m->name && !strcmp(m->name, "paper");
     }
     int cap = 0;
     for (cgltf_size ni = 0; ni < d->nodes_count; ni++) {
@@ -252,9 +257,10 @@ static const char *VS =
 static const char *FS =
     "#version 330 core\n"
     "in vec2 vT; in vec4 vC; uniform vec4 uBase; uniform vec3 uEmis; uniform sampler2D uTex, uETex; uniform float uCut;\n"
-    "uniform int uScreen; uniform vec2 uScrK; uniform vec4 uCrop; out vec4 o;\n"
+    "uniform int uScreen; uniform vec2 uScrK; uniform vec4 uCrop; uniform vec4 uHole; out vec4 o;\n"
     "void main() {\n"
     "  if (uScreen == 2) {   // the game's interface over a magenta key (the office painting was left out)\n"
+    "    if (vT.x > uHole.x && vT.x < uHole.z && vT.y > uHole.y && vT.y < uHole.w) discard;   // (the hearts live on the wall)\n"
     "    vec2 s = vec2(mix(uCrop.x, uCrop.z, vT.x), 1.0 - mix(uCrop.y, uCrop.w, vT.y));\n"
     "    vec3 c = texture(uTex, s).rgb;\n"
     "    float a = 1.0 - clamp((min(c.r, c.b) - c.g) * 1.1, 0.0, 1.0);   // how much of it is NOT the key\n"
@@ -308,8 +314,8 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
     float sw = sqrtf(g_scr_u[0] * g_scr_u[0] + g_scr_u[1] * g_scr_u[1] + g_scr_u[2] * g_scr_u[2]);
     float sh = sqrtf(g_scr_v[0] * g_scr_v[0] + g_scr_v[1] * g_scr_v[1] + g_scr_v[2] * g_scr_v[2]);
     float qa = sh > 0 ? sw / sh : 1, ga = desk_aspect();
-    float kx = qa > ga ? qa / ga : 1, ky = qa > ga ? 1 : ga / qa;
-    vUniform2f(u_scr_k, kx, ky); vUniform4f(u_crop, g_x0f, DESK_Y0, g_x1f, DESK_Y1);
+    (void)qa; (void)ga;
+    vUniform2f(u_scr_k, 1, 1); vUniform4f(u_crop, g_x0f, DESK_Y0, g_x1f, DESK_Y1);   // the desktop fills the whole monitor
     M4 ident = m4_id(), door_m, mouse_m = m4_id();
     {   float a = -1.65f * g_door_t; M4 r = m4_yaw(a, 0, 0, 0), t = m4_yaw(0, HINGE[0], 0, HINGE[2]), ti = m4_yaw(0, -HINGE[0], 0, -HINGE[2]);
         door_m = m4_mul(t, m4_mul(r, ti)); }
@@ -321,14 +327,20 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
         static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 };
         vActiveTexture(GL_TEXTURE1); vBindTexture(GL_TEXTURE_2D, m && m->etex ? m->etex : g_white);
         vActiveTexture(GL_TEXTURE0);
-        if (m && m->screen) { vBindTexture(GL_TEXTURE_2D, g_desk_have ? g_desk_tex : g_white); vUniform1i(u_screen, g_desk_have ? 1 : 0);
-                              if (!g_desk_have) { static const float off[4] = { 0.01f, 0.012f, 0.015f, 1 }; vUniform4fv(u_base, 1, off); vUniform3fv(u_emis, 1, zero); vUniform1f(u_cut, -1.f); vBindVertexArray(p->vao); vDrawElements(GL_TRIANGLES, p->n, GL_UNSIGNED_INT, 0); continue; } }
+        if (m && m->screen && !g_desk_now && g_saver_tex) {   // computer off: Naomi's screensaver (the CIFM seal)
+            static const float blk[4] = { 0, 0, 0, 1 }, glow[3] = { 0.8f, 0.8f, 0.8f };
+            vActiveTexture(GL_TEXTURE1); vBindTexture(GL_TEXTURE_2D, g_saver_tex); vActiveTexture(GL_TEXTURE0); vBindTexture(GL_TEXTURE_2D, g_white);
+            vUniform1i(u_screen, 0); vUniform4fv(u_base, 1, blk); vUniform3fv(u_emis, 1, glow); vUniform1f(u_cut, -1.f);
+            vBindVertexArray(p->vao); vDrawElements(GL_TRIANGLES, p->n, GL_UNSIGNED_INT, 0); continue;
+        }
+        if (m && m->screen) { vBindTexture(GL_TEXTURE_2D, g_desk_now ? game_tex : g_desk_have ? g_desk_tex : g_white); vUniform1i(u_screen, g_desk_have || g_desk_now ? 1 : 0);
+                              if (!g_desk_have && !g_desk_now) { static const float off[4] = { 0.01f, 0.012f, 0.015f, 1 }; vUniform4fv(u_base, 1, off); vUniform3fv(u_emis, 1, zero); vUniform1f(u_cut, -1.f); vBindVertexArray(p->vao); vDrawElements(GL_TRIANGLES, p->n, GL_UNSIGNED_INT, 0); continue; } }
         else { vBindTexture(GL_TEXTURE_2D, m && m->tex ? m->tex : g_white); vUniform1i(u_screen, 0); }
         vUniform4fv(u_base, 1, m ? m->base : one); vUniform3fv(u_emis, 1, m ? m->emis : zero);
         vUniform1f(u_cut, m && m->mask ? m->cutoff : -1.f);
         vBindVertexArray(p->vao); vDrawElements(GL_TRIANGLES, p->n, GL_UNSIGNED_INT, 0);
     }
-    vUniformMatrix4fv(u_model, 1, 0, ident.m);
+    vUniformMatrix4fv(u_model, 1, 0, ident.m); vUniform4f(u_hole, 2, 2, 2, 2);
     if (g_door_t > 0.02f) {   // the void beyond the open door
         static const float black[4] = { 0, 0, 0, 1 }, zero3[3] = { 0, 0, 0 };
         float q[4][9] = { { -0.8f, 2.2f, -7.272f, 0, 0, 1, 1, 1, 1 }, { 0.2f, 2.2f, -7.272f, 1, 0, 1, 1, 1, 1 },
@@ -346,9 +358,20 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
             q[i][3] = su; q[i][4] = sv; q[i][5] = q[i][6] = q[i][7] = q[i][8] = 1; }
         vBindBuffer(GL_ARRAY_BUFFER, g_pan_vbo); vBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
         vActiveTexture(GL_TEXTURE0); vBindTexture(GL_TEXTURE_2D, game_tex); vUniform1i(u_screen, g_office_now ? 2 : 1);
+        { float hy = (float)g_vr_pic_h; vUniform4f(u_hole, HEARTS_PX[0] / 640.f, (HEARTS_PX[1] - g_vr_pic_y0) / hy, HEARTS_PX[2] / 640.f, (HEARTS_PX[3] - g_vr_pic_y0) / hy); }
         if (g_office_now) { vEnable(GL_BLEND); vBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); vDepthMask(0); }
         vUniform2f(u_scr_k, 1, 1); vUniform4f(u_crop, g_x0f, 0, g_x1f, 1); vUniform4fv(u_base, 1, one); vUniform3fv(u_emis, 1, zero);
         vBindVertexArray(g_pan_vao); vDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+        vUniform4f(u_hole, 2, 2, 2, 2);
+        if (g_office_now) {   // the hearts plaque on the wall, left of the desk
+            const float w = 0.75f, h = w * (HEARTS_PX[3] - HEARTS_PX[1]) / (HEARTS_PX[2] - HEARTS_PX[0]);
+            float q[4][9] = { { -2.97f, 2.1f, -0.95f, 0, 0, 1, 1, 1, 1 }, { -2.97f, 2.1f, -0.95f - w, 1, 0, 1, 1, 1, 1 },
+                              { -2.97f, 2.1f - h, -0.95f - w, 1, 1, 1, 1, 1, 1 }, { -2.97f, 2.1f - h, -0.95f, 0, 1, 1, 1, 1, 1 } };
+            float hy = (float)g_vr_pic_h, cx0 = g_x0f + (g_x1f - g_x0f) * HEARTS_PX[0] / 640.f, cx1 = g_x0f + (g_x1f - g_x0f) * HEARTS_PX[2] / 640.f;
+            vUniform4f(u_crop, cx0, (HEARTS_PX[1] - g_vr_pic_y0) / hy, cx1, (HEARTS_PX[3] - g_vr_pic_y0) / hy);
+            vBindBuffer(GL_ARRAY_BUFFER, g_pan_vbo); vBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
+            vDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+        }
         vDisable(GL_BLEND); vDepthMask(1);
     }
     vBindVertexArray(g_linevao); vUseProgram(g_lineprog);
@@ -446,6 +469,16 @@ static void place_pane(void) {
     }
     if (g_pan_placed == 2) g_pan_placed = 0;
     if (!g_head_ok) return;
+    if (g_office_now) {   // the comic bubbles ride in front of your face (smoothed a little so they don't jitter)
+        const float dist = 0.95f, w = 0.95f, h = w * 0.75f;
+        float eye[3] = { g_head.m[12], g_head.m[13], g_head.m[14] };
+        float fwd[3] = { -g_head.m[8], -g_head.m[9], -g_head.m[10] }, up[3] = { g_head.m[4], g_head.m[5], g_head.m[6] }, rt[3] = { g_head.m[0], g_head.m[1], g_head.m[2] };
+        float o[3], u[3], v[3];
+        for (int k = 0; k < 3; k++) { u[k] = rt[k] * w; v[k] = -up[k] * h; o[k] = eye[k] + fwd[k] * dist - u[k] / 2 - v[k] / 2 - up[k] * 0.06f; }
+        float a = g_pan_placed == 1 ? 0.35f : 1.f;
+        for (int k = 0; k < 3; k++) { g_pan_o[k] += (o[k] - g_pan_o[k]) * a; g_pan_u[k] += (u[k] - g_pan_u[k]) * a; g_pan_v[k] += (v[k] - g_pan_v[k]) * a; }
+        g_pan_placed = 1; return;
+    }
     float eye[3] = { g_head.m[12], g_head.m[13], g_head.m[14] }, fw[3] = { -g_head.m[8], 0, -g_head.m[10] };
     float fl = sqrtf(fw[0] * fw[0] + fw[2] * fw[2]); if (fl < 1e-3f) return; fw[0] /= fl; fw[2] /= fl;
     float dist = g_office_now ? 0.95f : 1.8f, w = g_office_now ? 0.75f : 1.6f, h = w * 0.75f;
@@ -486,7 +519,7 @@ typedef struct GLSave GLSave; static void gl_save(GLSave *s); static void gl_res
 static GLuint g_game_tex; static int g_gw = 640, g_gh = 480;
 static int common_init(void) {
     g_prog = build(VS, FS); g_lineprog = build(LVS, LFS);
-    u_mvp = vGetUniformLocation(g_prog, "uMVP"); u_model = vGetUniformLocation(g_prog, "uModel"); u_base = vGetUniformLocation(g_prog, "uBase"); u_emis = vGetUniformLocation(g_prog, "uEmis");
+    u_mvp = vGetUniformLocation(g_prog, "uMVP"); u_model = vGetUniformLocation(g_prog, "uModel"); u_hole = vGetUniformLocation(g_prog, "uHole"); u_base = vGetUniformLocation(g_prog, "uBase"); u_emis = vGetUniformLocation(g_prog, "uEmis");
     u_tex = vGetUniformLocation(g_prog, "uTex"); u_etex = vGetUniformLocation(g_prog, "uETex"); u_cut = vGetUniformLocation(g_prog, "uCut");
     u_screen = vGetUniformLocation(g_prog, "uScreen"); u_scr_k = vGetUniformLocation(g_prog, "uScrK"); u_crop = vGetUniformLocation(g_prog, "uCrop");
     u_line_mvp = vGetUniformLocation(g_lineprog, "uMVP"); u_line_col = vGetUniformLocation(g_lineprog, "uCol");
@@ -508,6 +541,16 @@ static int common_init(void) {
     }
     const char *room = getenv("TTPC_VR_SCENE"); if (!room || !*room) room = "vr/naomi_office.glb";
     if (!load_room(room)) return 0;
+    {   // extra pictures next to the room (made from the game's own files)
+        int w, h, c; u8 *px = stbi_load("vr/screensaver.png", &w, &h, &c, 4);
+        if (px) { vGenTextures(1, &g_saver_tex); vBindTexture(GL_TEXTURE_2D, g_saver_tex); vTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                  vGenerateMipmap(GL_TEXTURE_2D); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR); free(px); }
+        px = stbi_load("vr/case_report.png", &w, &h, &c, 4);
+        if (px) { GLuint t; vGenTextures(1, &t); vBindTexture(GL_TEXTURE_2D, t); vTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+                  vGenerateMipmap(GL_TEXTURE_2D); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                  vTexParameteri(GL_TEXTURE_2D, 0x84FE, 8); free(px);
+                  for (int i = 0; i < g_nmat; i++) if (g_mat[i].name_paper) g_mat[i].tex = t; }
+    }
     g_world_from_stage = m4_yaw(g_turn, g_seat[0], g_seat[1], g_seat[2]);
     return 1;
 }
@@ -562,7 +605,7 @@ static int preview_frame(void) {
         if (!(mb & SDL_BUTTON_RMASK)) { g_mouse_off[1] -= dx * 0.0004f; g_mouse_off[0] += dy * 0.0004f; dx = dy = 0; }
         float mc[3]; for (int c = 0; c < 3; c++) mc[c] = (g_obj_min[3][c] + g_obj_max[3][c]) / 2;
         float ddx = px_ - (mc[0] + g_mouse_off[0]), ddz = pz_ - (mc[2] + g_mouse_off[1]);
-        if (k[SDL_SCANCODE_T] || ddx * ddx + ddz * ddz > 1.1f * 1.1f) { g_mouse_held = -1; fprintf(stderr, "[vr] let go of the mouse\n"); }
+        (void)ddx; (void)ddz;
     } else if (0) {
         Ray er; float el[3] = { 0, 0, 0 }, fl[3] = { 0, 0, -1 }; m4_point(g_head, el, er.o); m4_dir(g_head, fl, er.d); er.valid = 1;
         float mn[3], mx[3], d; for (int c = 0; c < 3; c++) { mn[c] = g_obj_min[3][c] + (c == 0 ? g_mouse_off[0] : c == 2 ? g_mouse_off[1] : 0); mx[c] = g_obj_max[3][c] + (c == 0 ? g_mouse_off[0] : c == 2 ? g_mouse_off[1] : 0); }
@@ -581,7 +624,7 @@ static int preview_frame(void) {
     float eyeh = k[SDL_SCANCODE_LCTRL] ? 1.15f : 1.55f;   // hold Ctrl: sit down (eye height)
     M4 head = m4_yaw(yaw, px_, eyeh, pz_);
     M4 pit = m4_id(); pit.m[5] = cosf(pitch); pit.m[6] = sinf(pitch); pit.m[9] = -sinf(pitch); pit.m[10] = cosf(pitch);
-    head = m4_mul(head, pit); g_head = head; g_head_ok = 1;
+    head = m4_mul(head, pit); g_head = head; g_head_ok = 1; place_pane();
     float t = tanf(32 * (float)M_PI / 180), a = (float)ww / wh;
     M4 proj = m4_frustum(-t * a, t * a, -t, t, 0.03f, 50.f), view = m4_rigid_inv(head);
     // the laser comes from a hand below-right of the eye and goes to whatever the crosshair (screen centre) is on
@@ -799,7 +842,7 @@ static int xr_frame(void) {
                 vFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, g_depth[e]);
                 vViewport(0, 0, g_scw[e], g_sch[e]); vClearColor(0.02f, 0.01f, 0.01f, 1); vClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
                 M4 eye = m4_mul(g_world_from_stage, m4_pose(&views[e].pose.orientation.x, &views[e].pose.position.x));
-                if (e == 0) { g_head = eye; g_head_ok = 1; }
+                if (e == 0) { g_head = eye; g_head_ok = 1; place_pane(); }
                 XrFovf f = views[e].fov;
                 M4 proj = m4_frustum(tanf(f.angleLeft), tanf(f.angleRight), tanf(f.angleDown), tanf(f.angleUp), 0.03f, 50.f);
                 draw_scene(proj, m4_rigid_inv(eye), g_game_tex, g_gw, g_gh);
@@ -885,6 +928,12 @@ int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
     {   int open = g_door_req && !g_office_now && !g_desk_now;
         if (g_office_now && g_door_t >= 1.f) g_door_req = 0;   // back from the map: the door closes
         float target = open ? 1.f : 0.f; g_door_t += (target - g_door_t) * 0.08f; if (fabsf(target - g_door_t) < 0.002f) g_door_t = target; }
+    if (g_desk_now && g_head_ok && g_obj_ok[3] && g_auto_exit == 0) {
+        float mx = (g_obj_min[3][0] + g_obj_max[3][0]) / 2 + g_mouse_off[0], mz = (g_obj_min[3][2] + g_obj_max[3][2]) / 2 + g_mouse_off[1];
+        float dx = g_head.m[12] - mx, dz = g_head.m[14] - mz;
+        if (dx * dx + dz * dz > 1.2f * 1.2f) { g_auto_exit = 40; fprintf(stderr, "[vr] stepped away from the computer: EXIT\n"); }
+    }
+    if (!g_desk_now && g_auto_exit > 0 && g_auto_exit < 30) g_auto_exit = 0;   // it closed
     place_pane();
     gl_chk("enter"); GLSave s; gl_save(&s); gl_chk("save"); int drew = 0;
     if (fresh) {   // keep this desktop frame for the monitor
@@ -942,6 +991,12 @@ void vr_input(Input *in) {
         if (hit && fabsf(d) < 0.03f && bx >= 0 && bx <= 1 && by >= 0 && by <= 1) { px = bx; py = by; what = 2; in->lmb = in->a = 1; }
     }
 #endif
+    if (g_auto_exit > 0 && g_desk_now) {
+        px = EXIT_BTN[0]; py = EXIT_BTN[1]; what = 1;
+        if (g_auto_exit <= 18 && g_auto_exit > 10) { in->a = 1; in->lmb = 1; }
+        if (--g_auto_exit == 0) g_auto_exit = 0;
+        if (g_auto_exit == 0) g_auto_exit = -60;   // don't retrigger at once if the computer stays up
+    } else if (g_auto_exit < 0) g_auto_exit++;
     if (what) { in->mouse_x = px; in->mouse_y = py; in->mouse_in = 1; }
     { static int prev; int down = in->lmb || in->a;
       if (down && !prev && g_last_kind == 4 && g_office_now) g_door_req = 1;   // the door: if the game lets you go, it opens
