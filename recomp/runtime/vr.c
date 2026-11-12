@@ -895,7 +895,9 @@ int vr_draw_skip(const Setup *s, const Out *v, int n, float wd, float ht, float 
         // over the office: the hotspot markers and the pointer are left out too (the room objects and the laser replace them)
         if (e && g_vr_office_seen && ((e->w == 56 && e->h == 56) || (e->w == 64 && e->h == 64))) return 1;
     }
-    if (g_vr_office_seen && mx > mn && ymx > ymn && mx < 300 && ymx < 150) {   // the LIMIT hearts corner
+    int heart = 0;
+    for (int m = 0; m < 8; m++) { TexEntry *e = s->tex[m].e; if (e && e->w == 128 && e->h == 128 && ((e->addr & 0x1FFFFFFF) == 0x1111C6C0 || (e->addr & 0x1FFFFFFF) == 0x112B2BA0)) heart = 1; }
+    if (heart && g_vr_office_seen && mx > mn && ymx > ymn && mx < 300 && ymx < 150) {   // the LIMIT hearts (and their glow)
         if (mn < g_hr[0]) g_hr[0] = mn; if (ymn < g_hr[1]) g_hr[1] = ymn; if (mx > g_hr[2]) g_hr[2] = mx; if (ymx > g_hr[3]) g_hr[3] = ymx;
     }
     if (g_vr_office_seen && g_nui[g_uicur] < 96 && mx > mn && ymx > ymn && mx - mn < 640)   // an interface piece: the pane takes the laser here
@@ -1019,6 +1021,27 @@ void vr_input(Input *in) {
         if (g_auto_exit == 0) g_auto_exit = -60;   // don't retrigger at once if the computer stays up
     } else if (g_auto_exit < 0) g_auto_exit++;
     if (what) { in->mouse_x = px; in->mouse_y = py; in->mouse_in = 1; }
+#ifdef TTPC_OPENXR
+    if (!g_preview) {
+        int h = g_point_hand;
+        in->lmb |= g_trig[h]; in->a |= g_trig[h];
+        in->rmb |= g_gripb[h] || g_bb[h]; in->b |= g_gripb[h] || g_bb[h];
+        in->minus |= g_ab[0]; in->plus |= g_bb[0];
+    }
+#endif
+    {   // on the computer: tap = A (open a card); press and hold = pick the card up (the game's A+B) and drag it
+        static int st, frames, tap;
+        int raw = in->a || in->lmb;
+        if (!g_desk_now) st = 0, tap = 0;
+        else {
+            if (st == 0 && raw) { st = 1; frames = 0; }
+            if (st == 1) { if (!raw) { tap = 6; st = 0; } else if (++frames >= 20) { st = 2; fprintf(stderr, "[vr] long press: dragging (A+B)\n"); } }
+            if (st == 2 && !raw) st = 0;
+            int a = st == 2 || tap > 0, b = st == 2;
+            if (tap > 0) tap--;
+            in->a = in->lmb = a; if (b) { in->b = 1; in->rmb = 1; }
+        }
+    }
     { static int prev; int down = in->lmb || in->a;
       if (down && !prev && g_last_kind == 4 && g_office_now) g_door_req = 1;   // the door: if the game lets you go, it opens
       if (down && !prev && g_last_kind == 5 && g_office_now && g_mouse_held < 0) {   // using the mouse turns the computer on; you keep hold of it
@@ -1035,14 +1058,6 @@ void vr_input(Input *in) {
     if (what) {}
     else in->mouse_in = 0;
     if (g_preview) in->stick_up = in->stick_down = in->stick_left = in->stick_right = 0;   // desktop mode: WASD walks you, not the Nunchuk
-#ifdef TTPC_OPENXR
-    if (!g_preview) {
-        int h = g_point_hand;
-        in->lmb |= g_trig[h]; in->a |= g_trig[h];
-        in->rmb |= g_gripb[h] || g_bb[h]; in->b |= g_gripb[h] || g_bb[h];
-        in->minus |= g_ab[0]; in->plus |= g_bb[0];
-    }
-#endif
 }
 
 #else   // headless build
