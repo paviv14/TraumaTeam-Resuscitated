@@ -1035,7 +1035,7 @@ void vr_input(Input *in) {
         if (!g_desk_now) st = 0, tap = 0;
         else {
             if (st == 0 && raw) { st = 1; frames = 0; }
-            if (st == 1) { if (!raw) { tap = 6; st = 0; } else if (++frames >= 20) { st = 2; fprintf(stderr, "[vr] long press: dragging (A+B)\n"); } }
+            if (st == 1) { if (!raw) { tap = 6; st = 0; } else if (++frames >= 10) { st = 2; fprintf(stderr, "[vr] long press: dragging (A+B)\n"); } }
             if (st == 2 && !raw) st = 0;
             int a = st == 2 || tap > 0, b = st == 2;
             if (tap > 0) tap--;
