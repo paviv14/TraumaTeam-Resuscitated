@@ -505,6 +505,20 @@ static int ray_box(const Ray *r, const float *mn, const float *mx, float pad, fl
 static void office_spot(const float *hs, float *gx, float *gy) {
     *gx = hs[0] / 640.f; *gy = (hs[1] + OFFICE_BG_Y - g_vr_pic_y0) / (float)g_vr_pic_h;
 }
+// which culture dish the laser is on (-1 none): anywhere in the open compartment counts, and picks the dish nearest where the
+// laser enters it, so aiming at a creature, its dish or the wall just behind it all work
+static int aim_dish(const Ray *r, float *dist) {
+    float mn[3] = { 1e9f, 1e9f, 1e9f }, mx[3] = { -1e9f, -1e9f, -1e9f }; int any = 0;
+    for (int d = 0; d < 7; d++) if (g_dish_ok[d]) { any = 1; for (int c = 0; c < 3; c++) { if (g_dish[d][c] < mn[c]) mn[c] = g_dish[d][c]; if (g_dish[d][c] > mx[c]) mx[c] = g_dish[d][c]; } }
+    if (!any) return -1;
+    for (int c = 0; c < 3; c += 2) { mn[c] -= 0.17f; mx[c] += 0.17f; }   // the compartment around the row of dishes (and a little of the wall's edge)
+    mn[1] -= 0.04f; mx[1] += 0.6f;
+    float t; if (!ray_box(r, mn, mx, 0.f, &t)) return -1;
+    float p[3]; for (int c = 0; c < 3; c++) p[c] = r->o[c] + r->d[c] * (t + 0.05f);   // a little past the opening
+    int bd = -1; float bb = 1e9f;
+    for (int d = 0; d < 7; d++) if (g_dish_ok[d]) { float dx = p[0] - g_dish[d][0], dz = p[2] - g_dish[d][2], q = dx * dx + dz * dz; if (q < bb) { bb = q; bd = d; } }
+    *dist = t; return bd;
+}
 // what the laser is on: 0 nothing, 1 monitor / room object, 2 pane; gx/gy = 0..1 across the game's picture (the pointer)
 static int laser_target(const Ray *r, float *gx, float *gy, float *dist) {
     float d1 = 1e9f, d2 = 1e9f, ax = 0, ay = 0, bx = 0, by = 0; int hit1 = 0, hit2 = 0;
@@ -526,11 +540,7 @@ static int laser_target(const Ray *r, float *gx, float *gy, float *dist) {
         float db; if (ray_box(r, g_obj_min[4], g_obj_max[4], 0.02f, &db) && (!hit1 || db < d1) && (!hit2 || db < d2)) { *gx = *gy = -1; *dist = db; g_last_kind = 9; return 0; }
     }
     if (g_office_now && g_niche_t > 0.5f) {   // the culture dishes (the nearest one the laser crosses)
-        float best = 1e9f; int bd = -1;
-        for (int d = 0; d < 7; d++) if (g_dish_ok[d]) {
-            float mn[3] = { g_dish[d][0] - 0.07f, g_dish[d][1] - 0.01f, g_dish[d][2] - 0.065f }, mx[3] = { g_dish[d][0] + 0.07f, g_dish[d][1] + 0.12f, g_dish[d][2] + 0.065f }, dc;
-            if (ray_box(r, mn, mx, 0.0f, &dc) && dc < best) { best = dc; bd = d; }
-        }
+        float best; int bd = aim_dish(r, &best);
         if (bd >= 0 && (!hit1 || best < d1) && (!hit2 || best < d2)) { *gx = *gy = -1; *dist = best; g_last_kind = 10; g_aim_dish = bd; return 0; }
     }
     int hr = g_office_now && g_obj_ok[0] && ray_box(r, g_obj_min[0], g_obj_max[0], 0.03f, &dr);
@@ -1895,11 +1905,7 @@ void vr_input(Input *in) {
       if (down && !prev && g_last_kind == 4 && g_office_now) g_door_req = 1;
       if (down && !prev && g_last_kind == 9) { g_niche_open = !g_niche_open; fprintf(stderr, "[vr] the hidden compartment %s\n", g_niche_open ? "opens" : "closes"); }
       if (down && !prev && g_office_now && g_niche_t > 0.5f && g_last_kind != 9) {   // a dish under the laser: stir it (tested on the
-          float best = 1e9f; int bd = -1;                                             // laser itself, so the game's picture can't take it)
-          for (int d = 0; d < 7; d++) if (g_dish_ok[d]) {
-              float mn[3] = { g_dish[d][0] - 0.07f, g_dish[d][1] - 0.01f, g_dish[d][2] - 0.065f }, mx[3] = { g_dish[d][0] + 0.07f, g_dish[d][1] + 0.12f, g_dish[d][2] + 0.065f }, dc;
-              if (ray_box(&g_ray, mn, mx, 0.01f, &dc) && dc < best) { best = dc; bd = d; }
-          }
+          float best; int bd = aim_dish(&g_ray, &best);                             // laser itself, so the game's picture can't take it)
           if (bd >= 0) { aq_poke(bd); g_last_kind = 10; }
           else fprintf(stderr, "[vr] click with the compartment open: laser on kind %d\n", g_last_kind);
       }
