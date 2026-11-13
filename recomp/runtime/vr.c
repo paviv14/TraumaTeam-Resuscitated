@@ -1814,6 +1814,7 @@ void vr_input(Input *in) {
         if (--g_auto_exit == 0) g_auto_exit = 0;
         if (g_auto_exit == 0) g_auto_exit = -60;   // don't retrigger at once if the computer stays up
     } else if (g_auto_exit < 0) g_auto_exit++;
+    int vr_made = g_scripted || g_click_t > 0 || g_press_b > 0 || (g_auto_exit != 0 && g_desk_now);   // presses the VR layer makes itself
     if (what) { in->mouse_x = px; in->mouse_y = py; in->mouse_in = 1; }
 #ifdef TTPC_OPENXR
     if (!g_preview) {
@@ -1927,6 +1928,14 @@ void vr_input(Input *in) {
       }
       if (down && !prev) fprintf(stderr, "[vr] click: %s at %.3f %.3f (office %d desktop %d)\n", what == 2 ? "pane" : what == 1 ? "room object/monitor" : "nothing", px, py, g_office_now, g_desk_now);
       prev = down; }
+    if (g_office_now && !g_desk_now && !vr_made && g_head_ok) {   // the office: the game only hears your buttons at the desk or by the exit door,
+        float hx = g_head.m[12], hz = g_head.m[14]; int near_ = 0;                // so poking around the room (the bookcase, the dishes) never reaches it
+        for (int o = 1; o <= 2; o += 1) if (g_obj_ok[o]) {
+            float cx = (g_obj_min[o][0] + g_obj_max[o][0]) / 2, cz = (g_obj_min[o][2] + g_obj_max[o][2]) / 2, dx = hx - cx, dz = hz - cz;
+            if (dx * dx + dz * dz < (o == 2 ? 1.6f * 1.6f : 1.4f * 1.4f)) near_ = 1;   // 2 the monitor (the desk), 1 the exit door
+        }
+        if (!near_) { in->a = in->lmb = in->b = in->rmb = 0; in->one = in->two = in->plus = in->minus = 0; }
+    }
     if (what) {}
     else in->mouse_in = 0;
     if (g_preview) in->stick_up = in->stick_down = in->stick_left = in->stick_right = 0;   // desktop mode: WASD walks you, not the Nunchuk
