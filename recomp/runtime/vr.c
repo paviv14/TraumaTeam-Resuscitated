@@ -751,6 +751,9 @@ static void norm3(float *v) { float l = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] *
 static void cross3(const float *a, const float *b, float *o) { o[0] = a[1] * b[2] - a[2] * b[1]; o[1] = a[2] * b[0] - a[0] * b[2]; o[2] = a[0] * b[1] - a[1] * b[0]; }
 // pose an instance (advance its own clock, agitated loop or idle) and skin it into the room: centred on C, its forward along F,
 // its up along U, its longest side `len` metres
+// an optional bend for the next ci_update: the body curls (curvature g_bend_k, 1/metres) toward the side g_bend_in, so two of them
+// can close into one ring (the pair's yin-yang)
+static float g_bend_k, g_bend_in[3];
 static void ci_update(CrInst *I, int agit, float rate, const float C[3], const float F_[3], const float U_[3], float len) {
     CrType *T = &g_ct[I->type]; const float dt = 1.f / 60;
     cgltf_animation *an = agit ? T->agit : T->idle; float dur = agit ? T->dur_a : T->dur_i;
@@ -786,6 +789,15 @@ static void ci_update(CrInst *I, int agit, float rate, const float C[3], const f
         float a_s = q[0] * ms[0] + q[1] * ms[1] + q[2] * ms[2], a_u = q[0] * T->mu[0] + q[1] * T->mu[1] + q[2] * T->mu[2], a_f = q[0] * T->mf[0] + q[1] * T->mf[1] + q[2] * T->mf[2];
         float b_s = n[0] * ms[0] + n[1] * ms[1] + n[2] * ms[2], b_u = n[0] * T->mu[0] + n[1] * T->mu[1] + n[2] * T->mu[2], b_f = n[0] * T->mf[0] + n[1] * T->mf[1] + n[2] * T->mf[2];
         float *o = I->cpu + k * 9, nw[3];
+        if (g_bend_k > 1e-3f) {   // wrap the body round an arc: along-body distance -> angle, inward distance -> radius
+            float si = S[0] * g_bend_in[0] + S[1] * g_bend_in[1] + S[2] * g_bend_in[2] < 0 ? -1.f : 1.f;   // S_in = si * S
+            float x = sc * a_f, y = sc * a_s * si, th = x * g_bend_k, r = 1.f / g_bend_k - y, ct = cosf(th), st = sinf(th);
+            for (int i = 0; i < 3; i++) {
+                float Si = si * S[i], O = C[i] + Si / g_bend_k, Rd = -Si * ct + F[i] * st, Td = F[i] * ct + Si * st;
+                o[i] = O + Rd * r + U[i] * sc * a_u;
+                nw[i] = Td * b_f - Rd * (b_s * si) + U[i] * b_u;
+            }
+        } else
         for (int i = 0; i < 3; i++) { o[i] = C[i] + sc * (S[i] * a_s + U[i] * a_u + F[i] * a_f); nw[i] = S[i] * b_s + U[i] * b_u + F[i] * b_f; }
         float nl = sqrtf(nw[0] * nw[0] + nw[1] * nw[1] + nw[2] * nw[2]), dd = nl > 0 ? fabsf(nw[0] * L[0] + nw[1] * L[1] + nw[2] * L[2]) / nl : 1;
         o[3] = T->uv[k * 2]; o[4] = T->uv[k * 2 + 1]; o[5] = o[6] = o[7] = 0.5f * (0.55f + 0.5f * dd); o[8] = 1;
@@ -852,21 +864,31 @@ static void creature_update(void) {   // once per frame: every dish's occupants
         float U[3] = { up[0] * cosf(bank) + S[0] * sinf(bank), up[1] * cosf(bank) + S[1] * sinf(bank), up[2] * cosf(bank) + S[2] * sinf(bank) };
         ci_update(&g_ci[g_ci_of[0][0]], p > 0, 1 + 1.8f * p, C, F, U, 0.03f); }
     // 2: the pair: drift around the dish keeping apart; touched, they spiral into one yin-yang (and back apart next time)
-    if (g_dish_ok[1] && g_nci_of[1] == 2) { static float a, fz, hd[2], hd_ok; float tg = g_dish_tog[1] ? 1.f : 0.f; int moving = fabsf(fz - tg) > 0.01f;
-        fz += (tg > fz ? 1 : -1) * 0.012f; if (fabsf(fz - tg) < 0.012f) fz = tg; a += dt * 0.55f; float f = smooth01(fz);
-        float oa = t * 0.35f, cx = g_dish[1][0] + 0.016f * cosf(oa), cz = g_dish[1][2] + 0.016f * sinf(oa), sp = t * 1.4f;   // the fused one drifts round the dish
+    if (g_dish_ok[1] && g_nci_of[1] == 2) { static float a, fz, Fs[2][3], Us[2][3]; static int sm_ok; float tg = g_dish_tog[1] ? 1.f : 0.f; int moving = fabsf(fz - tg) > 0.01f;
+        fz += (tg > fz ? 1 : -1) * 0.01f; if (fabsf(fz - tg) < 0.01f) fz = tg; a += dt * 0.55f; float f = smooth01(fz);
+        // fused: the two curl into one round figure standing up and facing you (each one half of the circle, head to the other's tail),
+        // turning slowly like a wheel while it drifts round the dish
+        const float L = 0.026f, R = L / (float)M_PI;
+        float oa = t * 0.3f, O[3] = { g_dish[1][0] + 0.012f * cosf(oa), g_dish[1][1] + 0.024f + 0.002f * sinf(t * 1.1f), g_dish[1][2] + 0.012f * sinf(oa) };
+        float N[3] = { g_head.m[12] - O[0], 0, g_head.m[14] - O[2] }; norm3(N); if (N[0] == 0 && N[2] == 0) N[0] = 1;
+        float E1[3]; cross3(up, N, E1); norm3(E1); const float *E2 = up; float sp = t * 0.9f;
         for (int k = 0; k < 2; k++) {
             float ang = a + k * ((float)M_PI + 0.5f * sinf(t * 0.6f)), r0 = 0.026f + 0.003f * sinf(t * 0.9f + k);
-            float ux = g_dish[1][0] + r0 * cosf(ang), uz = g_dish[1][2] + r0 * sinf(ang), hu = atan2f(cosf(ang), -sinf(ang));   // apart: heading along its circle
-            float s2 = sp + k * (float)M_PI, fx = cx + 0.0075f * cosf(s2), fz2 = cz + 0.0075f * sinf(s2), hf = atan2f(cosf(s2), -sinf(s2));   // fused: head to tail
-            float want = hu + (float)remainderf(hf - hu, 2 * (float)M_PI) * f;   // turn the short way round, no flips
-            if (!hd_ok) hd[k] = want;
-            hd[k] += remainderf(want - hd[k], 2 * (float)M_PI) * 0.25f;          // and never snap: ease into the new heading
-            float C[3] = { ux + (fx - ux) * f, g_dish[1][1] + 0.018f + 0.002f * sinf(t * 1.3f + k * 2) + (k ? 0.0025f : -0.0025f) * f, uz + (fz2 - uz) * f };
-            float F[3] = { cosf(hd[k]), 0, sinf(hd[k]) };
-            ci_update(&g_ci[g_ci_of[1][k]], 0, moving ? 1.8f : 1.f, C, F, up, 0.026f);
+            float Pu[3] = { g_dish[1][0] + r0 * cosf(ang), g_dish[1][1] + 0.018f + 0.002f * sinf(t * 1.3f + k * 2), g_dish[1][2] + r0 * sinf(ang) };
+            float Fu[3] = { -sinf(ang), 0, cosf(ang) };                                   // apart: swimming round the dish, upright
+            float s2 = sp + k * (float)M_PI, cs = cosf(s2), sn = sinf(s2), Pf[3], Ff[3], In[3];
+            for (int i = 0; i < 3; i++) { float rad = E1[i] * cs + E2[i] * sn; Pf[i] = O[i] + R * rad; Ff[i] = -E1[i] * sn + E2[i] * cs; In[i] = -rad; }
+            float C[3], Fw[3], Uw[3];
+            for (int i = 0; i < 3; i++) { C[i] = Pu[i] + (Pf[i] - Pu[i]) * f; Fw[i] = Fu[i] + (Ff[i] - Fu[i]) * f; Uw[i] = up[i] + (N[i] - up[i]) * f; }
+            norm3(Fw); norm3(Uw);
+            if (!sm_ok) { memcpy(Fs[k], Fw, 12); memcpy(Us[k], Uw, 12); }
+            for (int i = 0; i < 3; i++) { Fs[k][i] += (Fw[i] - Fs[k][i]) * 0.3f; Us[k][i] += (Uw[i] - Us[k][i]) * 0.3f; }   // ease, never snap
+            norm3(Fs[k]); norm3(Us[k]);
+            g_bend_k = f / R; memcpy(g_bend_in, In, 12);   // curl toward the figure's centre
+            ci_update(&g_ci[g_ci_of[1][k]], 0, moving ? 1.8f : 1.f, C, Fs[k], Us[k], L);
+            g_bend_k = 0;
         }
-        hd_ok = 1; }
+        sm_ok = 1; }
     // 3: the crystal plates: still at the bottom; touched, they glow
     if (g_dish_ok[2] && g_nci_of[2]) { CrInst *I = &g_ci[g_ci_of[2][0]]; CrType *T = &g_ct[I->type];
         float ext = 0; for (int i = 0; i < 3; i++) if (T->hi[i] - T->lo[i] > ext) ext = T->hi[i] - T->lo[i];
