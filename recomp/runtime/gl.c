@@ -379,7 +379,7 @@ static void bind_texture(int unit, const TexV *t) {
     TexEntry *e = t->e;
     if (!e || !e->px) { glBindTexture_(GL_TEXTURE_2D, 0); return; }
     static const GLint wrap[4] = { GL_CLAMP_TO_EDGE, GL_REPEAT, GL_MIRRORED_REPEAT, GL_CLAMP_TO_EDGE };
-    if (e->rid >= 0 && g_cfg.textures) {   // texture pack replacement, once it has loaded
+    if (e->rid >= 0 && (g_cfg.textures || texpack_is_prompt(e->rid))) {   // texture pack replacement (or button prompt), once it has loaded
         GLuint rt = repl_texture(e->rid, e->rvar);
         glActiveTexture_(GL_TEXTURE0 + unit);
         if (rt) {

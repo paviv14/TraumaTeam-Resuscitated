@@ -200,6 +200,7 @@ void platform_present(const u32 *px, int x0, int y0, int w, int h, int stride) {
 // like a mouse would; whichever of mouse or pad moved last owns the pointer.
 static SDL_GameController *g_pad;
 static int g_pointer_pad;                 // 1 = pad owns the pointer
+static int g_last_dev = 1;                // 1 = keyboard & mouse, 2 = controller (used last)
 static float g_pad_px = 0.5f, g_pad_py = 0.5f;
 static void pad_open(int index) {
     if (g_pad || !SDL_IsGameController(index)) return;
@@ -213,6 +214,35 @@ static float axis(SDL_GameControllerAxis a) {
 }
 
 void platform_set_title(const char *t) { if (g_win) SDL_SetWindowTitle(g_win, t); }
+
+// Button prompts: which set of help pictures the game shows (texpack.c prompt sets). Settings: Automatic (the
+// device used last), Wii Remote (the original pictures), Keyboard & mouse, Controller; the controller's style is
+// asked from SDL (PS4 / PS5 / everything else Xbox) unless the settings fix it.
+void prompts_update(int force) {
+    static int cur = -1;
+    int dev = g_cfg.prompts == 0 ? (g_last_dev == 2 && g_pad ? 2 : 1) : g_cfg.prompts == 1 ? 0 : g_cfg.prompts == 2 ? 1 : 2;
+    int set = 0;
+    if (dev == 1) set = 1;
+    else if (dev == 2) {
+        int style = g_cfg.pad_style;
+        if (style == 0) {
+            style = 1;
+            if (g_pad) switch (SDL_GameControllerGetType(g_pad)) {
+                case SDL_CONTROLLER_TYPE_PS4: style = 2; break;
+                case SDL_CONTROLLER_TYPE_PS5: style = 3; break;
+                default: break;
+            }
+        }
+        set = 1 + style;   // 2 xbox, 3 ps4, 4 ps5
+    }
+    if (set && !texpack_prompt_count(set)) set = set == 4 && texpack_prompt_count(3) ? 3 : 0;   // a missing set: fall back
+    if (set == cur && !force) return;
+    cur = set;
+    texpack_set_prompts(set);
+    video_retarget_textures();
+    static const char *nm[] = { "Wii Remote (original)", "keyboard & mouse", "Xbox", "PlayStation 4", "PlayStation 5" };
+    fprintf(stderr, "[prompts] showing %s buttons\n", nm[set]);
+}
 static int g_wheel_push, g_wheel_pull;
 void platform_poll(void) {
     if (!g_window_open) return;
@@ -225,6 +255,11 @@ void platform_poll(void) {
             for (int i = 0; i < SDL_NumJoysticks(); i++) pad_open(i);
         }
         if (e.type == SDL_MOUSEMOTION) g_pointer_pad = 0;
+        // the device used last (for the button prompts): a press, or a real move, not a twitch
+        if (e.type == SDL_KEYDOWN || e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEWHEEL) g_last_dev = 1;
+        if (e.type == SDL_MOUSEMOTION && (e.motion.xrel * e.motion.xrel + e.motion.yrel * e.motion.yrel) > 64) g_last_dev = 1;
+        if (e.type == SDL_CONTROLLERBUTTONDOWN) g_last_dev = 2;
+        if (e.type == SDL_CONTROLLERAXISMOTION && (e.caxis.value > 20000 || e.caxis.value < -20000)) g_last_dev = 2;
         if (e.type == SDL_MOUSEWHEEL && e.wheel.y > 0) { g_wheel_push = 8; g_wheel_pull = 0; }   // each notch keeps the motion going ~0.13 s
         if (e.type == SDL_MOUSEWHEEL && e.wheel.y < 0) { g_wheel_pull = 8; g_wheel_push = 0; }
         if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F9 && !e.key.repeat) { void video_capture_request(void); video_capture_request(); }
@@ -296,6 +331,7 @@ void platform_poll(void) {
 #undef PB
     }
     if (g_pointer_pad) { g_input.mouse_x = g_pad_px; g_input.mouse_y = g_pad_py; g_input.mouse_in = 1; }
+    prompts_update(0);
     vr_input(&g_input);
 }
 
@@ -304,5 +340,6 @@ int platform_init(void) { return 0; }
 void platform_present(const u32 *px, int x0, int y0, int w, int h, int stride) { (void)px; (void)x0; (void)y0; (void)w; (void)h; (void)stride; }
 void platform_poll(void) {}
 void platform_set_title(const char *t) { (void)t; }
+void prompts_update(int force) { (void)force; }
 void platform_audio_stats(char *buf, int n) { if (n) buf[0] = 0; }
 #endif

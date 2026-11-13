@@ -8,6 +8,8 @@
 // A texture pack image ready for the GPU: mip chain, DXT5 blocks or RGBA8 (texpack.c -> gl.c).
 typedef struct { int w, h, nlevels, compressed; u8 *data[16]; u32 size[16]; size_t bytes; } TPImage;   // compressed: 0 RGBA8, 1 DXT5, 2 DXT1
 int texpack_find(u64 hash);
+int texpack_is_prompt(int id); int texpack_prompt_set(void); void texpack_set_prompts(int set); int texpack_prompt_count(int set);
+void video_retarget_textures(void);
 TPImage *texpack_take(int id, int var, int *failed);
 TPImage *texpack_get(int id, int var, int *failed, int take);
 extern int g_texpack_count;

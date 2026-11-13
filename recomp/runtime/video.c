@@ -443,6 +443,13 @@ void video_reload_textures(void) {
     for (int i = 0; i < 1024; i++) { g_tcache[i].hash ^= 1; g_tcache[i].partner = 0; }
     g_tgen++;
 }
+// The button-prompt set changed: look every cached texture up again (no re-decode, nothing to re-upload: the
+// replacements of each set are separate textures on the GPU).
+void video_retarget_textures(void) {
+    for (int i = 0; i < 1024; i++) { TexEntry *e = &g_tcache[i]; if (!e->px) continue;
+        e->partner = 0;
+        e->rid = is_copy_target(e->addr) ? -1 : texpack_find(e->hash); e->rvar = 0; }
+}
 static void resolve_pairs(int nmaps_used) {
     int order[8], n = 0;   // maps in the order the stages first use them
     for (int s = 0; s < S.nst; s++) { int m = S.st[s].map; if (m < 0 || !S.tex[m].e) continue;
@@ -454,6 +461,7 @@ static void resolve_pairs(int nmaps_used) {
         paired[order[i]] = paired[order[j]] = 1;
         if (a->partner == b->hash && b->partner == a->hash) continue;   // already resolved
         a->partner = b->hash; b->partner = a->hash;
+        a->rid = b->rid = -1; a->rvar = b->rvar = 0;
         u64 k = texpack_pair_key(a->hash, b->hash);
         TexEntry *A = a, *B = b;
         int id = texpack_find(k);

@@ -18,6 +18,7 @@ static struct { const char *key; int *v; int lo, hi; } KEYS[] = {
     { "aspect_ratio", &g_cfg.stretch, 0, 3 }, { "ultrawide_sides", &g_cfg.wide_fill, 0, 1 }, { "texture_size_limit", &g_cfg.tex_limit, 0, 2 }, { "texture_compression", &g_cfg.tex_compress, 0, 1 }, { "texture_memory_mb", &g_cfg.tex_vram_mb, 256, 65536 }, { "sharp_pixels", &g_cfg.sharp, 0, 1 },
     { "vsync", &g_cfg.vsync, 0, 1 }, { "texture_pack", &g_cfg.textures, 0, 1 },
     { "volume", &g_cfg.volume, 0, 100 }, { "pointer_speed", &g_cfg.pointer_speed, 1, 5 },
+    { "button_prompts", &g_cfg.prompts, 0, 3 }, { "controller_style", &g_cfg.pad_style, 0, 3 },
 };
 #define NKEYS (int)(sizeof KEYS / sizeof KEYS[0])
 
@@ -87,6 +88,8 @@ static void value_text(const Item *it, char *b, size_t n) {
     else if (it->v == &g_cfg.sharp) snprintf(b, n, v ? "Sharp" : "Smooth");
     else if (it->v == &g_dev_pick) snprintf(b, n, "%s", DEV[v].name);
     else if (it->v == &g_cfg.wide_fill) snprintf(b, n, v ? "Extend game art" : "Black");
+    else if (it->v == &g_cfg.prompts) { static const char *s[] = { "Automatic", "Wii Remote", "Keyboard & mouse", "Controller" }; snprintf(b, n, "%s", s[v]); }
+    else if (it->v == &g_cfg.pad_style) { static const char *s[] = { "Automatic", "Xbox", "PlayStation 4", "PlayStation 5" }; snprintf(b, n, "%s", s[v]); }
     else if (it->v == &g_cfg.tex_limit) { static const char *s[] = { "Up to 1024", "Up to 2048", "Full (up to 4096)" }; snprintf(b, n, "%s", s[v]); }
     else snprintf(b, n, v ? "On" : "Off");
 }
@@ -102,6 +105,8 @@ static Item ITEMS[] = {
     { "Texture pack", "Use the upscaled textures in the 'textures' folder.", &g_cfg.textures, 0, 1, 1 },
     { "Volume", "Game sound volume.", &g_cfg.volume, 0, 100, 10 },
     { "Pointer speed", "How fast the controller's right stick moves the pointer.", &g_cfg.pointer_speed, 1, 5, 1 },
+    { "Button prompts", "Which buttons the game's help shows: Automatic follows what you used last (keyboard & mouse or a controller), or always one of them. Wii Remote keeps the original pictures.", &g_cfg.prompts, 0, 3, 1 },
+    { "Controller style", "Button names for a controller: Automatic asks the controller what it is; or always Xbox, PlayStation 4 or PlayStation 5.", &g_cfg.pad_style, 0, 3, 1 },
     { "Developer scene", "Hidden developer tools and cut prototypes left in the game. Enter / A goes there now (unsaved progress is lost).", &g_dev_pick, 0, NDEV - 1, 1 },
 };
 #define NITEMS (int)(sizeof ITEMS / sizeof ITEMS[0])
@@ -110,7 +115,7 @@ static void change(int i, int dir) {
     Item *it = &ITEMS[i];
     int v = *it->v + dir * it->step;
     if (it->hi - it->lo == 1) v = *it->v ? 0 : 1;          // toggles wrap
-    else if (it->v == &g_cfg.stretch) v = (v + 4) % 4;     // so does the aspect ratio list
+    else if (it->v == &g_cfg.stretch || it->v == &g_cfg.prompts || it->v == &g_cfg.pad_style) v = (v + 4) % 4;     // so do these lists
     else if (it->v == &g_dev_pick) v = (v + NDEV) % NDEV;
     if (it->v == &g_dev_pick) { *it->v = v; return; }      // a choice, not a setting
     else if (v < it->lo) v = it->lo; else if (v > it->hi) v = it->hi;
@@ -119,6 +124,7 @@ static void change(int i, int dir) {
     *it->v = v;
     settings_apply(); settings_save();
     if (textures_changed) video_reload_textures();
+    if (it->v == &g_cfg.prompts || it->v == &g_cfg.pad_style) prompts_update(1);
 }
 
 // Runs the menu until it is closed; the game is paused meanwhile.

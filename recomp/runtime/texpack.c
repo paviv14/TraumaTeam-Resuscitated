@@ -39,6 +39,7 @@ void host_mkdir(const char *path);
 #include "gx_state.h"
 typedef struct {   // one replacement file; variants: 0 = the image, 1/2 = halves of a dual-palette pair
     u64 hash; char *path; long long fsize, mtime;
+    int set;                      // 0 = the texture pack, 1.. = a button-prompt set (prompts/<set>/)
     int state[3];                 // 0 not requested, 1 queued/working, 2 ready (img), 3 taken by gl.c, 4 failed
     TPImage *img[3];
 } Repl;
@@ -81,7 +82,31 @@ static void rmap_build(void) {
     dup:;
     }
 }
+// Button-prompt sets: prompts/<name>/tt_<id>_*.png replace the game's Wii Remote prompts while that set is active
+// (keyboard & mouse, or a pad style); they win over the texture pack and work with the pack switched off.
+static const char *PSET_NAME[] = { "", "keyboard", "xbox", "ps4", "ps5" };
+#define NPSET 5
+static struct { u64 hash; int id; } *g_pset_map[NPSET]; static int g_pset_n[NPSET], g_pset_cap[NPSET];
+static int g_pset;
+int texpack_prompt_set(void) { return g_pset; }
+int texpack_is_prompt(int id) { return id >= 0 && id < g_nrepl && g_repl[id].set != 0; }
+void texpack_set_prompts(int set) { g_pset = set >= 0 && set < NPSET ? set : 0; }
+int texpack_prompt_count(int set) { return set > 0 && set < NPSET ? g_pset_n[set] : 0; }
+static void scan_prompts(void) {
+    const char *base = getenv("TTPC_PROMPTS"); if (!base) base = "prompts";
+    for (int s = 1; s < NPSET; s++) {
+        char d[600]; snprintf(d, sizeof d, "%s/%s", base, PSET_NAME[s]);
+        int from = g_nrepl; scan(d, 0);
+        for (int i = from; i < g_nrepl; i++) {
+            g_repl[i].set = s;
+            if (g_pset_n[s] == g_pset_cap[s]) { g_pset_cap[s] = g_pset_cap[s] ? g_pset_cap[s] * 2 : 64; g_pset_map[s] = realloc(g_pset_map[s], sizeof *g_pset_map[s] * g_pset_cap[s]); }
+            g_pset_map[s][g_pset_n[s]].hash = g_repl[i].hash; g_pset_map[s][g_pset_n[s]].id = i; g_pset_n[s]++;
+        }
+        if (g_pset_n[s]) fprintf(stderr, "[prompts] %d button prompts for %s\n", g_pset_n[s], PSET_NAME[s]);
+    }
+}
 int texpack_find(u64 hash) {   // replacement id, or -1
+    if (g_pset) for (int i = 0; i < g_pset_n[g_pset]; i++) if (g_pset_map[g_pset][i].hash == hash) return g_pset_map[g_pset][i].id;
     if (!g_cfg.textures || !g_rmap) return -1;
     for (int j = rmap_slot(hash); g_rmap[j]; j = (j + 1) % g_rmap_cap) if (g_repl[g_rmap[j] - 1].hash == hash) return g_rmap[j] - 1;
     return -1;
@@ -140,7 +165,8 @@ void texpack_free_image(TPImage *im) { if (!im) return; for (int l = 0; l < im->
 
 // disk cache: "TTC1", u32 w, h, levels, compressed, limit, i64 source size, source mtime, then each level: u32 size + data
 static void cache_path(const Repl *r, int var, char *p, size_t n) {
-    snprintf(p, n, "%s/%016llX_%d_%d%s.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u");
+    if (r->set) snprintf(p, n, "%s/%016llX_%d_%d%s_p%d.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u", r->set);
+    else snprintf(p, n, "%s/%016llX_%d_%d%s.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u");
 }
 static TPImage *cache_read(const Repl *r, int var) {
     char p[700]; cache_path(r, var, p, sizeof p);
@@ -245,8 +271,9 @@ int texpack_pending(void) { pthread_mutex_lock(&g_tm); int n = g_qn; pthread_mut
 void texpack_init(void) {
     const char *dir = getenv("TTPC_TEXTURES"); if (!dir) dir = "textures";
     scan(dir, 0);
+    rmap_build();          // the pack only; the prompt sets have their own lists
+    scan_prompts();
     g_texpack_count = g_nrepl;
-    rmap_build();
     if (getenv("TTPC_TEXTURE_CACHE")) snprintf(g_cache_dir, sizeof g_cache_dir, "%s", getenv("TTPC_TEXTURE_CACHE"));
     if (g_nrepl) {
         host_mkdir(g_cache_dir);
