@@ -10,7 +10,19 @@
 #include <stdio.h>
 #include <math.h>
 
-void orig_8000B7C0(CPU *c); void orig_80173870(CPU *c);
+void orig_8000B7C0(CPU *c); void orig_80173870(CPU *c); void orig_80253960(CPU *c);
+void platform_rumble(int on);
+
+// WPADControlMotor(chan, on): the game's rumble (it calls this for every channel, and only while the
+// Vibration option is on). Channel 0 goes to a real Wii Remote if there is one, and to the controller.
+void f_80253960(CPU *c) {
+    u32 chan = c->r[3], on = c->r[4];
+    if (chan == 0) {
+        static int last = -1;
+        if ((int)(on != 0) != last) { last = on != 0; platform_rumble(last); }
+    }
+    orig_80253960(c);
+}
 float wiimote_twist(void);
 
 // Nunchuk acceleration (chan r3, out vec3 r4)

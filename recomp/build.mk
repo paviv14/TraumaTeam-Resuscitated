@@ -16,7 +16,7 @@ LDFLAGS += -static-libgcc -Wl,--stack,16777216 -mwindows   # a windowed program:
 WINRES := $(BUILD)/resuscitated_res.o
 XR_DIR ?= ../third_party/openxr
 RTFLAGS += -I$(XR_DIR)
-LIBS += $(XR_DIR)/libopenxr_loader.dll.a -lopengl32
+LIBS += $(XR_DIR)/libopenxr_loader.dll.a -lopengl32 -lhid -lsetupapi
 else
 CC := gcc
 BUILD ?= ../build
@@ -36,7 +36,7 @@ endif
 
 CFLAGS ?= -O1 -g0 -fno-strict-aliasing -fwrapv -w -Iruntime
 RTCFLAGS := -O2 -g -Wall -Wno-unused -Wno-misleading-indentation -fno-strict-aliasing -fwrapv -Iruntime $(RTFLAGS) $(EXTRA)
-RUNTIME := port runtime hle ios threads dsp ax gx disc video gl texpack platform wiimote menu vr forensics motion
+RUNTIME := port runtime hle ios threads dsp ax gx disc video gl texpack platform wiimote menu vr forensics motion wiimote_hid
 GEN := $(wildcard ../generated/*.c)
 OBJ := $(patsubst ../generated/%.c,$(BUILD)/%.o,$(GEN)) $(patsubst %,$(BUILD)/rt_%.o,$(RUNTIME))
 

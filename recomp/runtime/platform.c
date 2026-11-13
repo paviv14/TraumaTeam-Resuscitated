@@ -200,7 +200,13 @@ void platform_present(const u32 *px, int x0, int y0, int w, int h, int stride) {
 // like a mouse would; whichever of mouse or pad moved last owns the pointer.
 static SDL_GameController *g_pad;
 static int g_pointer_pad;                 // 1 = pad owns the pointer
-static int g_last_dev = 1;                // 1 = keyboard & mouse, 2 = controller (used last)
+static int g_last_dev = 1;                // 1 = keyboard & mouse, 2 = controller, 3 = a real Wii Remote (used last)
+void platform_wii_used(void) { g_last_dev = 3; }
+// rumble from the game (WPADControlMotor, motion.c): a real Wii Remote and the controller both
+void platform_rumble(int on) {
+    void whid_rumble(int on); whid_rumble(on);
+    if (g_pad) SDL_GameControllerRumble(g_pad, on ? 0x5000 : 0, on ? 0xA000 : 0, on ? 5000 : 0);
+}
 static float g_pad_px = 0.5f, g_pad_py = 0.5f;
 static void pad_open(int index) {
     if (g_pad || !SDL_IsGameController(index)) return;
@@ -220,7 +226,8 @@ void platform_set_title(const char *t) { if (g_win) SDL_SetWindowTitle(g_win, t)
 // asked from SDL (PS4 / PS5 / everything else Xbox) unless the settings fix it.
 void prompts_update(int force) {
     static int cur = -1;
-    int dev = g_cfg.prompts == 0 ? (g_last_dev == 2 && g_pad ? 2 : 1) : g_cfg.prompts == 1 ? 0 : g_cfg.prompts == 2 ? 1 : 2;
+    int wiimote_native(void);
+    int dev = g_cfg.prompts == 0 ? (g_last_dev == 3 && wiimote_native() ? 0 : g_last_dev == 2 && g_pad ? 2 : 1) : g_cfg.prompts == 1 ? 0 : g_cfg.prompts == 2 ? 1 : 2;
     int set = 0;
     if (dev == 1) set = 1;
     else if (dev == 2) {
@@ -341,5 +348,7 @@ void platform_present(const u32 *px, int x0, int y0, int w, int h, int stride) {
 void platform_poll(void) {}
 void platform_set_title(const char *t) { (void)t; }
 void prompts_update(int force) { (void)force; }
+void platform_wii_used(void) {}
+void platform_rumble(int on) { void whid_rumble(int on); whid_rumble(on); }
 void platform_audio_stats(char *buf, int n) { if (n) buf[0] = 0; }
 #endif

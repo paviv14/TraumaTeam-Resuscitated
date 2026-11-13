@@ -34,6 +34,7 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+#include "wiimote_hid.h"
 
 enum {
     BTN_LEFT = 0x0001, BTN_RIGHT = 0x0002, BTN_DOWN = 0x0004, BTN_UP = 0x0008, BTN_PLUS = 0x0010,
@@ -116,8 +117,19 @@ static void rec_init(void) {
 }
 
 // Called once per retrace (after platform_poll): latch this frame's buttons and pointer.
+static WiiState g_wii; static int g_wii_on, g_wii_ptr;   // a real Wii Remote (wiimote_hid.c), and whether its pointer sees the sensor bar
+static float g_wii_px, g_wii_py, g_wii_hx = 1, g_wii_hy, g_wii_dist = 1.5f;
+int wiimote_native(void) { return g_wii_on; }
 void wiimote_frame(void) {
     static int init; if (!init) { init = 1; parse_script(); rec_init(); }
+    {   static int was; static unsigned short lastb;
+        g_wii_on = whid_poll(&g_wii);
+        if (g_wii_on != was) { fprintf(stderr, "[wiimote] %s\n", g_wii_on ? "real Wii Remote in use" : "real Wii Remote gone"); was = g_wii_on; }
+        if (g_wii_on) {
+            if (g_wii.buttons != lastb) { void platform_wii_used(void); platform_wii_used(); lastb = g_wii.buttons; }
+            g_wii_ptr = whid_pointer(&g_wii, &g_wii_px, &g_wii_py, &g_wii_hx, &g_wii_hy, &g_wii_dist);
+        } else g_wii_ptr = 0;
+    }
     g_vi++;
     const Input *in = &g_input;
     u32 h = 0;
@@ -135,9 +147,11 @@ void wiimote_frame(void) {
     { static int got;   // while a TTPC_INPUT script is still driving a menu (e.g. --mission), ignore the real controls
       if (!got) { got = 1; for (int k = 0; k < g_nscript; k++) if (g_script[k].from + g_script[k].len > script_end) script_end = g_script[k].from + g_script[k].len; }
       if (g_reads < script_end + 30) h = 0; }
+    if (g_wii_on) h |= g_wii.buttons;
     g_host_hold = h;
     g_ppx = g_px; g_ppy = g_py;
-    if (g_window_open && !getenv("TTPC_POINTER")) {
+    if (g_wii_ptr) { g_px = g_wii_px; g_py = g_wii_py; g_point_valid = 1; }
+    else if (g_window_open && !getenv("TTPC_POINTER")) {
         g_px = in->mouse_x * 2.f - 1.f; g_py = in->mouse_y * 2.f - 1.f;
         g_point_valid = in->mouse_in && fabsf(g_px) <= 1.05f && fabsf(g_py) <= 1.05f;
     } else {   // headless: aim at TTPC_POINTER="x,y" (-1..1), default the centre
@@ -145,7 +159,8 @@ void wiimote_frame(void) {
         if (!got) { got = 1; const char *e = getenv("TTPC_POINTER"); if (e) sscanf(e, "%f,%f", &hx, &hy); }
         g_px = hx; g_py = hy; g_point_valid = 1;
     }
-    if (in->has_analog) { g_sx = in->nx; g_sy = in->ny; }
+    if (g_wii_on && g_wii.nunchuk && (g_wii.stick[0] || g_wii.stick[1])) { g_sx = g_wii.stick[0]; g_sy = g_wii.stick[1]; }
+    else if (in->has_analog) { g_sx = in->nx; g_sy = in->ny; }
     else {
         g_sx = (float)(in->stick_right - in->stick_left);
         g_sy = (float)(in->stick_up - in->stick_down);
@@ -305,6 +320,28 @@ void f_8025F830(CPU *c) {
     {   // Nunchuk accelerometer: follows the Remote's swing (both hands come down together in CPR)
         static float last_ny = -1.f;
         wf(buf + 0x68, 0.f); wf(buf + 0x6C, acc_y); wf(buf + 0x70, 0.f); wf(buf + 0x74, fabsf(acc_y)); wf(buf + 0x78, fabsf(acc_y - last_ny)); last_ny = acc_y;
+    }
+    if (g_wii_on && !g_nrep) {   // a real Remote: its own motion, pointer distance and roll, and the Nunchuk's
+        static float lx, ly, lz, lnx, lny, lnz, lhx = 1, lhy, ld = 1.5f;
+        const float *a = g_wii.acc;
+        wf(buf + 0x0C, a[0]); wf(buf + 0x10, a[1]); wf(buf + 0x14, a[2]);
+        wf(buf + 0x18, sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2])); wf(buf + 0x1C, fabsf(a[0] - lx) + fabsf(a[1] - ly) + fabsf(a[2] - lz));
+        lx = a[0]; ly = a[1]; lz = a[2];
+        float an = sqrtf(a[0] * a[0] + a[1] * a[1]);   // acc_vertical: the roll from gravity
+        if (an > 0.2f) { wf(buf + 0x54, -a[1] / an); wf(buf + 0x58, a[0] / an); }
+        if (g_wii_ptr) {
+            wf(buf + 0x34, g_wii_hx); wf(buf + 0x38, g_wii_hy);
+            wf(buf + 0x3C, g_wii_hx - lhx); wf(buf + 0x40, g_wii_hy - lhy); wf(buf + 0x44, fabsf(g_wii_hx - lhx) + fabsf(g_wii_hy - lhy));
+            wf(buf + 0x48, g_wii_dist); wf(buf + 0x4C, g_wii_dist - ld); wf(buf + 0x50, fabsf(g_wii_dist - ld));
+            lhx = g_wii_hx; lhy = g_wii_hy; ld = g_wii_dist;
+            W8(buf + 0x5E, (u8)g_wii_ptr);
+        } else W8(buf + 0x5E, 0);
+        if (g_wii.nunchuk) {
+            const float *n = g_wii.nacc;
+            wf(buf + 0x68, n[0]); wf(buf + 0x6C, n[1]); wf(buf + 0x70, n[2]);
+            wf(buf + 0x74, sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2])); wf(buf + 0x78, fabsf(n[0] - lnx) + fabsf(n[1] - lny) + fabsf(n[2] - lnz));
+            lnx = n[0]; lny = n[1]; lnz = n[2];
+        }
     }
     if (err) W32(err, 0);
     c->r[3] = 1;
