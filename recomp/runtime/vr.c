@@ -111,7 +111,7 @@ static int g_exam_now, g_morgue_now, g_click_t, g_pending_bed = -1, g_exit_t; st
 typedef struct Ray Ray;
 static int mdl_hit(int k, const Ray *r, float *sx, float *sy, float *dist); static int bed_hit(int k, const Ray *r, float *dist);
 static void morgue_marker(int which, float *x, float *y); static void click_at(float sx, float sy, int frames);
-static void mdl_draw(int k); static void mdl_place(int k); static void scn_draw(void);
+static void mdl_draw(int k); static void mdl_place(int k); static void scn_draw(void); static void creature_draw(void); static void creature_update(void);
 static int keyed_scene(void);
 static float g_spot[2][3]; static int g_spot_ok[2];   // morgue: where the body [0] and the personal effects [1] lie (bed tops)
 static Mat *g_mat; static int g_nmat;
@@ -143,7 +143,10 @@ int g_vr_pic_y0 = 24, g_vr_pic_h = 480;  // the presented picture's rows in the 
 // (the centres of the markers the game puts on them, in its 640x528 frame)
 static const float HS_PC[2] = { 166, 173 }, HS_RECORDER[2] = { 111, 320 }, HS_DOOR[2] = { 576, 152 };
 #define OFFICE_BG_Y 0
-static float g_obj_min[4][3], g_obj_max[4][3]; static int g_obj_ok[4];   // 0 recorder, 1 door, 2 monitor body, 3 mouse
+static float g_obj_min[6][3], g_obj_max[6][3]; static int g_obj_ok[6];   // 0 recorder, 1 door, 2 monitor body, 3 mouse, 4 the secret book, 5 the sliding panel
+static float g_cdish[3]; static int g_cdish_ok;   // the culture dish the little swimmer circles (hidden compartment)
+static float g_niche_t; static int g_niche_open;  // the hidden compartment: 0 closed .. 1 open
+static float g_cr_panic;                          // seconds of frantic swimming left (you touched his dish)
 // the door: swings open (into the alcove) when you leave through it; beyond it, a black void that shows the
 // game's other screens (the map...) on a pane in the doorway until those places are built
 static float g_door_t; static int g_door_req, g_last_kind;   // g_last_kind: what the laser was on (4 = door)
@@ -211,9 +214,10 @@ static int load_room(const char *path, int room) {
         if (!nd->mesh) {   // the morgue's bed markers: where the body and the personal effects are laid
             int k = !nd->name ? -1 : !strcmp(nd->name, "bed_body_spot") ? 0 : !strcmp(nd->name, "bed_effects_spot") ? 1 : -1;
             if (k >= 0) { memcpy(g_spot[k], W.m + 12, 12); g_spot_ok[k] = 1; }
+            if (room == 0 && nd->name && !strcmp(nd->name, "creature_dish")) { memcpy(g_cdish, W.m + 12, 12); g_cdish_ok = 1; }
             continue;
         }
-        int obj = room != 0 || !nd->name ? -1 : !strncmp(nd->name, "recorder", 8) ? 0 : !strncmp(nd->name, "door_exit", 9) ? 1 : !strncmp(nd->name, "monitor", 7) ? 2 : !strncmp(nd->name, "mouse", 5) ? 3 : -1;
+        int obj = room != 0 || !nd->name ? -1 : !strncmp(nd->name, "recorder", 8) ? 0 : !strncmp(nd->name, "door_exit", 9) ? 1 : !strncmp(nd->name, "monitor", 7) ? 2 : !strncmp(nd->name, "mouse", 5) ? 3 : !strncmp(nd->name, "secret_book", 11) ? 4 : !strncmp(nd->name, "secret_panel", 12) ? 5 : -1;
         for (cgltf_size pi = 0; pi < nd->mesh->primitives_count; pi++) {
             cgltf_primitive *pr = &nd->mesh->primitives[pi];
             const cgltf_accessor *ap = NULL, *at = NULL, *ac = NULL;
@@ -254,7 +258,7 @@ static int load_room(const char *path, int room) {
                         sqrtf(g_scr_u[0] * g_scr_u[0] + g_scr_u[1] * g_scr_u[1] + g_scr_u[2] * g_scr_u[2]), sqrtf(g_scr_v[0] * g_scr_v[0] + g_scr_v[1] * g_scr_v[1] + g_scr_v[2] * g_scr_v[2]));
             }
             if (g_nprim == cap) { cap = cap ? cap * 2 : 256; g_prim = realloc(g_prim, cap * sizeof *g_prim); }
-            Prim *o = &g_prim[g_nprim++]; o->n = ni_; o->mat = mi; o->grp = obj == 1 || obj == 3 ? obj : 0; o->room = room;
+            Prim *o = &g_prim[g_nprim++]; o->n = ni_; o->mat = mi; o->grp = obj == 1 || obj == 3 ? obj : obj == 4 ? 6 : obj == 5 ? 5 : 0; o->room = room;
             GLuint vb, ib; vGenVertexArrays(1, &o->vao); vBindVertexArray(o->vao);
             vGenBuffers(1, &vb); vBindBuffer(GL_ARRAY_BUFFER, vb); vBufferData(GL_ARRAY_BUFFER, sizeof(float) * 9 * nv, v, GL_STATIC_DRAW);
             vGenBuffers(1, &ib); vBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib); vBufferData(GL_ELEMENT_ARRAY_BUFFER, 4 * ni_, ix, GL_STATIC_DRAW);
@@ -353,11 +357,23 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
     {   float a = -1.65f * g_door_t; M4 r = m4_yaw(a, 0, 0, 0), t = m4_yaw(0, HINGE[0], 0, HINGE[2]), ti = m4_yaw(0, -HINGE[0], 0, -HINGE[2]);
         door_m = m4_mul(t, m4_mul(r, ti)); }
     mouse_m.m[12] = g_mouse_off[0]; mouse_m.m[14] = g_mouse_off[1];
+    M4 panel_m = m4_id(), book_m = m4_id();
+    {   // the compartment: the wall panel steps back into the wall, then slides away along it; the book tips out
+        float t = g_niche_t, in_ = t < 0.25f ? t / 0.25f : 1.f, sl = t > 0.25f ? (t - 0.25f) / 0.75f : 0.f;
+        sl = sl * sl * (3 - 2 * sl);
+        panel_m.m[12] = -0.025f * in_; panel_m.m[14] = -0.62f * sl;
+        if (g_obj_ok[4]) {
+            float a = 0.42f * (t < 0.3f ? t / 0.3f : 1.f), c = cosf(a), sn = sinf(a);
+            float py = g_obj_min[4][1], pz = g_obj_max[4][2];   // pivot: the book's bottom front edge
+            book_m.m[5] = c; book_m.m[6] = sn; book_m.m[9] = -sn; book_m.m[10] = c;
+            book_m.m[13] = py - (c * py - sn * pz); book_m.m[14] = pz - (sn * py + c * pz);
+        }
+    }
     int cur_grp = -1;
     for (int i = 0; i < g_nprim; i++) {
         Prim *p = &g_prim[i]; if (p->room != g_room) continue;
         Mat *m = p->mat >= 0 && p->mat < g_nmat ? &g_mat[p->mat] : NULL;
-        if (p->grp != cur_grp) { cur_grp = p->grp; vUniformMatrix4fv(u_model, 1, 0, (p->grp == 1 ? door_m : p->grp == 3 ? mouse_m : ident).m); }
+        if (p->grp != cur_grp) { cur_grp = p->grp; vUniformMatrix4fv(u_model, 1, 0, (p->grp == 1 ? door_m : p->grp == 3 ? mouse_m : p->grp == 5 ? panel_m : p->grp == 6 ? book_m : ident).m); }
         static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 };
         vActiveTexture(GL_TEXTURE1); vBindTexture(GL_TEXTURE_2D, m && m->etex ? m->etex : g_white);
         vActiveTexture(GL_TEXTURE0);
@@ -377,6 +393,7 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
     }
     vUniformMatrix4fv(u_model, 1, 0, ident.m); vUniform4f(u_hole, 2, 2, 2, 2);
     { static const float no[3] = { 0, 0, 0 }; vUniform3fv(u_lit, 1, no); }
+    if (g_room == 0) creature_draw();   // the little swimmer in the hidden compartment
     if (g_room == 1 && g_exam_fade > 0.01f && g_head_ok) {   // examining: the room fades into a dark void
         float col[4] = { 0.0f, 0.01f, 0.015f, g_exam_fade };
         vUseProgram(g_lineprog); vBindVertexArray(g_linevao); vEnableVertexAttribArray(0);
@@ -504,6 +521,13 @@ static int laser_target(const Ray *r, float *gx, float *gy, float *dist) {
         hm = ray_box(r, mn, mx, 0.035f, &dm);
     }
     if (hm && (!hit1 || dm < d1)) { office_spot(HS_PC, gx, gy); *dist = dm; g_last_kind = 5; return 1; }
+    if (g_office_now && g_obj_ok[4]) {   // the dark green book on the shelf
+        float db; if (ray_box(r, g_obj_min[4], g_obj_max[4], 0.02f, &db) && (!hit1 || db < d1) && (!hit2 || db < d2)) { *gx = *gy = -1; *dist = db; g_last_kind = 9; return 0; }
+    }
+    if (g_office_now && g_cdish_ok && g_niche_t > 0.5f) {   // the little swimmer's dish
+        float mn[3] = { g_cdish[0] - 0.07f, g_cdish[1] - 0.01f, g_cdish[2] - 0.07f }, mx[3] = { g_cdish[0] + 0.07f, g_cdish[1] + 0.14f, g_cdish[2] + 0.07f }, dc;
+        if (ray_box(r, mn, mx, 0.0f, &dc) && (!hit1 || dc < d1) && (!hit2 || dc < d2)) { *gx = *gy = -1; *dist = dc; g_last_kind = 10; return 0; }
+    }
     int hr = g_office_now && g_obj_ok[0] && ray_box(r, g_obj_min[0], g_obj_max[0], 0.03f, &dr);
     int hd = g_office_now && g_obj_ok[1] && ray_box(r, g_obj_min[1], g_obj_max[1], 0.02f, &dd);
     g_last_kind = 0;
@@ -578,6 +602,110 @@ static int ray_screen_old(const Ray *r, int gw, int gh, float *px, float *py, fl
     *px = (uu - 0.5f) * kx + 0.5f; *py = (vv - 0.5f) * ky + 0.5f; *dist = t; return 1;
 }
 
+
+// ---------------------------------------------------------------- the little swimmer (vr/creature.glb, a rigged model with a "swim" loop)
+// It circles above the middle culture dish in the hidden compartment. Its skeleton is animated from the file's own
+// animation, skinned on the CPU every frame. Touch its dish (or point at it and pull the trigger) and it panics:
+// faster strokes, a quicker, wobblier circle, steeper banking, settling back down over a few seconds.
+static cgltf_data *g_cr; static cgltf_primitive *g_cr_pr; static cgltf_skin *g_cr_skin; static cgltf_animation *g_cr_anim;
+static int g_cr_nv, g_cr_ni; static float *g_cr_p, *g_cr_n, *g_cr_uv, *g_cr_w, *g_cr_cpu; static u16 *g_cr_j;
+static GLuint g_cr_tex, g_cr_vao, g_cr_vbo, g_cr_ibo; static float g_cr_t, g_cr_dur = 1, g_cr_orbit, g_cr_clock;
+static void creature_load(const char *path) {
+    cgltf_options opt = {0}; cgltf_data *d = NULL;
+    if (cgltf_parse_file(&opt, path, &d) != cgltf_result_success || cgltf_load_buffers(&opt, d, path) != cgltf_result_success) { if (d) cgltf_free(d); return; }
+    cgltf_node *mn = NULL; for (cgltf_size i = 0; i < d->nodes_count; i++) if (d->nodes[i].mesh && d->nodes[i].skin) { mn = &d->nodes[i]; break; }
+    if (!mn || !d->animations_count) { fprintf(stderr, "[vr] %s: no rigged, animated mesh\n", path); cgltf_free(d); return; }
+    g_cr = d; g_cr_pr = &mn->mesh->primitives[0]; g_cr_skin = mn->skin; g_cr_anim = &d->animations[0];
+    for (cgltf_size i = 0; i < d->animations_count; i++) if (d->animations[i].name && !strcmp(d->animations[i].name, "swim")) g_cr_anim = &d->animations[i];
+    const cgltf_accessor *ap = NULL, *an = NULL, *at = NULL, *aj = NULL, *aw = NULL;
+    for (cgltf_size a = 0; a < g_cr_pr->attributes_count; a++) { cgltf_attribute *A = &g_cr_pr->attributes[a];
+        if (A->type == cgltf_attribute_type_position) ap = A->data; else if (A->type == cgltf_attribute_type_normal) an = A->data;
+        else if (A->type == cgltf_attribute_type_texcoord && A->index == 0) at = A->data;
+        else if (A->type == cgltf_attribute_type_joints && A->index == 0) aj = A->data; else if (A->type == cgltf_attribute_type_weights && A->index == 0) aw = A->data; }
+    if (!ap || !aj || !aw) { fprintf(stderr, "[vr] %s: missing skin data\n", path); cgltf_free(d); g_cr = NULL; return; }
+    int n = g_cr_nv = (int)ap->count;
+    g_cr_p = malloc(12 * (size_t)n); g_cr_n = malloc(12 * (size_t)n); g_cr_uv = calloc((size_t)n, 8); g_cr_w = malloc(16 * (size_t)n); g_cr_j = malloc(8 * (size_t)n); g_cr_cpu = malloc(36 * (size_t)n);
+    for (int k = 0; k < n; k++) {
+        cgltf_accessor_read_float(ap, k, g_cr_p + k * 3, 3);
+        if (an) cgltf_accessor_read_float(an, k, g_cr_n + k * 3, 3); else { g_cr_n[k * 3] = 0; g_cr_n[k * 3 + 1] = 1; g_cr_n[k * 3 + 2] = 0; }
+        if (at) cgltf_accessor_read_float(at, k, g_cr_uv + k * 2, 2);
+        cgltf_accessor_read_float(aw, k, g_cr_w + k * 4, 4); cgltf_uint jj[4] = { 0 }; cgltf_accessor_read_uint(aj, k, jj, 4);
+        for (int i = 0; i < 4; i++) g_cr_j[k * 4 + i] = (u16)jj[i];
+    }
+    g_cr_ni = g_cr_pr->indices ? (int)g_cr_pr->indices->count : n; u32 *ix = malloc(4 * (size_t)g_cr_ni);
+    for (int k = 0; k < g_cr_ni; k++) ix[k] = g_cr_pr->indices ? (u32)cgltf_accessor_read_index(g_cr_pr->indices, k) : (u32)k;
+    const cgltf_material *m = g_cr_pr->material;
+    if (m && m->pbr_metallic_roughness.base_color_texture.texture) g_cr_tex = upload_image(m->pbr_metallic_roughness.base_color_texture.texture->image, 1);
+    for (cgltf_size c = 0; c < g_cr_anim->samplers_count; c++) { const cgltf_accessor *in = g_cr_anim->samplers[c].input;
+        float x; cgltf_accessor_read_float(in, in->count - 1, &x, 1); if (x > g_cr_dur) g_cr_dur = x; }
+    vGenVertexArrays(1, &g_cr_vao); vBindVertexArray(g_cr_vao);
+    vGenBuffers(1, &g_cr_vbo); vBindBuffer(GL_ARRAY_BUFFER, g_cr_vbo); vBufferData(GL_ARRAY_BUFFER, 36 * (size_t)n, NULL, GL_DYNAMIC_DRAW);
+    vGenBuffers(1, &g_cr_ibo); vBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_cr_ibo); vBufferData(GL_ELEMENT_ARRAY_BUFFER, 4 * (size_t)g_cr_ni, ix, GL_STATIC_DRAW);
+    vEnableVertexAttribArray(0); vVertexAttribPointer(0, 3, GL_FLOAT, 0, 36, (void *)0);
+    vEnableVertexAttribArray(1); vVertexAttribPointer(1, 2, GL_FLOAT, 0, 36, (void *)12);
+    vEnableVertexAttribArray(2); vVertexAttribPointer(2, 4, GL_FLOAT, 0, 36, (void *)20);
+    vBindVertexArray(0); free(ix);
+    fprintf(stderr, "[vr] creature %s: %d vertices, %d bones, %.2f s swim loop\n", path, n, (int)g_cr_skin->joints_count, g_cr_dur);
+}
+static void anim_sample(const cgltf_animation_sampler *sm, float t, float *out, int nc) {   // linear (rotations: normalised lerp)
+    const cgltf_accessor *in = sm->input, *ou = sm->output; int n = (int)in->count, k = 0; float t0, t1;
+    cgltf_accessor_read_float(in, 0, &t0, 1); if (t <= t0 || n == 1) { cgltf_accessor_read_float(ou, 0, out, nc); return; }
+    for (k = 0; k < n - 1; k++) { cgltf_accessor_read_float(in, k + 1, &t1, 1); if (t1 >= t) break; }
+    if (k >= n - 1) { cgltf_accessor_read_float(ou, n - 1, out, nc); return; }
+    cgltf_accessor_read_float(in, k, &t0, 1); cgltf_accessor_read_float(in, k + 1, &t1, 1);
+    float a[4], b[4], u = t1 > t0 ? (t - t0) / (t1 - t0) : 0; cgltf_accessor_read_float(ou, k, a, nc); cgltf_accessor_read_float(ou, k + 1, b, nc);
+    if (nc == 4 && a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3] < 0) for (int i = 0; i < 4; i++) b[i] = -b[i];
+    float l = 0; for (int i = 0; i < nc; i++) { out[i] = a[i] + (b[i] - a[i]) * u; l += out[i] * out[i]; }
+    if (nc == 4 && l > 0) { l = sqrtf(l); for (int i = 0; i < 4; i++) out[i] /= l; }
+}
+static void creature_update(void) {   // once per frame: animate, skin, place on its circle
+    if (!g_cr || !g_cdish_ok || g_niche_t < 0.02f) return;
+    const float dt = 1.f / 60;
+    if (g_cr_panic > 0) g_cr_panic -= dt; float pan = g_cr_panic > 1.5f ? 1.f : g_cr_panic > 0 ? g_cr_panic / 1.5f : 0.f;
+    g_cr_clock += dt; g_cr_t = fmodf(g_cr_t + dt * (1.f + 1.8f * pan), g_cr_dur);
+    g_cr_orbit += dt * (1.0f + 2.6f * pan);
+    for (cgltf_size c = 0; c < g_cr_anim->channels_count; c++) {   // pose the skeleton at this moment of the loop
+        cgltf_animation_channel *ch = &g_cr_anim->channels[c]; cgltf_node *nd = ch->target_node; if (!nd) continue;
+        if (ch->target_path == cgltf_animation_path_type_rotation) { anim_sample(ch->sampler, g_cr_t, nd->rotation, 4); nd->has_rotation = 1; }
+        else if (ch->target_path == cgltf_animation_path_type_translation) { anim_sample(ch->sampler, g_cr_t, nd->translation, 3); nd->has_translation = 1; }
+        else if (ch->target_path == cgltf_animation_path_type_scale) { anim_sample(ch->sampler, g_cr_t, nd->scale, 3); nd->has_scale = 1; }
+    }
+    static float J[128][16]; int nj = (int)g_cr_skin->joints_count; if (nj > 128) nj = 128;
+    for (int j = 0; j < nj; j++) {   // joint matrix = joint world * inverse bind
+        float w[16], ib[16]; cgltf_node_transform_world(g_cr_skin->joints[j], w);
+        if (g_cr_skin->inverse_bind_matrices) cgltf_accessor_read_float(g_cr_skin->inverse_bind_matrices, j, ib, 16); else { memset(ib, 0, 64); ib[0] = ib[5] = ib[10] = ib[15] = 1; }
+        M4 a, b; memcpy(a.m, w, 64); memcpy(b.m, ib, 64); M4 r = m4_mul(a, b); memcpy(J[j], r.m, 64);
+    }
+    // the circle: head first along it, its face (the side with the orb) toward the open niche above, banking inward
+    float a = g_cr_orbit, rad = 0.085f + 0.02f * pan * sinf(g_cr_clock * 9.f), bob = (0.012f + 0.012f * pan) * sinf(g_cr_clock * 2.7f);
+    float c[3] = { g_cdish[0] + rad * cosf(a), g_cdish[1] + 0.13f + bob, g_cdish[2] + rad * sinf(a) };
+    float f[3] = { -sinf(a), 0, cosf(a) }, up[3] = { 0, 1, 0 };
+    float sd[3] = { f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2], f[0] * up[1] - f[1] * up[0] };
+    float zm[3] = { sd[1] * f[2] - sd[2] * f[1], sd[2] * f[0] - sd[0] * f[2], sd[0] * f[1] - sd[1] * f[0] };
+    float bank = 0.35f + 0.35f * pan + 0.15f * pan * sinf(g_cr_clock * 13.f), cb = cosf(bank), sb = sinf(bank), s2[3], z2[3];
+    for (int i = 0; i < 3; i++) { s2[i] = sd[i] * cb + zm[i] * sb; z2[i] = -sd[i] * sb + zm[i] * cb; }
+    const float sc = 0.14f / 1.7f, oy = -0.85f;   // ~14 cm long; the body's middle on the circle
+    const float Ld[3] = { 0.2f, 0.9f, 0.3f };
+    for (int k = 0; k < g_cr_nv; k++) {
+        float p[3] = { 0, 0, 0 }, n[3] = { 0, 0, 0 }; const float *P = g_cr_p + k * 3, *N = g_cr_n + k * 3;
+        for (int i = 0; i < 4; i++) { float wt = g_cr_w[k * 4 + i]; if (wt <= 0) continue; int j = g_cr_j[k * 4 + i]; if (j >= nj) continue; const float *m = J[j];
+            for (int r = 0; r < 3; r++) { p[r] += wt * (m[r] * P[0] + m[4 + r] * P[1] + m[8 + r] * P[2] + m[12 + r]); n[r] += wt * (m[r] * N[0] + m[4 + r] * N[1] + m[8 + r] * N[2]); } }
+        float lx = p[0] * sc, ly = (p[1] + oy) * sc, lz = p[2] * sc, *q = g_cr_cpu + k * 9;
+        for (int i = 0; i < 3; i++) q[i] = c[i] + s2[i] * lx + f[i] * ly + z2[i] * lz;
+        float nw[3]; for (int i = 0; i < 3; i++) nw[i] = s2[i] * n[0] + f[i] * n[1] + z2[i] * n[2];
+        float nl = sqrtf(nw[0] * nw[0] + nw[1] * nw[1] + nw[2] * nw[2]), dd = nl > 0 ? fabsf(nw[0] * Ld[0] + nw[1] * Ld[1] + nw[2] * Ld[2]) / nl : 1;
+        q[3] = g_cr_uv[k * 2]; q[4] = g_cr_uv[k * 2 + 1]; q[5] = q[6] = q[7] = 0.5f * (0.55f + 0.5f * dd); q[8] = 1;
+    }
+}
+static void creature_draw(void) {
+    if (!g_cr || !g_cdish_ok || g_niche_t < 0.02f) return;
+    static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 }; M4 id = m4_id();
+    vUniformMatrix4fv(u_model, 1, 0, id.m); vUniform1i(u_screen, 0); vUniform4fv(u_base, 1, one); vUniform3fv(u_emis, 1, zero); vUniform1f(u_cut, 0.3f);
+    { static const float no[3] = { 0, 0, 0 }; vUniform3fv(u_lit, 1, no); }
+    vActiveTexture(GL_TEXTURE1); vBindTexture(GL_TEXTURE_2D, g_white); vActiveTexture(GL_TEXTURE0); vBindTexture(GL_TEXTURE_2D, g_cr_tex ? g_cr_tex : g_white);
+    vBindVertexArray(g_cr_vao); vBindBuffer(GL_ARRAY_BUFFER, g_cr_vbo); vBufferData(GL_ARRAY_BUFFER, 36 * (size_t)g_cr_nv, g_cr_cpu, GL_DYNAMIC_DRAW);
+    vDrawElements(GL_TRIANGLES, g_cr_ni, GL_UNSIGNED_INT, 0); vBindVertexArray(0);
+}
 typedef struct GLSave GLSave; static void gl_save(GLSave *s); static void gl_restore(const GLSave *s);
 // ---------------------------------------------------------------- shared setup
 static GLuint g_game_tex; static int g_gw = 640, g_gh = 480;
@@ -606,6 +734,7 @@ static int common_init(void) {
     const char *room = getenv("TTPC_VR_SCENE"); if (!room || !*room) room = "vr/naomi_office.glb";
     if (!load_room(room, 0)) return 0;
     if (!load_room("vr/morgue.glb", 1)) fprintf(stderr, "[vr] no morgue room (vr/morgue.glb)\n");
+    creature_load("vr/creature.glb");
     {   // extra pictures next to the room (made from the game's own files)
         int w, h, c; u8 *px = stbi_load("vr/screensaver.png", &w, &h, &c, 4);
         if (px) { vGenTextures(1, &g_saver_tex); vBindTexture(GL_TEXTURE_2D, g_saver_tex); vTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
@@ -662,6 +791,9 @@ static int preview_frame(void) {
     static int init; static float px_, pz_, yaw, pitch = -0.15f; static int captured = 1, f2_prev;
     if (!init) { init = 1; px_ = g_seat[0] + 0.1f; pz_ = g_seat[2]; yaw = g_turn; SDL_SetRelativeMouseMode(SDL_TRUE); SDL_GetRelativeMouseState(NULL, NULL); }
     if (g_arrive) { g_arrive = 0; px_ = g_seat[0]; pz_ = g_seat[2]; yaw = g_turn; }
+    {   static int once; if (!once) { once = 1; const char *e = getenv("TTPC_VR_START");   // tests: where the preview camera starts (x,z,yaw)
+            if (e) sscanf(e, "%f,%f,%f", &px_, &pz_, &yaw);
+            if (getenv("TTPC_VR_NICHE")) g_niche_open = 1; } }
     const u8 *k = SDL_GetKeyboardState(NULL);
     if (k[SDL_SCANCODE_F2] && !f2_prev) { captured = !captured; SDL_SetRelativeMouseMode(captured ? SDL_TRUE : SDL_FALSE); }
     f2_prev = k[SDL_SCANCODE_F2];
@@ -1337,6 +1469,14 @@ int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
         }
     }
     g_vr_frame_no++;
+    {   float tg = g_niche_open ? 1.f : 0.f; g_niche_t += (tg > g_niche_t ? 1 : -1) * 0.022f; if (fabsf(g_niche_t - tg) < 0.022f) g_niche_t = tg; }
+#ifdef TTPC_OPENXR
+    if (g_cdish_ok && g_niche_t > 0.5f && !g_preview) for (int h = 0; h < 2; h++) if (g_hand_ok[h]) {   // a hand at the dish startles him
+        float dx = g_hand[h].m[12] - g_cdish[0], dy = g_hand[h].m[13] - (g_cdish[1] + 0.04f), dz = g_hand[h].m[14] - g_cdish[2];
+        if (dx * dx + dy * dy + dz * dz < 0.09f * 0.09f) g_cr_panic = 4.f;
+    }
+#endif
+    creature_update();
     if (g_vr_morgue_seen) g_morgue_hold = 4; else if (g_morgue_hold > 0) g_morgue_hold--;
     g_morgue_now = g_morgue_hold > 0; g_vr_morgue_seen = 0;
     if (g_exam_seen) { g_exam_hold = 4; g_exam_now = g_exam_seen; } else if (g_exam_hold > 0 && --g_exam_hold == 0) g_exam_now = 0;
@@ -1564,6 +1704,9 @@ void vr_input(Input *in) {
     }
     { static int prev; int down = in->lmb || in->a;
       if (down && !prev && g_last_kind == 4 && g_office_now) g_door_req = 1;
+      if (down && !prev && g_last_kind == 9) { g_niche_open = !g_niche_open; fprintf(stderr, "[vr] the hidden compartment %s\n", g_niche_open ? "opens" : "closes"); }
+      if (down && !prev && g_last_kind == 10) { g_cr_panic = 4.f; fprintf(stderr, "[vr] you touched his dish: he panics\n"); }
+      if (g_last_kind == 9 || g_last_kind == 10) { in->a = in->lmb = 0; }
       if (down && !prev && g_exam_now && (g_last_kind == 7 || g_last_kind == 8) && g_last_kind - 7 != g_exam_now - 1) {
           g_pending_bed = g_last_kind - 7; g_exit_t = 1; fprintf(stderr, "[vr] switching to the %s\n", g_pending_bed ? "personal effects" : "body"); }   // the door: if the game lets you go, it opens
       if (down && !prev && g_last_kind == 5 && g_office_now && g_mouse_held < 0) {   // using the mouse turns the computer on; you keep hold of it
