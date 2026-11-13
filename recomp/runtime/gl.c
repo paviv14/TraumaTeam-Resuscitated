@@ -629,6 +629,14 @@ static void lay_ensure(void) {
     glFramebufferRenderbuffer_(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, g_depth);
     g_lay_w = g_W; g_lay_h = g_H; lay_clear();
 }
+// a comic panel standing still: the same piece in the same place last frame (pieces sliding past the edge, as on
+// the map pages, are left alone - picked up on some frames and not others, the sides flickered)
+static int comic_steady(const Setup *s, float mn, float mx, float y0, float y1) {
+    u64 sig = (s->tex[0].e ? s->tex[0].e->data_hash : (u64)s->tex[0].gl_copy) * 0x9E3779B97F4A7C15ull ^ 0xC0311Cull;
+    sig ^= (u64)(int)mn * 131 + (u64)(int)mx * 65537 + (u64)(int)y0 * 7919 + (u64)(int)y1 * 104729;
+    if (!sig) sig = 1;
+    return tile_seen(sig, 1) >= 1;
+}
 static void tile_frame(void) { g_tframe++; g_tcur ^= 1; memset(g_tsig[g_tcur], 0, sizeof g_tsig[0]); memset(g_tcnt[g_tcur], 0, sizeof g_tcnt[0]); }
 void gpu_draw(const Setup *s, const Out *v, int n) {
     static GV *buf; static int cap;
@@ -675,7 +683,8 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
         // a strip at the top or bottom reaching a side edge. Mirrored outwards they carry the frame on across the
         // sides, and a top one also lends the sides a panel of their own (below).
         else if (flat && g_cfg.wide_fill && (mn <= 1.f || mx >= 639.f) && mx - mn >= 120.f && mx - mn <= 400.f &&
-                 hy1 - hy0 >= 24.f && hy1 - hy0 <= 200.f && (hy0 <= 2.f || hy1 >= 476.f) && !tile_w) {
+                 hy1 - hy0 >= 24.f && hy1 - hy0 <= 200.f && (hy0 <= 2.f || hy1 >= 476.f) && !tile_w &&
+                 comic_steady(s, mn, mx, hy0, hy1)) {
             comic = hy0 <= 2.f; cy0 = hy0; cy1 = hy1;
             touch_l = mn <= 1.f; touch_r = !touch_l && mx >= 639.f; edge_l = mn + g_M; edge_r = mx + g_M; }
         else if (flat && g_cfg.wide_fill && (tile_w > 0 || (mx - mn <= 120.f && hy1 - hy0 >= 96.f))) {
