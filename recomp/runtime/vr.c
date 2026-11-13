@@ -676,7 +676,8 @@ static int ct_load(CrType *T, const char *path, const float mf[3], const float m
 static GLuint ct_texture(const CrType *T, float h0, float h1, float hto) {
     if (!T->img || !T->img->buffer_view) return g_white;
     const u8 *src = (const u8 *)T->img->buffer_view->buffer->data + T->img->buffer_view->offset;
-    int w, h, c; u8 *px = stbi_load_from_memory(src, (int)T->img->buffer_view->size, &w, &h, &c, 4); if (!px) return g_white;
+    int w, h, c; u8 *px = stbi_load_from_memory(src, (int)T->img->buffer_view->size, &w, &h, &c, 4);
+    if (!px) { fprintf(stderr, "[vr] creature colour map: %s\n", stbi_failure_reason()); return g_white; }
     if (h0 >= 0) for (int i = 0; i < w * h; i++) {
         float r = px[i * 4] / 255.f, g = px[i * 4 + 1] / 255.f, b = px[i * 4 + 2] / 255.f, mx = fmaxf(r, fmaxf(g, b)), mn = fminf(r, fminf(g, b)), dl = mx - mn;
         if (dl < 0.08f || mx < 0.12f || dl / mx < 0.22f) continue;
@@ -1893,7 +1894,15 @@ void vr_input(Input *in) {
     { static int prev; int down = in->lmb || in->a;
       if (down && !prev && g_last_kind == 4 && g_office_now) g_door_req = 1;
       if (down && !prev && g_last_kind == 9) { g_niche_open = !g_niche_open; fprintf(stderr, "[vr] the hidden compartment %s\n", g_niche_open ? "opens" : "closes"); }
-      if (down && !prev && g_last_kind == 10) aq_poke(g_aim_dish);
+      if (down && !prev && g_office_now && g_niche_t > 0.5f && g_last_kind != 9) {   // a dish under the laser: stir it (tested on the
+          float best = 1e9f; int bd = -1;                                             // laser itself, so the game's picture can't take it)
+          for (int d = 0; d < 7; d++) if (g_dish_ok[d]) {
+              float mn[3] = { g_dish[d][0] - 0.07f, g_dish[d][1] - 0.01f, g_dish[d][2] - 0.065f }, mx[3] = { g_dish[d][0] + 0.07f, g_dish[d][1] + 0.12f, g_dish[d][2] + 0.065f }, dc;
+              if (ray_box(&g_ray, mn, mx, 0.01f, &dc) && dc < best) { best = dc; bd = d; }
+          }
+          if (bd >= 0) { aq_poke(bd); g_last_kind = 10; }
+          else fprintf(stderr, "[vr] click with the compartment open: laser on kind %d\n", g_last_kind);
+      }
       {   // a press that starts on the book or the dish belongs to VR until it's let go, even if the laser slips off meanwhile
           static int swallow; if (down && !prev && (g_last_kind == 9 || g_last_kind == 10)) swallow = 1;
           if (!down) swallow = 0;
