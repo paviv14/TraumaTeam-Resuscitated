@@ -235,14 +235,24 @@ void platform_speaker_pcm(const s16 *pcm, int n) {
         for (int i = 0; i < SDL_GetNumAudioDevices(0); i++) {
             const char *nm = SDL_GetAudioDeviceName(i, 0);
             if (nm && (strstr(nm, "DualSense") || strstr(nm, "Wireless Controller"))) {
-                SDL_AudioSpec want = { 0 }, have; want.freq = 6000; want.format = AUDIO_S16SYS; want.channels = 1; want.samples = 256;
+                // its four channels: 1-2 the speaker (or a headset), 3-4 the haptic motors - the sound goes to the
+                // speaker alone (sent to all four, it came out as vibration), at the device's own 48 kHz
+                SDL_AudioSpec want = { 0 }, have; want.freq = 48000; want.format = AUDIO_S16SYS; want.channels = 4; want.samples = 512;
                 g_ds_audio = SDL_OpenAudioDevice(nm, 0, &want, &have, 0);
                 if (g_ds_audio) { SDL_PauseAudioDevice(g_ds_audio, 0); fprintf(stderr, "[speaker] playing on the DualSense's speaker (%s)\n", nm); }
                 break;
             }
         }
     }
-    if (g_ds_audio && SDL_GetQueuedAudioSize(g_ds_audio) < 6000 * 2 / 2) SDL_QueueAudio(g_ds_audio, pcm, (Uint32)n * 2);
+    if (g_ds_audio && SDL_GetQueuedAudioSize(g_ds_audio) < 48000 * 8 / 4) {
+        static s16 out[40 * 8 * 4 * 4]; static s16 prev; int m = 0;
+        for (int i = 0; i < n && i < 160; i++) for (int k = 0; k < 8; k++) {
+            int v = (prev + (pcm[i] - prev) * (k + 1) / 8) * 2; if (v > 32767) v = 32767; if (v < -32768) v = -32768;   // 6 -> 48 kHz, louder
+            out[m++] = (s16)v; out[m++] = (s16)v; out[m++] = 0; out[m++] = 0;
+            if (k == 7) prev = pcm[i];
+        }
+        SDL_QueueAudio(g_ds_audio, out, (Uint32)m * 2);
+    }
 }
 static float g_pad_px = 0.5f, g_pad_py = 0.5f;
 static void pad_open(int index) {
