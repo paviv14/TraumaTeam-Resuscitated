@@ -97,6 +97,8 @@ WRAP = {
     0x801301F0,  # forensics: collision model under the pointer
     0x8000B370,  # Wii Remote pointer x / y (overridden only inside the examination calc)
     0x8000B540,
+    0x8000B7C0,  # Nunchuk acceleration (runtime/motion.c: the twist)
+    0x80173870,  # emergency bandage wrap calc (logged)
 }
 
 

@@ -207,6 +207,8 @@ static float circle_motion(float px, float py, int valid, u32 hold) {
     lx = px; ly = py;
     return turn;
 }
+static float g_twist;   // the Remote's (and Nunchuk's) current twist, radians
+float wiimote_twist(void) { return g_twist; }
 static float roll_motion(int dir, u32 hold, float turn) {
     static float a;
     a += turn;
@@ -215,6 +217,7 @@ static float roll_motion(int dir, u32 hold, float turn) {
     if (fabsf(a) < 1e-3f) a = 0;
     while (a > (float)M_PI) a -= 2 * (float)M_PI;
     while (a < -(float)M_PI) a += 2 * (float)M_PI;
+    g_twist = a;
     return a;
 }
 
