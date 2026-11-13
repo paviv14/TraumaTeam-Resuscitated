@@ -1338,12 +1338,15 @@ static int g_vr_frame_no, g_exam_seen, g_exam_now, g_exam_hold;   // examining: 
 static float g_exam_fade; static M4 g_exam_A; static float g_exam_k; static int g_exam_anchored, g_exam_exit_cd, g_scripted;
 static int g_vr_morgue_seen, g_morgue_now, g_morgue_hold;
 static int g_hit_part, g_hit_tri; static float g_hit_b[2];   // the last spot the laser found on the model
+static float g_hit_pm[3], g_hit_om[3];                       // ... in the model's frame, and a point a little way back along the laser
 static int g_bubble_seen, g_bubble_now;                      // a speech bubble is up (its frame was drawn)
 static int g_stick_cmd;                                      // examining: the Nunchuk stick left/right the grab is holding (-1/0/1)
 static float g_chk_ref[12]; static int g_chk_frozen;          // the model's pose when you tapped (the game's zoom swings its camera)
 // a tap checks the spot directly: the game zooms in on a click, so VR clicks again on the same spot once it has
 // zoomed (CHECK), and when the remark is over backs out of the close-up (B)
 static int g_chk_st, g_chk_t, g_chk_part, g_chk_tri, g_chk_quiet, g_press_b; static float g_chk_b[2], g_chk_d0, g_chk_prevd;
+static float g_chk_pm[3], g_chk_om[3]; static int g_chk_busy, g_chk_ready;   // the tapped spot (model frame); the game's task left/came back to its close-up
+int aut_state(void); void aut_vr_pick(int valid, int k, const float ref[12], const float o[3], const float p[3]);   // forensics.c
 static float g_mk[8][2]; static int g_nmk, g_nmk_last; static float g_mk_last[8][2];   // the morgue's hotspot markers (centres)
 
 
@@ -1513,15 +1516,27 @@ static void mdl_place(int k) {
     memcpy(md->lit_R, md->R, 36);
     (void)mid;
 }
-static M4 exam_matrix(int k) {   // turned as the game sees it, but always the same size, floating ~1.1 m in front of you
+// examining: the model floats in front of you turned as the game sees it, always the same size: the body 1.5 m long
+// (TTPC_EXAM_SIZE), its middle 1.6 m ahead (TTPC_EXAM_DIST) and 0.3 m below your eyes; the personal effects at the
+// body's scale (so a shirt looks shirt-sized)
+static float exam_env(const char *n, float def) { const char *e = getenv(n); float v = e ? (float)atof(e) : 0; return v > 0.05f && v < 20 ? v : def; }
+static float exam_scale(int k) {
+    MModel *md = &g_mdl[k]; float L = md->hi[md->axis] - md->lo[md->axis];
+    static float size = -1; if (size < 0) size = exam_env("TTPC_EXAM_SIZE", 1.5f);
+    if (k == 1) { MModel *b = &g_mdl[0]; float Lb = b->nparts ? b->hi[b->axis] - b->lo[b->axis] : 0;
+        if (Lb > 0 && L > 0 && L < Lb * 1.5f) return size / Lb; }
+    return L > 0 ? (k ? 0.9f : size) / L : 0.01f;
+}
+static float exam_dist(void) { static float d = -1; if (d < 0) d = exam_env("TTPC_EXAM_DIST", 1.6f); return d; }
+static M4 exam_matrix(int k) {
     MModel *md = &g_mdl[k]; M4 r = m4_id(); const float *ref = g_chk_frozen ? g_chk_ref : md->ref;
-    float L = md->hi[md->axis] - md->lo[md->axis], sc = L > 0 ? 0.95f / L : 0.01f;
+    float sc = exam_scale(k);
     float mid[3] = { (md->lo[0] + md->hi[0]) / 2, (md->lo[1] + md->hi[1]) / 2, (md->lo[2] + md->hi[2]) / 2 };
     for (int i = 0; i < 3; i++) {
         float l = sqrtf(ref[i * 4] * ref[i * 4] + ref[i * 4 + 1] * ref[i * 4 + 1] + ref[i * 4 + 2] * ref[i * 4 + 2]); if (l < 1e-6f) l = 1;
         for (int j = 0; j < 3; j++) r.m[j * 4 + i] = ref[i * 4 + j] / l * sc;
     }
-    const float c[3] = { 0, -0.18f, -1.15f };
+    const float c[3] = { 0, -0.3f, -exam_dist() };
     for (int i = 0; i < 3; i++) r.m[12 + i] = c[i] - (r.m[i] * mid[0] + r.m[4 + i] * mid[1] + r.m[8 + i] * mid[2]);
     return m4_mul(g_exam_A, r);
 }
@@ -1591,6 +1606,9 @@ static int mdl_hit(int k, const Ray *r, float *sx, float *sy, float *dist) {
     if (hp < 0) return 0;
     MPart *pt = &md->part[hp]; int c = ht * 3; if (!pt->vis[c] || !pt->vis[c + 1] || !pt->vis[c + 2]) return 0;
     g_hit_part = hp; g_hit_tri = ht; g_hit_b[0] = hb[0]; g_hit_b[1] = hb[1];
+    {   // the spot in the model's frame, and where the laser was a little before it (a tenth of the model's length)
+        float dl = sqrtf(dm[0] * dm[0] + dm[1] * dm[1] + dm[2] * dm[2]), L = md->hi[md->axis] - md->lo[md->axis];
+        for (int i = 0; i < 3; i++) { g_hit_pm[i] = om[i] + dm[i] * best; g_hit_om[i] = g_hit_pm[i] - (dl > 0 ? dm[i] / dl : 0) * 0.1f * L; } }
     float a0 = 1 - hb[0] - hb[1];
     *sx = a0 * pt->scr[c * 2] + hb[0] * pt->scr[c * 2 + 2] + hb[1] * pt->scr[c * 2 + 4];
     *sy = a0 * pt->scr[c * 2 + 1] + hb[0] * pt->scr[c * 2 + 3] + hb[1] * pt->scr[c * 2 + 5];
@@ -1746,11 +1764,27 @@ int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
             g_exam_A = m4_yaw(yaw, g_head.m[12], g_head.m[13], g_head.m[14]);
             float mid[3] = { (md->lo[0] + md->hi[0]) / 2, (md->lo[1] + md->hi[1]) / 2, (md->lo[2] + md->hi[2]) / 2 };
             float z = md->ref[8] * mid[0] + md->ref[9] * mid[1] + md->ref[10] * mid[2] + md->ref[11];
-            g_exam_k = 0.9f / (z < -1 ? -z : 200.f); g_exam_anchored = 1; g_exam_exit_cd = 0;
+            g_exam_k = exam_dist() / (z < -1 ? -z : 200.f); g_exam_anchored = 1; g_exam_exit_cd = 0;
             fprintf(stderr, "[vr] examination opened in front of you (game depth %.0f -> scale %.4f)\n", -z, g_exam_k);
         }
         g_bubble_now = g_bubble_seen; g_bubble_seen = 0;
-        if (g_exam_now && g_exam_anchored && g_chk_st) {
+        int ast = aut_state();   // the game's examination task (forensics.c): 1 overview, 3 zooming, 4 close-up, 5-7 a remark
+        if (g_exam_now && g_exam_anchored && g_chk_st && ast >= 0) {
+            // the task takes the tapped spot straight from VR (forensics.c), so only its states matter here:
+            // overview -> (the game zooms) -> close-up: press A -> the remark -> back to the close-up: B zooms out again
+            g_chk_t++;
+            if (g_chk_st == 1 && g_click_t == 0) {
+                g_chk_ready = ast == 4 ? g_chk_ready + 1 : 0;
+                if (g_chk_ready >= 6) { click_at(g_click_px[0], g_click_px[1], 16); g_chk_st = 2; g_chk_t = 0; g_chk_quiet = 0; g_chk_busy = 0; fprintf(stderr, "[vr] check (the game zoomed in)\n"); }
+                else if (g_chk_t > 240) { g_chk_st = 0; fprintf(stderr, "[vr] check: the game never zoomed in (state %d)\n", ast); }
+            } else if (g_chk_st == 2 && g_click_t == 0) {
+                if (ast != 4) g_chk_busy = 1;
+                g_chk_quiet = g_bubble_now ? 0 : g_chk_quiet + 1;
+                int done = (g_chk_busy && ast == 4 && g_chk_quiet > 20) || (!g_chk_busy && g_chk_t > 90);
+                if (done) { if (ast == 4) { g_press_b = 10; fprintf(stderr, "[vr] back out of the close-up\n"); } g_chk_st = 0; }
+                else if (g_chk_t > 3600) g_chk_st = 0;
+            }
+        } else if (g_exam_now && g_exam_anchored && g_chk_st) {   // another examination task (not the one forensics.c knows): watch the camera
             MModel *md = &g_mdl[g_exam_now - 1]; g_chk_t++;
             int zoomed = md->camd < g_chk_d0 - 8; float dd = fabsf(md->camd - g_chk_prevd); g_chk_prevd = md->camd;
             if (g_chk_st == 1 && g_click_t == 0) {   // waiting for the game to zoom in on the spot
@@ -1771,12 +1805,8 @@ int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
         }
         float target = g_exam_now && g_exam_anchored ? 1.f : 0.f; g_exam_fade += (target - g_exam_fade) * 0.12f;
         if (fabsf(target - g_exam_fade) < 0.01f) g_exam_fade = target;
-        // stepping back out of it presses the game's EXIT
+        // leaving it: B in the overview presses the game's EXIT (vr_input); walking around never does
         if (g_exam_exit_cd > 0) g_exam_exit_cd--;
-        if (g_exam_now && g_exam_anchored && g_head_ok && g_exam_exit_cd == 0 && g_click_t == 0) {
-            float dx = g_head.m[12] - g_exam_A.m[12], dz = g_head.m[14] - g_exam_A.m[14];
-            if (dx * dx + dz * dz > 0.9f * 0.9f) { click_at(527, 424, 20); g_exam_exit_cd = 150; fprintf(stderr, "[vr] stepped back: EXIT\n"); }
-        }
     }
     if (g_vr_office_seen) g_office_hold = 4; else if (g_office_hold > 0) g_office_hold--;
     g_office_now = g_office_hold > 0 && !g_desk_now; g_vr_office_seen = 0;
@@ -1861,6 +1891,11 @@ void vr_input(Input *in) {
         if (--g_auto_exit == 0) g_auto_exit = 0;
         if (g_auto_exit == 0) g_auto_exit = -60;   // don't retrigger at once if the computer stays up
     } else if (g_auto_exit < 0) g_auto_exit++;
+    {   // the examination: the tapped spot goes straight to the game's task (forensics.c) while VR checks it
+        int ast = aut_state();
+        if (g_exam_now && g_exam_anchored && g_chk_st && ast >= 0) aut_vr_pick(1, g_exam_now - 1, g_mdl[g_exam_now - 1].ref, g_chk_om, g_chk_pm);
+        else aut_vr_pick(0, 0, NULL, NULL, NULL);
+    }
     int vr_made = g_scripted || g_click_t > 0 || g_press_b > 0 || (g_auto_exit != 0 && g_desk_now);   // presses the VR layer makes itself
     if (what) { in->mouse_x = px; in->mouse_y = py; in->mouse_in = 1; }
 #ifdef TTPC_OPENXR
@@ -1875,7 +1910,7 @@ void vr_input(Input *in) {
         // The grabbed spot follows your hand around the body's long axis: each frame the body's real angle is read
         // back from the game and its Rotate (D-pad left/right) is held until it matches. Let go and it stays.
         static int st, gsign = 1, probe; static float d0, phi0, th0, txp, typ, thp; static float pr_th; static int pr_dir, pr_n;
-        static float h0[3], rgt[3]; static int tpart, ttri; static float tb[2];
+        static float h0[3], rgt[3]; static int tpart, ttri; static float tb[2], tpm[3], tom[3];
         int trig = (in->a || in->lmb) && !g_scripted, grip = 0;
 #ifdef TTPC_OPENXR
         if (!g_preview) grip = g_gripb[g_point_hand];
@@ -1900,6 +1935,7 @@ void vr_input(Input *in) {
             float hand[3] = { g_ray.o[0] + g_ray.d[0] * d0, g_ray.o[1] + g_ray.d[1] * d0, g_ray.o[2] + g_ray.d[2] * d0 };
             if (st == 0 && (trig || grip)) {
                 if (g_last_kind == 6) { d0 = dist; st = grip ? 2 : 1; txp = px; typ = py; tpart = g_hit_part; ttri = g_hit_tri; tb[0] = g_hit_b[0]; tb[1] = g_hit_b[1];
+                    memcpy(tpm, g_hit_pm, 12); memcpy(tom, g_hit_om, 12);
                     for (int i = 0; i < 3; i++) h0[i] = g_ray.o[i] + g_ray.d[i] * d0;
                     rgt[0] = g_head.m[0]; rgt[1] = 0; rgt[2] = g_head.m[2]; float rl = sqrtf(rgt[0] * rgt[0] + rgt[2] * rgt[2]); if (rl > 0) { rgt[0] /= rl; rgt[2] /= rl; }
                     phi0 = ANG(h0); th0 = th; thp = th; pr_n = 0; }
@@ -1910,6 +1946,8 @@ void vr_input(Input *in) {
                 if (!trig) {   // a tap: check that spot (the zoom the game does is undone for you)
                     click_at(txp * 640.f, typ * g_vr_pic_h + g_vr_pic_y0, 16); st = 0;
                     g_chk_st = 1; g_chk_t = 0; g_chk_part = tpart; g_chk_tri = ttri; g_chk_b[0] = tb[0]; g_chk_b[1] = tb[1]; g_chk_d0 = md->camd; g_chk_prevd = md->camd;
+                    memcpy(g_chk_pm, tpm, 12); memcpy(g_chk_om, tom, 12); g_chk_busy = 0; g_chk_ready = 0;
+                    if (aut_state() == 4) { g_chk_st = 2; g_chk_quiet = 0; fprintf(stderr, "[vr] check (already in the close-up)\n"); }   // one press does it
                     memcpy(g_chk_ref, md->ref, 48); g_chk_frozen = 1;
                 }
                 else if (mv > 0.025f) { st = 2; fprintf(stderr, "[vr] turning the %s by hand\n", k ? "personal effects" : "body"); }
@@ -1935,6 +1973,17 @@ void vr_input(Input *in) {
             (void)thp; (void)probe;
         }
         g_scripted = 0;
+    }
+    {   // the examination's overview: B leaves (the game's EXIT plate); in the close-up B is the game's own "zoom out"
+        static int pb; int b = in->b || in->rmb, ast = aut_state();
+#ifdef TTPC_OPENXR
+        if (!g_preview) b = g_bb[g_point_hand];   // the B button itself (the grip grabs the body)
+#endif
+        if (g_exam_now && g_exam_anchored && ast == 1 && !g_chk_st && g_click_t == 0 && g_press_b == 0) {
+            if (b && !pb) { click_at(527, 424, 20); fprintf(stderr, "[vr] B in the overview: EXIT\n"); }
+            in->b = in->rmb = 0;
+        }
+        pb = b;
     }
     {   // on the computer: tap = A (open a card); press and hold = pick the card up (the game's A+B) and drag it
         static int st, frames, tap;
@@ -1986,6 +2035,10 @@ void vr_input(Input *in) {
     if (what) {}
     else in->mouse_in = 0;
     if (g_preview) in->stick_up = in->stick_down = in->stick_left = in->stick_right = 0;   // desktop mode: WASD walks you, not the Nunchuk
+    if (g_exam_now) {   // examining: the Nunchuk stick is the VR grab's alone (in the close-up any tilt would zoom the game out)
+        int ast = aut_state(); if (ast >= 0 && ast != 1) g_stick_cmd = 0;
+        in->stick_up = in->stick_down = in->stick_left = in->stick_right = 0; in->nx = in->ny = 0; in->has_analog = 0;
+    }
     if (g_stick_cmd) { in->stick_right = g_stick_cmd > 0; in->stick_left = g_stick_cmd < 0; in->nx = (float)g_stick_cmd; in->ny = 0; in->has_analog = 1; }   // the grab turns the model
     g_stick_cmd = 0;
 }

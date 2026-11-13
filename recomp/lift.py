@@ -93,6 +93,10 @@ WRAP = {
     0x802222E0,  # SelectThread   (thread scheduler: fiber switching)
     0x8021B5D0,  # OSSaveContext  (records which fiber owns a context)
     0x80007690,  # cadSequence task (switch to a developer scene on request)
+    0x8012E9F0,  # forensics examination calc (runtime/forensics.c: the VR laser does the pointing)
+    0x801301F0,  # forensics: collision model under the pointer
+    0x8000B370,  # Wii Remote pointer x / y (overridden only inside the examination calc)
+    0x8000B540,
 }
 
 

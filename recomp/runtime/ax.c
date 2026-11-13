@@ -158,15 +158,17 @@ static void process_list(u32 addr) {
         u32 next = pb32(&pb, PB_NEXT);
         if (pb.w[PB_RUNNING] == 1) {
             u16 before[PB_WORDS]; memcpy(before, pb.w, sizeof before);
-            static int axlog = -1; if (axlog < 0) axlog = getenv("TTPC_AXLOG") != NULL;
-            if (axlog && pb.w[PB_IS_STREAM]) {
+            static int axlog = -1; if (axlog < 0) { const char *e = getenv("TTPC_AXLOG"); axlog = e ? (atoi(e) == 2 ? 2 : 1) : 0; }
+            if (axlog) {   // TTPC_AXLOG=1: every voice when it starts or changes (TTPC_AXLOG=2: streams only)
+                if (axlog == 2 && !pb.w[PB_IS_STREAM]) goto nolog;
                 static u32 last_loop[256], last_end[256], last_flags[256]; int slot = (addr >> 6) & 255;
                 u32 flags = pb.w[PB_LOOPING] | pb.w[PB_FORMAT] << 4;
                 if (pb32(&pb, PB_LOOP_ADDR) != last_loop[slot] || pb32(&pb, PB_END_ADDR) != last_end[slot] || flags != last_flags[slot])
-                    fprintf(stderr, "[axv] %08X loop %08X end %08X cur %08X looping %u fmt %u ratio %08X vol %04X\n", addr,
-                            pb32(&pb, PB_LOOP_ADDR), pb32(&pb, PB_END_ADDR), pb32(&pb, PB_CUR_ADDR), pb.w[PB_LOOPING], pb.w[PB_FORMAT], pb32(&pb, PB_RATIO), pb.w[PB_VOL]);
+                    fprintf(stderr, "[axv] %08X%s loop %08X end %08X cur %08X looping %u fmt %u ratio %08X vol %04X mix %08X gain %04X\n", addr, pb.w[PB_IS_STREAM] ? " stream" : "",
+                            pb32(&pb, PB_LOOP_ADDR), pb32(&pb, PB_END_ADDR), pb32(&pb, PB_CUR_ADDR), pb.w[PB_LOOPING], pb.w[PB_FORMAT], pb32(&pb, PB_RATIO), pb.w[PB_VOL], pb32(&pb, PB_MIXCTL), pb.w[PB_GAIN]);
                 last_loop[slot] = pb32(&pb, PB_LOOP_ADDR); last_end[slot] = pb32(&pb, PB_END_ADDR); last_flags[slot] = flags;
             }
+            nolog:
             process_voice(&pb);
             if (axlog && pb.w[PB_RUNNING] == 0) fprintf(stderr, "[axv] %08X ended at %08X\n", addr, pb32(&pb, PB_CUR_ADDR));
             g_voices_run++;
