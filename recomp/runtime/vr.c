@@ -143,10 +143,11 @@ int g_vr_pic_y0 = 24, g_vr_pic_h = 480;  // the presented picture's rows in the 
 // (the centres of the markers the game puts on them, in its 640x528 frame)
 static const float HS_PC[2] = { 166, 173 }, HS_RECORDER[2] = { 111, 320 }, HS_DOOR[2] = { 576, 152 };
 #define OFFICE_BG_Y 0
-static float g_obj_min[6][3], g_obj_max[6][3]; static int g_obj_ok[6];   // 0 recorder, 1 door, 2 monitor body, 3 mouse, 4 the secret book, 5 the sliding panel
-static float g_cdish[3]; static int g_cdish_ok;   // the culture dish the little swimmer circles (hidden compartment)
+static float g_obj_min[7][3], g_obj_max[7][3]; static int g_obj_ok[7];   // 0 recorder, 1 door, 2 monitor body, 3 mouse, 4 the secret book, 5/6 the sliding panels
+static float g_dish[7][3]; static int g_dish_ok[7];   // the hidden compartment's seven culture dishes (left to right)
 static float g_niche_t; static int g_niche_open;  // the hidden compartment: 0 closed .. 1 open
-static float g_cr_panic;                          // seconds of frantic swimming left (you touched his dish)
+static float g_dish_t[7]; static int g_dish_tog[7];   // per dish: seconds of agitation left; the pair's fused/apart toggle
+static void aq_poke(int d); static int g_aim_dish;
 // the door: swings open (into the alcove) when you leave through it; beyond it, a black void that shows the
 // game's other screens (the map...) on a pane in the doorway until those places are built
 static float g_door_t; static int g_door_req, g_last_kind;   // g_last_kind: what the laser was on (4 = door)
@@ -214,10 +215,10 @@ static int load_room(const char *path, int room) {
         if (!nd->mesh) {   // the morgue's bed markers: where the body and the personal effects are laid
             int k = !nd->name ? -1 : !strcmp(nd->name, "bed_body_spot") ? 0 : !strcmp(nd->name, "bed_effects_spot") ? 1 : -1;
             if (k >= 0) { memcpy(g_spot[k], W.m + 12, 12); g_spot_ok[k] = 1; }
-            if (room == 0 && nd->name && !strcmp(nd->name, "creature_dish")) { memcpy(g_cdish, W.m + 12, 12); g_cdish_ok = 1; }
+            if (room == 0 && nd->name && !strncmp(nd->name, "cdish_", 6)) { int d = atoi(nd->name + 6); if (d >= 0 && d < 7) { memcpy(g_dish[d], W.m + 12, 12); g_dish_ok[d] = 1; } }
             continue;
         }
-        int obj = room != 0 || !nd->name ? -1 : !strncmp(nd->name, "recorder", 8) ? 0 : !strncmp(nd->name, "door_exit", 9) ? 1 : !strncmp(nd->name, "monitor", 7) ? 2 : !strncmp(nd->name, "mouse", 5) ? 3 : !strncmp(nd->name, "secret_book", 11) ? 4 : !strncmp(nd->name, "secret_panel", 12) ? 5 : -1;
+        int obj = room != 0 || !nd->name ? -1 : !strncmp(nd->name, "recorder", 8) ? 0 : !strncmp(nd->name, "door_exit", 9) ? 1 : !strncmp(nd->name, "monitor", 7) ? 2 : !strncmp(nd->name, "mouse", 5) ? 3 : !strncmp(nd->name, "secret_book", 11) ? 4 : !strncmp(nd->name, "secret_panel_r", 14) ? 6 : !strncmp(nd->name, "secret_panel", 12) ? 5 : -1;
         for (cgltf_size pi = 0; pi < nd->mesh->primitives_count; pi++) {
             cgltf_primitive *pr = &nd->mesh->primitives[pi];
             const cgltf_accessor *ap = NULL, *at = NULL, *ac = NULL;
@@ -258,7 +259,7 @@ static int load_room(const char *path, int room) {
                         sqrtf(g_scr_u[0] * g_scr_u[0] + g_scr_u[1] * g_scr_u[1] + g_scr_u[2] * g_scr_u[2]), sqrtf(g_scr_v[0] * g_scr_v[0] + g_scr_v[1] * g_scr_v[1] + g_scr_v[2] * g_scr_v[2]));
             }
             if (g_nprim == cap) { cap = cap ? cap * 2 : 256; g_prim = realloc(g_prim, cap * sizeof *g_prim); }
-            Prim *o = &g_prim[g_nprim++]; o->n = ni_; o->mat = mi; o->grp = obj == 1 || obj == 3 ? obj : obj == 4 ? 6 : obj == 5 ? 5 : 0; o->room = room;
+            Prim *o = &g_prim[g_nprim++]; o->n = ni_; o->mat = mi; o->grp = obj == 1 || obj == 3 ? obj : obj == 4 ? 6 : obj == 5 ? 5 : obj == 6 ? 7 : 0; o->room = room;
             GLuint vb, ib; vGenVertexArrays(1, &o->vao); vBindVertexArray(o->vao);
             vGenBuffers(1, &vb); vBindBuffer(GL_ARRAY_BUFFER, vb); vBufferData(GL_ARRAY_BUFFER, sizeof(float) * 9 * nv, v, GL_STATIC_DRAW);
             vGenBuffers(1, &ib); vBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib); vBufferData(GL_ELEMENT_ARRAY_BUFFER, 4 * ni_, ix, GL_STATIC_DRAW);
@@ -357,11 +358,11 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
     {   float a = -1.65f * g_door_t; M4 r = m4_yaw(a, 0, 0, 0), t = m4_yaw(0, HINGE[0], 0, HINGE[2]), ti = m4_yaw(0, -HINGE[0], 0, -HINGE[2]);
         door_m = m4_mul(t, m4_mul(r, ti)); }
     mouse_m.m[12] = g_mouse_off[0]; mouse_m.m[14] = g_mouse_off[1];
-    M4 panel_m = m4_id(), book_m = m4_id();
+    M4 panel_m = m4_id(), panel_r_m = m4_id(), book_m = m4_id();
     {   // the compartment: the wall panel steps back into the wall, then slides away along it; the book tips out
         float t = g_niche_t, in_ = t < 0.25f ? t / 0.25f : 1.f, sl = t > 0.25f ? (t - 0.25f) / 0.75f : 0.f;
         sl = sl * sl * (3 - 2 * sl);
-        panel_m.m[12] = -0.025f * in_; panel_m.m[14] = -0.62f * sl;
+        panel_m.m[12] = panel_r_m.m[12] = -0.025f * in_; panel_m.m[14] = 0.56f * sl; panel_r_m.m[14] = -0.56f * sl;   // the two halves part
         if (g_obj_ok[4]) {
             float a = 0.42f * (t < 0.3f ? t / 0.3f : 1.f), c = cosf(a), sn = sinf(a);
             float py = g_obj_min[4][1], pz = g_obj_max[4][2];   // pivot: the book's bottom front edge
@@ -373,7 +374,7 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
     for (int i = 0; i < g_nprim; i++) {
         Prim *p = &g_prim[i]; if (p->room != g_room) continue;
         Mat *m = p->mat >= 0 && p->mat < g_nmat ? &g_mat[p->mat] : NULL;
-        if (p->grp != cur_grp) { cur_grp = p->grp; vUniformMatrix4fv(u_model, 1, 0, (p->grp == 1 ? door_m : p->grp == 3 ? mouse_m : p->grp == 5 ? panel_m : p->grp == 6 ? book_m : ident).m); }
+        if (p->grp != cur_grp) { cur_grp = p->grp; vUniformMatrix4fv(u_model, 1, 0, (p->grp == 1 ? door_m : p->grp == 3 ? mouse_m : p->grp == 5 ? panel_m : p->grp == 7 ? panel_r_m : p->grp == 6 ? book_m : ident).m); }
         static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 };
         vActiveTexture(GL_TEXTURE1); vBindTexture(GL_TEXTURE_2D, m && m->etex ? m->etex : g_white);
         vActiveTexture(GL_TEXTURE0);
@@ -524,9 +525,13 @@ static int laser_target(const Ray *r, float *gx, float *gy, float *dist) {
     if (g_office_now && g_obj_ok[4]) {   // the dark green book on the shelf
         float db; if (ray_box(r, g_obj_min[4], g_obj_max[4], 0.02f, &db) && (!hit1 || db < d1) && (!hit2 || db < d2)) { *gx = *gy = -1; *dist = db; g_last_kind = 9; return 0; }
     }
-    if (g_office_now && g_cdish_ok && g_niche_t > 0.5f) {   // the little swimmer's dish
-        float mn[3] = { g_cdish[0] - 0.07f, g_cdish[1] - 0.01f, g_cdish[2] - 0.07f }, mx[3] = { g_cdish[0] + 0.07f, g_cdish[1] + 0.14f, g_cdish[2] + 0.07f }, dc;
-        if (ray_box(r, mn, mx, 0.0f, &dc) && (!hit1 || dc < d1) && (!hit2 || dc < d2)) { *gx = *gy = -1; *dist = dc; g_last_kind = 10; return 0; }
+    if (g_office_now && g_niche_t > 0.5f) {   // the culture dishes (the nearest one the laser crosses)
+        float best = 1e9f; int bd = -1;
+        for (int d = 0; d < 7; d++) if (g_dish_ok[d]) {
+            float mn[3] = { g_dish[d][0] - 0.07f, g_dish[d][1] - 0.01f, g_dish[d][2] - 0.065f }, mx[3] = { g_dish[d][0] + 0.07f, g_dish[d][1] + 0.12f, g_dish[d][2] + 0.065f }, dc;
+            if (ray_box(r, mn, mx, 0.0f, &dc) && dc < best) { best = dc; bd = d; }
+        }
+        if (bd >= 0 && (!hit1 || best < d1) && (!hit2 || best < d2)) { *gx = *gy = -1; *dist = best; g_last_kind = 10; g_aim_dish = bd; return 0; }
     }
     int hr = g_office_now && g_obj_ok[0] && ray_box(r, g_obj_min[0], g_obj_max[0], 0.03f, &dr);
     int hd = g_office_now && g_obj_ok[1] && ray_box(r, g_obj_min[1], g_obj_max[1], 0.02f, &dd);
@@ -603,49 +608,102 @@ static int ray_screen_old(const Ray *r, int gw, int gh, float *px, float *py, fl
 }
 
 
-// ---------------------------------------------------------------- the little swimmer (vr/creature.glb, a rigged model with a "swim" loop)
-// It circles above the middle culture dish in the hidden compartment. Its skeleton is animated from the file's own
-// animation, skinned on the CPU every frame. Touch its dish (or point at it and pull the trigger) and it panics:
-// faster strokes, a quicker, wobblier circle, steeper banking, settling back down over a few seconds.
-static cgltf_data *g_cr; static cgltf_primitive *g_cr_pr; static cgltf_skin *g_cr_skin; static cgltf_animation *g_cr_anim;
-static int g_cr_nv, g_cr_ni; static float *g_cr_p, *g_cr_n, *g_cr_uv, *g_cr_w, *g_cr_cpu; static u16 *g_cr_j;
-static GLuint g_cr_tex, g_cr_vao, g_cr_vbo, g_cr_ibo; static float g_cr_t, g_cr_dur = 1, g_cr_orbit, g_cr_clock;
-static void creature_load(const char *path) {
+// ---------------------------------------------------------------- the aquarium: the creatures in the hidden compartment's seven dishes
+// Each creature type is a rigged glTF model (vr/creature*.glb) with an 'idle' and an 'agitated' loop (the first swimmer has a single
+// 'swim' loop, played faster when stirred). A type can appear more than once (the pair, the trio) and in recoloured variants. Every
+// instance is posed from its type's animation and skinned on the CPU each frame; where it is and how it moves is decided per dish in
+// creature_update(). Touch a dish (or point at it and pull the trigger) to stir its occupants.
+typedef struct {
+    cgltf_data *d; cgltf_primitive *pr; cgltf_skin *skin; cgltf_animation *idle, *agit;
+    int nv, ni; float *p, *n, *uv, *w; u16 *j; GLuint ibo;
+    float lo[3], hi[3], dur_i, dur_a;
+    float mf[3], mu[3];            // the model's own forward and up axes
+    const cgltf_image *img;
+} CrType;
+typedef struct { int type; GLuint tex, vao, vbo; float *cpu; float t; float glow; } CrInst;
+enum { CT_SWIM, CT_PAIR, CT_PLATES, CT_TRIO, CT_EYE, CT_WORM, CT_N };
+static CrType g_ct[CT_N]; static CrInst g_ci[16]; static int g_nci;
+static int g_ci_of[7][3], g_nci_of[7];   // per dish: its occupants
+static float g_aq_clock;
+static GLuint g_bub_vao, g_bub_vbo; static float g_bub_cpu[17 * 9 * 9 * 6]; static int g_bub_nv;   // the eye creature's bubble
+
+static float aq_dur(const cgltf_animation *a) {
+    float m = 1; if (!a) return m;
+    for (cgltf_size c = 0; c < a->samplers_count; c++) { const cgltf_accessor *in = a->samplers[c].input; float x; cgltf_accessor_read_float(in, in->count - 1, &x, 1); if (x > m) m = x; }
+    return m;
+}
+static int ct_load(CrType *T, const char *path, const float mf[3], const float mu[3]) {
     cgltf_options opt = {0}; cgltf_data *d = NULL;
-    if (cgltf_parse_file(&opt, path, &d) != cgltf_result_success || cgltf_load_buffers(&opt, d, path) != cgltf_result_success) { if (d) cgltf_free(d); return; }
-    cgltf_node *mn = NULL; for (cgltf_size i = 0; i < d->nodes_count; i++) if (d->nodes[i].mesh && d->nodes[i].skin) { mn = &d->nodes[i]; break; }
-    if (!mn || !d->animations_count) { fprintf(stderr, "[vr] %s: no rigged, animated mesh\n", path); cgltf_free(d); return; }
-    g_cr = d; g_cr_pr = &mn->mesh->primitives[0]; g_cr_skin = mn->skin; g_cr_anim = &d->animations[0];
-    for (cgltf_size i = 0; i < d->animations_count; i++) if (d->animations[i].name && !strcmp(d->animations[i].name, "swim")) g_cr_anim = &d->animations[i];
+    if (cgltf_parse_file(&opt, path, &d) != cgltf_result_success || cgltf_load_buffers(&opt, d, path) != cgltf_result_success) { if (d) cgltf_free(d); fprintf(stderr, "[vr] no %s\n", path); return 0; }
+    cgltf_node *mn = NULL; for (cgltf_size i = 0; i < d->nodes_count; i++) if (d->nodes[i].mesh) { mn = &d->nodes[i]; if (mn->skin) break; }
+    if (!mn) { cgltf_free(d); return 0; }
+    T->d = d; T->pr = &mn->mesh->primitives[0]; T->skin = mn->skin; memcpy(T->mf, mf, 12); memcpy(T->mu, mu, 12);
+    for (cgltf_size i = 0; i < d->animations_count; i++) {
+        const char *nm = d->animations[i].name ? d->animations[i].name : "";
+        if (!strcmp(nm, "idle") || !strcmp(nm, "swim")) T->idle = &d->animations[i]; else if (!strcmp(nm, "agitated")) T->agit = &d->animations[i];
+    }
+    if (!T->idle && d->animations_count) T->idle = &d->animations[0];
+    if (!T->agit) T->agit = T->idle;
+    T->dur_i = aq_dur(T->idle); T->dur_a = aq_dur(T->agit);
     const cgltf_accessor *ap = NULL, *an = NULL, *at = NULL, *aj = NULL, *aw = NULL;
-    for (cgltf_size a = 0; a < g_cr_pr->attributes_count; a++) { cgltf_attribute *A = &g_cr_pr->attributes[a];
+    for (cgltf_size a = 0; a < T->pr->attributes_count; a++) { cgltf_attribute *A = &T->pr->attributes[a];
         if (A->type == cgltf_attribute_type_position) ap = A->data; else if (A->type == cgltf_attribute_type_normal) an = A->data;
         else if (A->type == cgltf_attribute_type_texcoord && A->index == 0) at = A->data;
         else if (A->type == cgltf_attribute_type_joints && A->index == 0) aj = A->data; else if (A->type == cgltf_attribute_type_weights && A->index == 0) aw = A->data; }
-    if (!ap || !aj || !aw) { fprintf(stderr, "[vr] %s: missing skin data\n", path); cgltf_free(d); g_cr = NULL; return; }
-    int n = g_cr_nv = (int)ap->count;
-    g_cr_p = malloc(12 * (size_t)n); g_cr_n = malloc(12 * (size_t)n); g_cr_uv = calloc((size_t)n, 8); g_cr_w = malloc(16 * (size_t)n); g_cr_j = malloc(8 * (size_t)n); g_cr_cpu = malloc(36 * (size_t)n);
+    if (!ap) { cgltf_free(d); T->d = NULL; return 0; }
+    int n = T->nv = (int)ap->count;
+    T->p = malloc(12 * (size_t)n); T->n = malloc(12 * (size_t)n); T->uv = calloc((size_t)n, 8);
+    if (T->skin && aj && aw) { T->w = malloc(16 * (size_t)n); T->j = malloc(8 * (size_t)n); } else T->skin = NULL;
+    for (int i = 0; i < 3; i++) { T->lo[i] = 1e9f; T->hi[i] = -1e9f; }
     for (int k = 0; k < n; k++) {
-        cgltf_accessor_read_float(ap, k, g_cr_p + k * 3, 3);
-        if (an) cgltf_accessor_read_float(an, k, g_cr_n + k * 3, 3); else { g_cr_n[k * 3] = 0; g_cr_n[k * 3 + 1] = 1; g_cr_n[k * 3 + 2] = 0; }
-        if (at) cgltf_accessor_read_float(at, k, g_cr_uv + k * 2, 2);
-        cgltf_accessor_read_float(aw, k, g_cr_w + k * 4, 4); cgltf_uint jj[4] = { 0 }; cgltf_accessor_read_uint(aj, k, jj, 4);
-        for (int i = 0; i < 4; i++) g_cr_j[k * 4 + i] = (u16)jj[i];
+        cgltf_accessor_read_float(ap, k, T->p + k * 3, 3);
+        if (an) cgltf_accessor_read_float(an, k, T->n + k * 3, 3); else { T->n[k * 3] = 0; T->n[k * 3 + 1] = 1; T->n[k * 3 + 2] = 0; }
+        if (at) cgltf_accessor_read_float(at, k, T->uv + k * 2, 2);
+        if (T->skin) { cgltf_accessor_read_float(aw, k, T->w + k * 4, 4); cgltf_uint jj[4] = { 0 }; cgltf_accessor_read_uint(aj, k, jj, 4); for (int i = 0; i < 4; i++) T->j[k * 4 + i] = (u16)jj[i]; }
+        else if (mn) { float wm[16]; cgltf_node_transform_world(mn, wm); float q[3] = { T->p[k * 3], T->p[k * 3 + 1], T->p[k * 3 + 2] };   // static: bake the node's own placement
+            for (int r = 0; r < 3; r++) T->p[k * 3 + r] = wm[r] * q[0] + wm[4 + r] * q[1] + wm[8 + r] * q[2] + wm[12 + r]; }
+        for (int i = 0; i < 3; i++) { float x = T->p[k * 3 + i]; if (x < T->lo[i]) T->lo[i] = x; if (x > T->hi[i]) T->hi[i] = x; }
     }
-    g_cr_ni = g_cr_pr->indices ? (int)g_cr_pr->indices->count : n; u32 *ix = malloc(4 * (size_t)g_cr_ni);
-    for (int k = 0; k < g_cr_ni; k++) ix[k] = g_cr_pr->indices ? (u32)cgltf_accessor_read_index(g_cr_pr->indices, k) : (u32)k;
-    const cgltf_material *m = g_cr_pr->material;
-    if (m && m->pbr_metallic_roughness.base_color_texture.texture) g_cr_tex = upload_image(m->pbr_metallic_roughness.base_color_texture.texture->image, 1);
-    for (cgltf_size c = 0; c < g_cr_anim->samplers_count; c++) { const cgltf_accessor *in = g_cr_anim->samplers[c].input;
-        float x; cgltf_accessor_read_float(in, in->count - 1, &x, 1); if (x > g_cr_dur) g_cr_dur = x; }
-    vGenVertexArrays(1, &g_cr_vao); vBindVertexArray(g_cr_vao);
-    vGenBuffers(1, &g_cr_vbo); vBindBuffer(GL_ARRAY_BUFFER, g_cr_vbo); vBufferData(GL_ARRAY_BUFFER, 36 * (size_t)n, NULL, GL_DYNAMIC_DRAW);
-    vGenBuffers(1, &g_cr_ibo); vBindBuffer(GL_ELEMENT_ARRAY_BUFFER, g_cr_ibo); vBufferData(GL_ELEMENT_ARRAY_BUFFER, 4 * (size_t)g_cr_ni, ix, GL_STATIC_DRAW);
+    T->ni = T->pr->indices ? (int)T->pr->indices->count : n; u32 *ix = malloc(4 * (size_t)T->ni);
+    for (int k = 0; k < T->ni; k++) ix[k] = T->pr->indices ? (u32)cgltf_accessor_read_index(T->pr->indices, k) : (u32)k;
+    vGenBuffers(1, &T->ibo); vBindBuffer(GL_ELEMENT_ARRAY_BUFFER, T->ibo); vBufferData(GL_ELEMENT_ARRAY_BUFFER, 4 * (size_t)T->ni, ix, GL_STATIC_DRAW); free(ix);
+    const cgltf_material *m = T->pr->material; T->img = m && m->pbr_metallic_roughness.base_color_texture.texture ? m->pbr_metallic_roughness.base_color_texture.texture->image : NULL;
+    fprintf(stderr, "[vr] creature %s: %d vertices%s%s\n", path, n, T->skin ? ", rigged" : ", static", T->agit && T->agit != T->idle ? ", idle + agitated loops" : "");
+    return 1;
+}
+// the model's colour map, optionally recoloured: pixels whose hue is in [h0, h1] (degrees, saturated enough) are turned so the
+// middle of that range lands on hue hto (shading and the spread of tones are kept)
+static GLuint ct_texture(const CrType *T, float h0, float h1, float hto) {
+    if (!T->img || !T->img->buffer_view) return g_white;
+    const u8 *src = (const u8 *)T->img->buffer_view->buffer->data + T->img->buffer_view->offset;
+    int w, h, c; u8 *px = stbi_load_from_memory(src, (int)T->img->buffer_view->size, &w, &h, &c, 4); if (!px) return g_white;
+    if (h0 >= 0) for (int i = 0; i < w * h; i++) {
+        float r = px[i * 4] / 255.f, g = px[i * 4 + 1] / 255.f, b = px[i * 4 + 2] / 255.f, mx = fmaxf(r, fmaxf(g, b)), mn = fminf(r, fminf(g, b)), dl = mx - mn;
+        if (dl < 0.08f || mx < 0.12f || dl / mx < 0.22f) continue;
+        float hue = mx == r ? 60 * fmodf((g - b) / dl, 6) : mx == g ? 60 * ((b - r) / dl + 2) : 60 * ((r - g) / dl + 4); if (hue < 0) hue += 360;
+        int in = h0 <= h1 ? (hue >= h0 && hue <= h1) : (hue >= h0 || hue <= h1); if (!in) continue;
+        float nh = fmodf(hue + hto - (h0 <= h1 ? (h0 + h1) / 2 : fmodf((h0 + h1 + 360) / 2, 360)) + 720, 360), H = nh / 60, X = dl * (1 - fabsf(fmodf(H, 2) - 1)), rr, gg, bb; int seg = (int)H % 6;
+        if (seg == 0) { rr = dl; gg = X; bb = 0; } else if (seg == 1) { rr = X; gg = dl; bb = 0; } else if (seg == 2) { rr = 0; gg = dl; bb = X; }
+        else if (seg == 3) { rr = 0; gg = X; bb = dl; } else if (seg == 4) { rr = X; gg = 0; bb = dl; } else { rr = dl; gg = 0; bb = X; }
+        px[i * 4] = (u8)((rr + mn) * 255); px[i * 4 + 1] = (u8)((gg + mn) * 255); px[i * 4 + 2] = (u8)((bb + mn) * 255);
+    }
+    GLuint t; vGenTextures(1, &t); vBindTexture(GL_TEXTURE_2D, t); vPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    vTexImage2D(GL_TEXTURE_2D, 0, GL_SRGB8_ALPHA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px); vGenerateMipmap(GL_TEXTURE_2D);
+    vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    free(px); return t;
+}
+static int ci_new(int type, GLuint tex, int dish) {
+    if (g_nci >= 16 || !g_ct[type].d) return -1;
+    CrInst *I = &g_ci[g_nci]; CrType *T = &g_ct[type]; I->type = type; I->tex = tex; I->cpu = malloc(36 * (size_t)T->nv); I->t = (float)g_nci * 0.37f;
+    vGenVertexArrays(1, &I->vao); vBindVertexArray(I->vao);
+    vGenBuffers(1, &I->vbo); vBindBuffer(GL_ARRAY_BUFFER, I->vbo); vBufferData(GL_ARRAY_BUFFER, 36 * (size_t)T->nv, NULL, GL_DYNAMIC_DRAW);
+    vBindBuffer(GL_ELEMENT_ARRAY_BUFFER, T->ibo);
     vEnableVertexAttribArray(0); vVertexAttribPointer(0, 3, GL_FLOAT, 0, 36, (void *)0);
     vEnableVertexAttribArray(1); vVertexAttribPointer(1, 2, GL_FLOAT, 0, 36, (void *)12);
     vEnableVertexAttribArray(2); vVertexAttribPointer(2, 4, GL_FLOAT, 0, 36, (void *)20);
-    vBindVertexArray(0); free(ix);
-    fprintf(stderr, "[vr] creature %s: %d vertices, %d bones, %.2f s swim loop\n", path, n, (int)g_cr_skin->joints_count, g_cr_dur);
+    vBindVertexArray(0);
+    g_ci_of[dish][g_nci_of[dish]++] = g_nci;
+    return g_nci++;
 }
 static void anim_sample(const cgltf_animation_sampler *sm, float t, float *out, int nc) {   // linear (rotations: normalised lerp)
     const cgltf_accessor *in = sm->input, *ou = sm->output; int n = (int)in->count, k = 0; float t0, t1;
@@ -658,54 +716,179 @@ static void anim_sample(const cgltf_animation_sampler *sm, float t, float *out, 
     float l = 0; for (int i = 0; i < nc; i++) { out[i] = a[i] + (b[i] - a[i]) * u; l += out[i] * out[i]; }
     if (nc == 4 && l > 0) { l = sqrtf(l); for (int i = 0; i < 4; i++) out[i] /= l; }
 }
-static void creature_update(void) {   // once per frame: animate, skin, place on its circle
-    if (!g_cr || !g_cdish_ok || g_niche_t < 0.02f) return;
-    const float dt = 1.f / 60;
-    if (g_cr_panic > 0) g_cr_panic -= dt; float pan = g_cr_panic > 1.5f ? 1.f : g_cr_panic > 0 ? g_cr_panic / 1.5f : 0.f;
-    g_cr_clock += dt; g_cr_t = fmodf(g_cr_t + dt * (1.f + 1.8f * pan), g_cr_dur);
-    g_cr_orbit += dt * (1.0f + 2.6f * pan);
-    for (cgltf_size c = 0; c < g_cr_anim->channels_count; c++) {   // pose the skeleton at this moment of the loop
-        cgltf_animation_channel *ch = &g_cr_anim->channels[c]; cgltf_node *nd = ch->target_node; if (!nd) continue;
-        if (ch->target_path == cgltf_animation_path_type_rotation) { anim_sample(ch->sampler, g_cr_t, nd->rotation, 4); nd->has_rotation = 1; }
-        else if (ch->target_path == cgltf_animation_path_type_translation) { anim_sample(ch->sampler, g_cr_t, nd->translation, 3); nd->has_translation = 1; }
-        else if (ch->target_path == cgltf_animation_path_type_scale) { anim_sample(ch->sampler, g_cr_t, nd->scale, 3); nd->has_scale = 1; }
+static void norm3(float *v) { float l = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]); if (l > 1e-9f) for (int i = 0; i < 3; i++) v[i] /= l; }
+static void cross3(const float *a, const float *b, float *o) { o[0] = a[1] * b[2] - a[2] * b[1]; o[1] = a[2] * b[0] - a[0] * b[2]; o[2] = a[0] * b[1] - a[1] * b[0]; }
+// pose an instance (advance its own clock, agitated loop or idle) and skin it into the room: centred on C, its forward along F,
+// its up along U, its longest side `len` metres
+static void ci_update(CrInst *I, int agit, float rate, const float C[3], const float F_[3], const float U_[3], float len) {
+    CrType *T = &g_ct[I->type]; const float dt = 1.f / 60;
+    cgltf_animation *an = agit ? T->agit : T->idle; float dur = agit ? T->dur_a : T->dur_i;
+    I->t = fmodf(I->t + dt * rate, dur > 0 ? dur : 1);
+    static float J[128][16]; int nj = 0;
+    if (T->skin && an) {
+        for (cgltf_size c = 0; c < an->channels_count; c++) {
+            cgltf_animation_channel *ch = &an->channels[c]; cgltf_node *nd = ch->target_node; if (!nd) continue;
+            if (ch->target_path == cgltf_animation_path_type_rotation) { anim_sample(ch->sampler, I->t, nd->rotation, 4); nd->has_rotation = 1; }
+            else if (ch->target_path == cgltf_animation_path_type_translation) { anim_sample(ch->sampler, I->t, nd->translation, 3); nd->has_translation = 1; }
+            else if (ch->target_path == cgltf_animation_path_type_scale) { anim_sample(ch->sampler, I->t, nd->scale, 3); nd->has_scale = 1; }
+        }
+        nj = (int)T->skin->joints_count; if (nj > 128) nj = 128;
+        for (int j = 0; j < nj; j++) {
+            float w[16], ib[16]; cgltf_node_transform_world(T->skin->joints[j], w);
+            if (T->skin->inverse_bind_matrices) cgltf_accessor_read_float(T->skin->inverse_bind_matrices, j, ib, 16); else { memset(ib, 0, 64); ib[0] = ib[5] = ib[10] = ib[15] = 1; }
+            M4 a, b; memcpy(a.m, w, 64); memcpy(b.m, ib, 64); M4 r = m4_mul(a, b); memcpy(J[j], r.m, 64);
+        }
     }
-    static float J[128][16]; int nj = (int)g_cr_skin->joints_count; if (nj > 128) nj = 128;
-    for (int j = 0; j < nj; j++) {   // joint matrix = joint world * inverse bind
-        float w[16], ib[16]; cgltf_node_transform_world(g_cr_skin->joints[j], w);
-        if (g_cr_skin->inverse_bind_matrices) cgltf_accessor_read_float(g_cr_skin->inverse_bind_matrices, j, ib, 16); else { memset(ib, 0, 64); ib[0] = ib[5] = ib[10] = ib[15] = 1; }
-        M4 a, b; memcpy(a.m, w, 64); memcpy(b.m, ib, 64); M4 r = m4_mul(a, b); memcpy(J[j], r.m, 64);
+    float F[3] = { F_[0], F_[1], F_[2] }, U[3] = { U_[0], U_[1], U_[2] }; norm3(F);
+    float d = U[0] * F[0] + U[1] * F[1] + U[2] * F[2]; for (int i = 0; i < 3; i++) U[i] -= d * F[i]; norm3(U);
+    float S[3], ms[3]; cross3(U, F, S); cross3(T->mu, T->mf, ms);
+    float ext = 0; for (int i = 0; i < 3; i++) if (T->hi[i] - T->lo[i] > ext) ext = T->hi[i] - T->lo[i];
+    float sc = ext > 0 ? len / ext : 1, ctr[3] = { (T->lo[0] + T->hi[0]) / 2, (T->lo[1] + T->hi[1]) / 2, (T->lo[2] + T->hi[2]) / 2 };
+    const float L[3] = { 0.2f, 0.9f, 0.3f };
+    for (int k = 0; k < T->nv; k++) {
+        float p[3], n[3]; const float *P = T->p + k * 3, *N = T->n + k * 3;
+        if (nj) { p[0] = p[1] = p[2] = n[0] = n[1] = n[2] = 0;
+            for (int i = 0; i < 4; i++) { float wt = T->w[k * 4 + i]; if (wt <= 0) continue; int j = T->j[k * 4 + i]; if (j >= nj) continue; const float *m = J[j];
+                for (int r = 0; r < 3; r++) { p[r] += wt * (m[r] * P[0] + m[4 + r] * P[1] + m[8 + r] * P[2] + m[12 + r]); n[r] += wt * (m[r] * N[0] + m[4 + r] * N[1] + m[8 + r] * N[2]); } } }
+        else { memcpy(p, P, 12); memcpy(n, N, 12); }
+        float q[3] = { p[0] - ctr[0], p[1] - ctr[1], p[2] - ctr[2] };
+        float a_s = q[0] * ms[0] + q[1] * ms[1] + q[2] * ms[2], a_u = q[0] * T->mu[0] + q[1] * T->mu[1] + q[2] * T->mu[2], a_f = q[0] * T->mf[0] + q[1] * T->mf[1] + q[2] * T->mf[2];
+        float b_s = n[0] * ms[0] + n[1] * ms[1] + n[2] * ms[2], b_u = n[0] * T->mu[0] + n[1] * T->mu[1] + n[2] * T->mu[2], b_f = n[0] * T->mf[0] + n[1] * T->mf[1] + n[2] * T->mf[2];
+        float *o = I->cpu + k * 9, nw[3];
+        for (int i = 0; i < 3; i++) { o[i] = C[i] + sc * (S[i] * a_s + U[i] * a_u + F[i] * a_f); nw[i] = S[i] * b_s + U[i] * b_u + F[i] * b_f; }
+        float nl = sqrtf(nw[0] * nw[0] + nw[1] * nw[1] + nw[2] * nw[2]), dd = nl > 0 ? fabsf(nw[0] * L[0] + nw[1] * L[1] + nw[2] * L[2]) / nl : 1;
+        o[3] = T->uv[k * 2]; o[4] = T->uv[k * 2 + 1]; o[5] = o[6] = o[7] = 0.5f * (0.55f + 0.5f * dd); o[8] = 1;
     }
-    // the circle: head first along it, its face (the side with the orb) toward the open niche above, banking inward
-    float a = g_cr_orbit, rad = 0.022f + 0.006f * pan * sinf(g_cr_clock * 9.f), bob = (0.002f + 0.002f * pan) * sinf(g_cr_clock * 2.7f);
-    float c[3] = { g_cdish[0] + rad * cosf(a), g_cdish[1] + 0.008f + bob, g_cdish[2] + rad * sinf(a) };
-    float f[3] = { -sinf(a), 0, cosf(a) }, up[3] = { 0, 1, 0 };
-    float sd[3] = { f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2], f[0] * up[1] - f[1] * up[0] };
-    float zm[3] = { sd[1] * f[2] - sd[2] * f[1], sd[2] * f[0] - sd[0] * f[2], sd[0] * f[1] - sd[1] * f[0] };
-    float bank = 0.35f + 0.35f * pan + 0.15f * pan * sinf(g_cr_clock * 13.f), cb = cosf(bank), sb = sinf(bank), s2[3], z2[3];
-    for (int i = 0; i < 3; i++) { s2[i] = sd[i] * cb + zm[i] * sb; z2[i] = -sd[i] * sb + zm[i] * cb; }
-    const float sc = 0.03f / 1.7f, oy = -0.85f;   // ~3 cm long: he lives inside the dish
-    const float Ld[3] = { 0.2f, 0.9f, 0.3f };
-    for (int k = 0; k < g_cr_nv; k++) {
-        float p[3] = { 0, 0, 0 }, n[3] = { 0, 0, 0 }; const float *P = g_cr_p + k * 3, *N = g_cr_n + k * 3;
-        for (int i = 0; i < 4; i++) { float wt = g_cr_w[k * 4 + i]; if (wt <= 0) continue; int j = g_cr_j[k * 4 + i]; if (j >= nj) continue; const float *m = J[j];
-            for (int r = 0; r < 3; r++) { p[r] += wt * (m[r] * P[0] + m[4 + r] * P[1] + m[8 + r] * P[2] + m[12 + r]); n[r] += wt * (m[r] * N[0] + m[4 + r] * N[1] + m[8 + r] * N[2]); } }
-        float lx = p[0] * sc, ly = (p[1] + oy) * sc, lz = p[2] * sc, *q = g_cr_cpu + k * 9;
-        for (int i = 0; i < 3; i++) q[i] = c[i] + s2[i] * lx + f[i] * ly + z2[i] * lz;
-        float nw[3]; for (int i = 0; i < 3; i++) nw[i] = s2[i] * n[0] + f[i] * n[1] + z2[i] * n[2];
-        float nl = sqrtf(nw[0] * nw[0] + nw[1] * nw[1] + nw[2] * nw[2]), dd = nl > 0 ? fabsf(nw[0] * Ld[0] + nw[1] * Ld[1] + nw[2] * Ld[2]) / nl : 1;
-        q[3] = g_cr_uv[k * 2]; q[4] = g_cr_uv[k * 2 + 1]; q[5] = q[6] = q[7] = 0.5f * (0.55f + 0.5f * dd); q[8] = 1;
+}
+static void creature_load(const char *unused) {
+    (void)unused;
+    const float px[3] = { 1, 0, 0 }, nx[3] = { -1, 0, 0 }, py[3] = { 0, 1, 0 }, pz[3] = { 0, 0, 1 };
+    ct_load(&g_ct[CT_SWIM], "vr/creature.glb", py, pz);          // head first, face up
+    ct_load(&g_ct[CT_PAIR], "vr/creature_pair.glb", pz, py);     // face forward, crest up
+    ct_load(&g_ct[CT_PLATES], "vr/creature_plates.glb", pz, py); // flat on the agar, crystals up
+    ct_load(&g_ct[CT_TRIO], "vr/creature_trio.glb", nx, py);     // the eye leads
+    ct_load(&g_ct[CT_EYE], "vr/creature_eye.glb", pz, py);       // the eye looks forward (at you)
+    ct_load(&g_ct[CT_WORM], "vr/creature_worm.glb", py, pz);     // head first, lying on the agar
+    (void)px;
+    ci_new(CT_SWIM, ct_texture(&g_ct[CT_SWIM], -1, 0, 0), 0);
+    ci_new(CT_PAIR, ct_texture(&g_ct[CT_PAIR], -1, 0, 0), 1);               // purple, as made
+    ci_new(CT_PAIR, ct_texture(&g_ct[CT_PAIR], 175, 330, 357), 1);          // red: the purple turned red
+    ci_new(CT_PLATES, ct_texture(&g_ct[CT_PLATES], -1, 0, 0), 2);
+    ci_new(CT_TRIO, ct_texture(&g_ct[CT_TRIO], -1, 0, 0), 3);               // yellow, as made
+    ci_new(CT_TRIO, ct_texture(&g_ct[CT_TRIO], 25, 70, 118), 3);            // green: only the yellow changes
+    ci_new(CT_TRIO, ct_texture(&g_ct[CT_TRIO], 25, 70, 285), 3);            // purple
+    ci_new(CT_EYE, ct_texture(&g_ct[CT_EYE], -1, 0, 0), 4);
+    ci_new(CT_WORM, ct_texture(&g_ct[CT_WORM], -1, 0, 0), 5);
+    vGenVertexArrays(1, &g_bub_vao); vBindVertexArray(g_bub_vao); vGenBuffers(1, &g_bub_vbo); vBindBuffer(GL_ARRAY_BUFFER, g_bub_vbo);
+    vBufferData(GL_ARRAY_BUFFER, sizeof g_bub_cpu, NULL, GL_DYNAMIC_DRAW);
+    vEnableVertexAttribArray(0); vVertexAttribPointer(0, 3, GL_FLOAT, 0, 36, (void *)0);
+    vEnableVertexAttribArray(1); vVertexAttribPointer(1, 2, GL_FLOAT, 0, 36, (void *)12);
+    vEnableVertexAttribArray(2); vVertexAttribPointer(2, 4, GL_FLOAT, 0, 36, (void *)20);
+    vBindVertexArray(0);
+}
+static void aq_poke(int d) {   // you touched (or clicked) dish d
+    if (d < 0 || d > 5 || !g_nci_of[d]) return;
+    if (d == 1) { g_dish_tog[1] = !g_dish_tog[1]; fprintf(stderr, "[vr] dish 2: the pair %s\n", g_dish_tog[1] ? "fuse" : "split apart"); }
+    else { g_dish_t[d] = 4.f; fprintf(stderr, "[vr] dish %d stirred\n", d + 1); }
+}
+static float smooth01(float x) { x = x < 0 ? 0 : x > 1 ? 1 : x; return x * x * (3 - 2 * x); }
+static void bubble_build(const float C[3], float r, float agit) {   // a translucent dome over the eye creature
+    int nv = 0; const int RU = 16, RV = 8;
+    for (int a = 0; a < RU; a++) for (int b = 0; b < RV; b++) {
+        float u0 = 2 * (float)M_PI * a / RU, u1 = 2 * (float)M_PI * (a + 1) / RU, v0 = 1.75f * b / RV, v1 = 1.75f * (b + 1) / RV;   // a cap: from the top down past the middle
+        float uv[6][2] = { { u0, v0 }, { u1, v0 }, { u1, v1 }, { u0, v0 }, { u1, v1 }, { u0, v1 } };
+        for (int k = 0; k < 6; k++) {
+            float u = uv[k][0], v = uv[k][1], wob = 1 + 0.06f * agit * sinf(u * 3 + g_aq_clock * 11) * sinf(v * 2 + g_aq_clock * 7);
+            float nx = sinf(v) * cosf(u), ny = cosf(v), nz = sinf(v) * sinf(u), *o = g_bub_cpu + nv * 9;
+            o[0] = C[0] + r * wob * nx; o[1] = C[1] + r * wob * ny; o[2] = C[2] + r * wob * nz; o[3] = 0; o[4] = 0;
+            float rim = 0.25f + 0.75f * powf(sinf(v) * 0.8f + 0.2f, 2);
+            o[5] = 0.55f + 0.2f * agit; o[6] = 0.5f; o[7] = 1.0f; o[8] = (0.12f + 0.2f * rim) * (1 + 0.6f * agit);
+            nv++;
+        }
     }
+    g_bub_nv = nv;
+}
+static void creature_update(void) {   // once per frame: every dish's occupants
+    if (g_niche_t < 0.02f) return;
+    const float dt = 1.f / 60; g_aq_clock += dt; float t = g_aq_clock;
+    for (int d = 0; d < 7; d++) if (g_dish_t[d] > 0) g_dish_t[d] -= dt;
+    const float up[3] = { 0, 1, 0 };
+    #define PAN(d) (g_dish_t[d] > 1.5f ? 1.f : g_dish_t[d] > 0 ? g_dish_t[d] / 1.5f : 0.f)
+    // 1: the little swimmer: circles above the agar, head first, banking; stirred, it panics
+    if (g_dish_ok[0] && g_nci_of[0]) { static float a; float p = PAN(0); a += dt * (1.0f + 2.6f * p);
+        float rad = 0.022f + 0.006f * p * sinf(t * 9), C[3] = { g_dish[0][0] + rad * cosf(a), g_dish[0][1] + 0.01f + (0.002f + 0.002f * p) * sinf(t * 2.7f), g_dish[0][2] + rad * sinf(a) };
+        float F[3] = { -sinf(a), 0, cosf(a) }, bank = 0.35f + 0.35f * p, S[3]; cross3(up, F, S);
+        float U[3] = { up[0] * cosf(bank) + S[0] * sinf(bank), up[1] * cosf(bank) + S[1] * sinf(bank), up[2] * cosf(bank) + S[2] * sinf(bank) };
+        ci_update(&g_ci[g_ci_of[0][0]], p > 0, 1 + 1.8f * p, C, F, U, 0.03f); }
+    // 2: the pair: drift around the dish keeping apart; touched, they spiral into one yin-yang (and back apart next time)
+    if (g_dish_ok[1] && g_nci_of[1] == 2) { static float a, fz; float tg = g_dish_tog[1] ? 1.f : 0.f; int moving = fabsf(fz - tg) > 0.01f;
+        fz += (tg > fz ? 1 : -1) * 0.012f; if (fabsf(fz - tg) < 0.012f) fz = tg; a += dt * 0.55f; float f = smooth01(fz);
+        float cx = g_dish[1][0] + 0.009f * cosf(t * 0.45f), cz = g_dish[1][2] + 0.009f * sinf(t * 0.45f), sp = t * 1.7f;
+        for (int k = 0; k < 2; k++) {
+            float ang = a + k * ((float)M_PI + 0.5f * sinf(t * 0.6f)), r0 = 0.026f + 0.003f * sinf(t * 0.9f + k);
+            float ux = g_dish[1][0] + r0 * cosf(ang), uz = g_dish[1][2] + r0 * sinf(ang), Fu[3] = { -sinf(ang), 0, cosf(ang) };   // apart
+            float s2 = sp + k * (float)M_PI, fx = cx + 0.0065f * cosf(s2), fz2 = cz + 0.0065f * sinf(s2), Ff[3] = { -sinf(s2), 0, cosf(s2) };   // fused: chasing tails
+            float C[3] = { ux + (fx - ux) * f, g_dish[1][1] + 0.018f + 0.002f * sinf(t * 1.3f + k * 2), uz + (fz2 - uz) * f };
+            float F[3] = { Fu[0] + (Ff[0] - Fu[0]) * f, 0, Fu[2] + (Ff[2] - Fu[2]) * f };
+            if (F[0] * F[0] + F[2] * F[2] < 1e-6f) { F[0] = Ff[0]; F[2] = Ff[2]; }
+            ci_update(&g_ci[g_ci_of[1][k]], moving, moving ? 1.6f : 1.f, C, F, up, 0.026f);
+        } }
+    // 3: the crystal plates: still at the bottom; touched, they glow
+    if (g_dish_ok[2] && g_nci_of[2]) { CrInst *I = &g_ci[g_ci_of[2][0]]; CrType *T = &g_ct[I->type];
+        float ext = 0; for (int i = 0; i < 3; i++) if (T->hi[i] - T->lo[i] > ext) ext = T->hi[i] - T->lo[i];
+        float hgt = ext > 0 ? (T->hi[1] - T->lo[1]) / ext * 0.07f : 0.01f, C[3] = { g_dish[2][0], g_dish[2][1] + 0.0005f + hgt / 2, g_dish[2][2] }, F[3] = { 0, 0, 1 };
+        float p = PAN(2); I->glow = p * (0.75f + 0.25f * sinf(t * 6)); ci_update(I, 0, 0, C, F, up, 0.07f); }
+    // 4: the trio: three colours dancing around each other; stirred, the dance turns frantic
+    if (g_dish_ok[3] && g_nci_of[3]) { static float a; float p = PAN(3); a += dt * (1.2f + 2.8f * p);
+        float cx = g_dish[3][0] + 0.008f * cosf(t * 0.5f), cz = g_dish[3][2] + 0.008f * sinf(t * 0.5f);
+        for (int k = 0; k < g_nci_of[3]; k++) { float ang = a + 2 * (float)M_PI * k / 3, r = 0.017f + 0.004f * p * sinf(t * 7 + k);
+            float C[3] = { cx + r * cosf(ang), g_dish[3][1] + 0.016f + (0.003f + 0.003f * p) * sinf(t * 1.3f + k * 2.1f), cz + r * sinf(ang) }, F[3] = { -sinf(ang), 0.15f * sinf(t * 2 + k), cosf(ang) };
+            ci_update(&g_ci[g_ci_of[3][k]], p > 0, 1 + 1.5f * p, C, F, up, 0.022f); } }
+    // 5: the eye: hovers, always looking at you, wings circling it under its bubble; stirred, the bubble swells and the eye twitches
+    if (g_dish_ok[4] && g_nci_of[4]) { float p = PAN(4);
+        float C[3] = { g_dish[4][0], g_dish[4][1] + 0.024f + 0.003f * sinf(t * 1.1f), g_dish[4][2] };
+        float F[3] = { g_head.m[12] - C[0], g_head.m[13] - C[1], g_head.m[14] - C[2] }; norm3(F);
+        if (p > 0) { F[0] += 0.18f * p * sinf(t * 23); F[1] += 0.14f * p * sinf(t * 31 + 1); F[2] += 0.18f * p * sinf(t * 19 + 2); }
+        ci_update(&g_ci[g_ci_of[4][0]], p > 0, 1 + 1.2f * p, C, F, up, 0.03f);
+        float B[3] = { C[0], C[1] + 0.008f, C[2] }; bubble_build(B, 0.017f * (1 + 0.38f * p + 0.06f * p * sinf(t * 9)), p); }
+    // 6: the worm: wanders over the agar wiggling; stirred, it races about and bumps into the dish walls
+    if (g_dish_ok[5] && g_nci_of[5]) { static float x, z, h; float p = PAN(5), sp = 0.006f + 0.03f * p;
+        h += dt * (0.6f * sinf(t * 0.37f) + 0.3f * sinf(t * 1.1f) + 4.0f * p * sinf(t * 5.3f));
+        float nx = x + cosf(h) * sp * dt, nz = z + sinf(h) * sp * dt, r = sqrtf(nx * nx + nz * nz), lim = 0.032f;
+        if (r > lim) {   // the wall: turn back (a hard bounce when frantic)
+            float rx = nx / r, rz = nz / r, vx = cosf(h), vz = sinf(h), dn = vx * rx + vz * rz;
+            if (p > 0.05f) { vx -= 2 * dn * rx; vz -= 2 * dn * rz; h = atan2f(vz, vx); } else h += 0.08f;
+            nx = rx * lim; nz = rz * lim;
+        }
+        x = nx; z = nz;
+        float C[3] = { g_dish[5][0] + x, g_dish[5][1] + 0.0035f, g_dish[5][2] + z }, F[3] = { cosf(h), 0, sinf(h) };
+        ci_update(&g_ci[g_ci_of[5][0]], p > 0, 1 + 2.0f * p, C, F, up, 0.045f); }
+    #undef PAN
 }
 static void creature_draw(void) {
-    if (!g_cr || !g_cdish_ok || g_niche_t < 0.02f) return;
+    if (g_niche_t < 0.02f || !g_nci) return;
     static const float one[4] = { 1, 1, 1, 1 }, zero[3] = { 0, 0, 0 }; M4 id = m4_id();
-    vUniformMatrix4fv(u_model, 1, 0, id.m); vUniform1i(u_screen, 0); vUniform4fv(u_base, 1, one); vUniform3fv(u_emis, 1, zero); vUniform1f(u_cut, 0.3f);
+    vUniformMatrix4fv(u_model, 1, 0, id.m); vUniform1i(u_screen, 0); vUniform4fv(u_base, 1, one); vUniform1f(u_cut, 0.3f);
     { static const float no[3] = { 0, 0, 0 }; vUniform3fv(u_lit, 1, no); }
-    vActiveTexture(GL_TEXTURE1); vBindTexture(GL_TEXTURE_2D, g_white); vActiveTexture(GL_TEXTURE0); vBindTexture(GL_TEXTURE_2D, g_cr_tex ? g_cr_tex : g_white);
-    vBindVertexArray(g_cr_vao); vBindBuffer(GL_ARRAY_BUFFER, g_cr_vbo); vBufferData(GL_ARRAY_BUFFER, 36 * (size_t)g_cr_nv, g_cr_cpu, GL_DYNAMIC_DRAW);
-    vDrawElements(GL_TRIANGLES, g_cr_ni, GL_UNSIGNED_INT, 0); vBindVertexArray(0);
+    vActiveTexture(GL_TEXTURE1); vBindTexture(GL_TEXTURE_2D, g_white); vActiveTexture(GL_TEXTURE0);
+    for (int i = 0; i < g_nci; i++) {
+        CrInst *I = &g_ci[i]; CrType *T = &g_ct[I->type];
+        float glow[3] = { 0.25f * I->glow, 0.55f * I->glow, 0.95f * I->glow }; vUniform3fv(u_emis, 1, I->glow > 0 ? glow : zero);
+        vBindTexture(GL_TEXTURE_2D, I->tex ? I->tex : g_white);
+        vBindVertexArray(I->vao); vBindBuffer(GL_ARRAY_BUFFER, I->vbo); vBufferData(GL_ARRAY_BUFFER, 36 * (size_t)T->nv, I->cpu, GL_DYNAMIC_DRAW);
+        vDrawElements(GL_TRIANGLES, T->ni, GL_UNSIGNED_INT, 0);
+    }
+    vUniform3fv(u_emis, 1, zero);
+    if (g_bub_nv) {   // the bubble: see-through, drawn last
+        vBindTexture(GL_TEXTURE_2D, g_white); vUniform1i(u_screen, 3); vUniform4fv(u_base, 1, one);
+        vEnable(GL_BLEND); vBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA); vDepthMask(0);
+        vBindVertexArray(g_bub_vao); vBindBuffer(GL_ARRAY_BUFFER, g_bub_vbo); vBufferData(GL_ARRAY_BUFFER, 36 * (size_t)g_bub_nv, g_bub_cpu, GL_DYNAMIC_DRAW);
+        vDrawArrays(GL_TRIANGLES, 0, g_bub_nv);
+        vDisable(GL_BLEND); vDepthMask(1); vUniform1i(u_screen, 0);
+    }
+    vBindVertexArray(0);
 }
+
 typedef struct GLSave GLSave; static void gl_save(GLSave *s); static void gl_restore(const GLSave *s);
 // ---------------------------------------------------------------- shared setup
 static GLuint g_game_tex; static int g_gw = 640, g_gh = 480;
@@ -1471,9 +1654,14 @@ int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
     g_vr_frame_no++;
     {   float tg = g_niche_open ? 1.f : 0.f; g_niche_t += (tg > g_niche_t ? 1 : -1) * 0.022f; if (fabsf(g_niche_t - tg) < 0.022f) g_niche_t = tg; }
 #ifdef TTPC_OPENXR
-    if (g_cdish_ok && g_niche_t > 0.5f && !g_preview) for (int h = 0; h < 2; h++) if (g_hand_ok[h]) {   // a hand at the dish startles him
-        float dx = g_hand[h].m[12] - g_cdish[0], dy = g_hand[h].m[13] - (g_cdish[1] + 0.04f), dz = g_hand[h].m[14] - g_cdish[2];
-        if (dx * dx + dy * dy + dz * dz < 0.09f * 0.09f) g_cr_panic = 4.f;
+    if (g_niche_t > 0.5f && !g_preview) {   // a hand at a dish stirs its occupants (once per touch)
+        static int near_[7];
+        for (int d = 0; d < 7; d++) { int nr = 0;
+            if (g_dish_ok[d]) for (int h = 0; h < 2; h++) if (g_hand_ok[h]) {
+                float dx = g_hand[h].m[12] - g_dish[d][0], dy = g_hand[h].m[13] - (g_dish[d][1] + 0.04f), dz = g_hand[h].m[14] - g_dish[d][2];
+                if (dx * dx + dy * dy + dz * dz < 0.065f * 0.065f) nr = 1; }
+            if (nr && !near_[d]) aq_poke(d); else if (nr && d != 1) g_dish_t[d] = 4.f;
+            near_[d] = nr; }
     }
 #endif
     creature_update();
@@ -1705,7 +1893,7 @@ void vr_input(Input *in) {
     { static int prev; int down = in->lmb || in->a;
       if (down && !prev && g_last_kind == 4 && g_office_now) g_door_req = 1;
       if (down && !prev && g_last_kind == 9) { g_niche_open = !g_niche_open; fprintf(stderr, "[vr] the hidden compartment %s\n", g_niche_open ? "opens" : "closes"); }
-      if (down && !prev && g_last_kind == 10) { g_cr_panic = 4.f; fprintf(stderr, "[vr] you touched his dish: he panics\n"); }
+      if (down && !prev && g_last_kind == 10) aq_poke(g_aim_dish);
       {   // a press that starts on the book or the dish belongs to VR until it's let go, even if the laser slips off meanwhile
           static int swallow; if (down && !prev && (g_last_kind == 9 || g_last_kind == 10)) swallow = 1;
           if (!down) swallow = 0;
