@@ -1,8 +1,8 @@
 # Texture pack: originals with no upscaled version (13 Nov; from textures_*.zip vs upscaled_list.txt)
 
-173 of 6527 extracted textures have no upscaled file. 148 are the Wii HOME menu (HomeButton2, not used on PC).
+173 of 6527 extracted textures have no upscaled file. 149 are the Wii HOME menu (HomeButton2, not used on PC).
 
-The 25 that matter (sprite/operation effects and screens):
+The 24 that matter (sprite/operation effects and screens):
 
 - operation/0407-ito.tpx/tt_0537B7E2CF7925A5_0407-ito_t04_64x128.png
 - operation/0407-ito.tpx/tt_0AEA62E3D9AC752D_0407-ito_t03_256x128.png
