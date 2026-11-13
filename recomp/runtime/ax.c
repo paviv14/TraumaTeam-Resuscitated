@@ -185,6 +185,14 @@ static void process_list(u32 addr) {
                 last_loop[slot] = pb32(&pb, PB_LOOP_ADDR); last_end[slot] = pb32(&pb, PB_END_ADDR); last_flags[slot] = flags;
             }
             nolog:
+            {   // a voice with anything set past the low-pass filter (biquad, Remote speaker fields): show it once
+                static u32 seen[64]; static int nseen;
+                int any = 0; for (int k = 97; k < 140; k++) if (pb.w[k]) any = 1;
+                int known = 0; for (int k = 0; k < nseen; k++) if (seen[k] == addr) known = 1;
+                if (any && !known && nseen < 64) { seen[nseen++] = addr;
+                    char line[400]; int n = 0; for (int k = 97; k < 140; k++) n += snprintf(line + n, sizeof line - n, "%04X ", pb.w[k]);
+                    fprintf(stderr, "[ax] voice %08X words 97-139: %s\n", addr, line); }
+            }
             process_voice(&pb);
             if (axlog && pb.w[PB_RUNNING] == 0) fprintf(stderr, "[axv] %08X ended at %08X\n", addr, pb32(&pb, PB_CUR_ADDR));
             g_voices_run++;
@@ -243,6 +251,7 @@ void ax_run_list(u32 addr, u32 size) {
         case 0x0B: { u16 vol = rd16(a); u32 s = rd32(a + 2), lr = rd32(a + 6); a += 10; output(vol, s, lr); break; }
         case 0x0C: { u16 vol = rd16(a); u32 s = rd32(a + 2), lr = rd32(a + 6); a += 10; output(vol, s, lr); break; }
         case 0x0D: {                               // Wii Remote speaker output: 18 s16 per Remote, for AXRmt
+            { static int once; if (!once) { once = 1; fprintf(stderr, "[ax] Remote speaker output to %08X %08X %08X %08X\n", rd32(a), rd32(a + 4), rd32(a + 8), rd32(a + 12)); } }
             for (int r = 0; r < 4; r++) { u32 o = rd32(a + 4 * r);
                 if (o) for (int k = 0; k < NWM; k++) wr16(o + 2 * k, (u16)clamp16(g_wm[r][k])); }
             a += 16; break;
