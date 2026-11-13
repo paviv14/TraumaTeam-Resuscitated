@@ -27,6 +27,7 @@
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_PNG
+#define STBI_ONLY_JPEG
 #define STBI_NO_STDIO_FALLBACK
 #include "third_party/stb_image.h"
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -64,7 +65,7 @@ static void scan(const char *dir, int depth) {
         struct stat st; if (stat(p, &st) != 0) continue;
         if (S_ISDIR(st.st_mode)) { if (depth < 8) scan(p, depth + 1); continue; }
         u64 h; size_t n = strlen(e->d_name);
-        if (n < 4 || (strcmp(e->d_name + n - 4, ".png") && strcmp(e->d_name + n - 4, ".PNG"))) continue;
+        if (n < 4 || (strcmp(e->d_name + n - 4, ".png") && strcmp(e->d_name + n - 4, ".PNG") && strcmp(e->d_name + n - 4, ".jpg"))) continue;   // .jpg: the redrawn tutorial screenshots
         if (!parse_hash(e->d_name, &h)) continue;
         if (g_nrepl == g_caprepl) { g_caprepl = g_caprepl ? g_caprepl * 2 : 256; g_repl = realloc(g_repl, sizeof *g_repl * g_caprepl); }
         Repl r = { 0 }; r.hash = h; r.path = strdup(p); r.fsize = (long long)st.st_size; r.mtime = (long long)st.st_mtime;
