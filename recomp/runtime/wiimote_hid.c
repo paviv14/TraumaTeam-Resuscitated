@@ -44,6 +44,8 @@ static int send(const u8 *rep, int n) {
     if (!ok && GetLastError() == ERROR_IO_PENDING) ok = WaitForSingleObject(ov.hEvent, 200) == WAIT_OBJECT_0 && GetOverlappedResult(g_dev, &ov, &w, FALSE);
     CloseHandle(ov.hEvent);
     if (!ok) ok = HidD_SetOutputReport(g_dev, buf, len);   // the Microsoft Bluetooth stack sometimes wants this
+    static int fails;
+    if (!ok && fails++ < 5) fprintf(stderr, "[wiimote] sending report %02X (%d bytes) failed: error %lu\n", rep[0], len, GetLastError());
     return ok;
 }
 static void write_reg(u32 addr, const u8 *data, int n) {
@@ -111,7 +113,7 @@ static unsigned __stdcall speaker_thread(void *a) {
 }
 int whid_speaker(const s16 *pcm, int n) {
     if (!g_connected) return 0;
-    if (!g_spk_on) { speaker_init(); g_pred = 0; g_step = 127; }
+    if (!g_spk_on) { speaker_init(); g_pred = 0; g_step = 127; fprintf(stderr, "[wiimote] speaker on\n"); }
     if (!g_sp_thread) { g_sp_thread = 1; _beginthreadex(NULL, 0, speaker_thread, NULL, 0, NULL); }
     if (g_spw - g_spr >= SPQ) return 1;   // behind: drop
     u8 *r = g_spq[g_spw % SPQ]; memset(r, 0, 22);
@@ -135,6 +137,7 @@ static float stick(int v, const int *c) {   // c: max, min, centre
 
 static void parse(const u8 *d, int n) {
     u8 id = d[0];
+    {   static u8 seen[256]; if (!seen[id]) { seen[id] = 1; fprintf(stderr, "[wiimote] first report %02X (%d bytes)\n", id, n); } }
     if (id == 0x20 && n >= 7) {   // status: extension plugged in or out; the report mode must be set again after it
         int ext = (d[3] & 0x02) != 0;
         EnterCriticalSection(&g_cs); g_st.nunchuk = ext; LeaveCriticalSection(&g_cs);
@@ -214,6 +217,19 @@ static int try_open(void) {
         SP_DEVICE_INTERFACE_DETAIL_DATA_A *det = malloc(need); det->cbSize = sizeof *det;
         if (SetupDiGetDeviceInterfaceDetailA(set, &ifd, det, need, NULL, NULL)) {
             HANDLE h = CreateFileA(det->DevicePath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
+            if (h == INVALID_HANDLE_VALUE) {   // say so if it's a Remote another program holds (or is blocked from us)
+                DWORD err = GetLastError();
+                HANDLE q = CreateFileA(det->DevicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+                if (q != INVALID_HANDLE_VALUE) {
+                    HIDD_ATTRIBUTES at = { sizeof at };
+                    static DWORD logged;
+                    if (HidD_GetAttributes(q, &at) && at.VendorID == 0x057E && GetTickCount() - logged > 30000) {
+                        logged = GetTickCount();
+                        fprintf(stderr, "[wiimote] a Nintendo device (%04X) is there but can't be opened (error %lu) - is Dolphin, DS4Windows/HidHide or Steam using it?\n", at.ProductID, err);
+                    }
+                    CloseHandle(q);
+                }
+            }
             if (h != INVALID_HANDLE_VALUE) {
                 HIDD_ATTRIBUTES at = { sizeof at };
                 if (HidD_GetAttributes(h, &at) && at.VendorID == 0x057E && (at.ProductID == 0x0306 || at.ProductID == 0x0330)) {
@@ -221,7 +237,11 @@ static int try_open(void) {
                     if (HidD_GetPreparsedData(h, &pp)) { if (HidP_GetCaps(pp, &caps) == HIDP_STATUS_SUCCESS && caps.OutputReportByteLength) g_outlen = caps.OutputReportByteLength; HidD_FreePreparsedData(pp); }
                     g_dev = h; found = 1;
                     fprintf(stderr, "[wiimote] found a Wii Remote%s (%04X:%04X)\n", at.ProductID == 0x0330 ? " Plus" : "", at.VendorID, at.ProductID);
-                } else CloseHandle(h);
+                } else {
+                    static int told;
+                    if (at.VendorID == 0x057E && !told) { told = 1; fprintf(stderr, "[wiimote] Nintendo device %04X:%04X isn't a Wii Remote I know\n", at.VendorID, at.ProductID); }
+                    CloseHandle(h);
+                }
             }
         }
         free(det);
@@ -234,6 +254,7 @@ int whid_poll(WiiState *out) {
     static int enabled = -1; static DWORD last_try;
     if (enabled < 0) { const char *e = getenv("TTPC_WIIMOTE"); enabled = !(e && *e == '0'); }
     if (!enabled) return 0;
+    { static int once; if (!once) { once = 1; fprintf(stderr, "[wiimote] looking for a real Wii Remote (Bluetooth HID) every 3 s\n"); } }
     if (!g_cs_init) { InitializeCriticalSection(&g_cs); g_cs_init = 1; }
     if (!g_connected) {
         DWORD now = GetTickCount();

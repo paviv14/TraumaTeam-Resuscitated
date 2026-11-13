@@ -59,6 +59,13 @@ void f_80314B80(CPU *c) {
             int s = i < n ? (s16)R16(data + 2 * i) * vol / 10 : 0;
             pcm[i] = (s16)(s > 32767 ? 32767 : s < -32768 ? -32768 : s); e += (float)pcm[i] * pcm[i];
         }
+        {   static u32 last_data[4]; static int lines;
+            if (last_data[ch] + 0x50 != data && lines < 200) { lines++;   // a new sound started on this channel
+                fprintf(stderr, "[speaker] ch %d sound %d: %d bytes, volume %d -> %s\n", ch, (int)R32(st + 0x58), left, vol,
+                        ch ? "dropped (not channel 0)" : !(mode() == 1 && wiimote_native()) ? "PC" : "Wii Remote");
+            }
+            last_data[ch] = data;
+        }
         if (ch == 0) {
             int sent = mode() == 1 && wiimote_native() && whid_speaker(pcm, 40);
             if (!sent) { ring_push(pcm, 40); platform_speaker_pcm(pcm, 40); platform_speaker_level(sqrtf(e / 40) / 8000.f); }

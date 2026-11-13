@@ -151,7 +151,26 @@ def do_tpx(path, rel, out):
                 key = dh; rgba = decode(data, w, h, fmt)
             out.save(key, rel, name + ('' if k == 0 else '_%d' % k), rgba)
 
+def plt0_palettes(d):
+    """PLT0 sections of a .brres: name -> (format, raw palette bytes). A paletted TEX0 uses the PLT0 of the same name."""
+    pals, pos = {}, 0
+    while True:
+        pos = d.find(b'PLT0', pos)
+        if pos < 0: return pals
+        try:
+            size, ver, _, doff, noff = be('IIiIi', d, pos + 4)
+            pf, ne = be('IH', d, pos + 0x18)
+            if pf <= 2 and 0 < ne <= 16384 and 0 < pos + noff < len(d) and pos + doff + 2 * ne <= len(d):
+                name = d[pos + noff: pos + noff + 48].split(b'\0')[0]
+                pals[name] = (pf, d[pos + doff: pos + doff + 2 * ne])
+        except struct.error:
+            pass
+        pos += 4
+
+PAL_N = {8: 16, 9: 256, 10: 16384}   # palette entries the game hashes (runtime video.c tex_full_hash: the whole TLUT size)
+
 def do_tex0(d, rel, out):
+    pals = plt0_palettes(d) if b'PLT0' in d else {}
     pos = 0
     while True:
         pos = d.find(b'TEX0', pos)
@@ -159,7 +178,7 @@ def do_tex0(d, rel, out):
         try:
             size, ver, _, doff, noff = be('IIiIi', d, pos + 4)
             w, h, fmt = be('HHI', d, pos + 0x1C)
-            ok = 0 < w <= 1024 and 0 < h <= 1024 and fmt in BLOCK and fmt not in (8, 9, 10) and pos + doff + tex_size(w, h, fmt) <= len(d)
+            ok = 0 < w <= 1024 and 0 < h <= 1024 and fmt in BLOCK and pos + doff + tex_size(w, h, fmt) <= len(d)
         except struct.error:
             ok = False
         if ok:
@@ -167,7 +186,15 @@ def do_tex0(d, rel, out):
             name = 'tex'
             if 0 < pos + noff < len(d):
                 name = d[pos + noff: pos + noff + 48].split(b'\0')[0].decode('latin1', 'replace') or 'tex'
-            try: out.save(hash_bytes(data, SEED), rel, name, decode(data, w, h, fmt))
+            try:
+                if fmt in (8, 9, 10):   # paletted: the palette is the PLT0 of the same name
+                    pl = pals.get(name.encode('latin1'))
+                    if pl:
+                        pf, praw = pl
+                        full = praw[:2 * PAL_N[fmt]] + bytes(max(0, 2 * PAL_N[fmt] - len(praw)))
+                        out.save(hash_bytes(full, hash_bytes(data, SEED) ^ pf), rel, name, decode(data, w, h, fmt, palette(praw, pf)))
+                else:
+                    out.save(hash_bytes(data, SEED), rel, name, decode(data, w, h, fmt))
             except Exception as e: print('  skip TEX0 %s in %s: %s' % (name, rel, e))
         pos += 4
 
