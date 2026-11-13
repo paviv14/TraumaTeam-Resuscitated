@@ -661,7 +661,9 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
         // Full-screen layers are stretched (pictures would show mirrored duplicates of what is near
         // their edge); narrow strips at the frame edge (borders) are mirrored outwards; tiles of a
         // repeating pattern are repeated outwards; other partial pieces of a picture are left alone.
-        if (flat && mn <= 0.5f && mx >= 639.5f) { xs = (float)g_NW / 640.f; xm = 0; }
+        // (a layer wider than the screen is a picture zoomed past its edges - a character close up - unless it
+        // also covers the whole height (a panning background): stretching it drew that piece wider than the rest)
+        if (flat && mn <= 0.5f && mx >= 639.5f && ((mn >= -8.f && mx <= 648.f) || (hy0 <= 8.f && hy1 >= 520.f))) { xs = (float)g_NW / 640.f; xm = 0; }
         // (a strip to mirror is a border: taller than a pointer or an icon pushed against the edge - those mirrored
         // into the side showed a second, flipped pointer)
         else if (flat && g_cfg.wide_fill && (tile_w > 0 || (mx - mn <= 120.f && hy1 - hy0 >= 96.f))) {
