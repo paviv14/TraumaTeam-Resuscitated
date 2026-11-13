@@ -17,7 +17,11 @@
 
 int wiimote_native(void); int whid_speaker(const s16 *pcm, int n);
 void platform_speaker_level(float level);   // controller rumble / DualSense (platform.c)
-void platform_speaker_pcm(const s16 *pcm, int n);
+int platform_last_dev(void);
+// the real Remote's speaker - while the Remote is what's being played with (a controller picked up last gets the
+// sound on its own speaker instead, a DualSense's)
+static int remote_out(void) { return wiimote_native() && (platform_last_dev() == 3 || platform_last_dev() == 1); }
+int platform_speaker_pcm(const s16 *pcm, int n);   // 1: a DualSense played it (then not the PC speakers)
 
 // ---------------------------------------------------------------- the PC side: a ring of 6000 Hz samples
 #define RING 16384
@@ -68,8 +72,8 @@ void f_80314B80(CPU *c) {
             last_data[ch] = data;
         }
         if (ch == 0) {
-            int sent = mode() != 2 && wiimote_native() && whid_speaker(pcm, 40);
-            if ((!sent && mode() != 3) || mode() == 4) { ring_push(pcm, 40); platform_speaker_pcm(pcm, 40); platform_speaker_level(sqrtf(e / 40) / 8000.f); }
+            int sent = mode() != 2 && remote_out() && whid_speaker(pcm, 40);
+            if ((!sent && mode() != 3) || mode() == 4) { if (!platform_speaker_pcm(pcm, 40)) ring_push(pcm, 40); platform_speaker_level(sqrtf(e / 40) / 8000.f); }
         }
         W32(st + 0x50, data + 0x50);
         int rem = left - 0x50; W32(st + 0x54, (u32)rem);
@@ -109,7 +113,7 @@ void f_80255B00(CPU *c) {
     if (len > 20) len = 20; if (len < 0) len = 0;
     u8 b[20]; for (int i = 0; i < len; i++) b[i] = R8(data + i);
     static int lines; if (lines < 3) { lines++; fprintf(stderr, "[speaker] stream data from the sound library (%d bytes) -> %s\n", len, mode() != 2 && wiimote_native() ? (mode() == 4 ? "Wii Remote + PC" : "Wii Remote") : "PC"); }
-    int sent = mode() != 2 && wiimote_native() && whid_speaker_raw(b, len);
+    int sent = mode() != 2 && remote_out() && whid_speaker_raw(b, len);
     if ((!sent && mode() != 3) || mode() == 4) {
         static const int DIFF[16] = { 1, 3, 5, 7, 9, 11, 13, 15, -1, -3, -5, -7, -9, -11, -13, -15 };
         static const int SCALE[8] = { 230, 230, 230, 230, 307, 409, 512, 614 };
@@ -121,7 +125,7 @@ void f_80255B00(CPU *c) {
             step = step * SCALE[code & 7] >> 8; if (step < 127) step = 127; if (step > 24576) step = 24576;
             pcm[n++] = (s16)pred; e += (float)pred * pred;
         }
-        ring_push(pcm, n); platform_speaker_pcm(pcm, n); platform_speaker_level(n ? sqrtf(e / n) / 8000.f : 0);
+        if (!platform_speaker_pcm(pcm, n)) ring_push(pcm, n); platform_speaker_level(n ? sqrtf(e / n) / 8000.f : 0);
     }
     c->r[3] = 0;
 }

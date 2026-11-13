@@ -208,6 +208,7 @@ static SDL_GameController *g_pad;
 static int g_pointer_pad;                 // 1 = pad owns the pointer
 static int g_last_dev = 1;                // 1 = keyboard & mouse, 2 = controller, 3 = a real Wii Remote (used last)
 void platform_wii_used(void) { g_last_dev = 3; }
+int platform_last_dev(void) { return g_last_dev; }
 // rumble from the game (WPADControlMotor, motion.c): a real Wii Remote and the controller both
 static int g_rumble_game; static float g_rumble_spk;
 static void pad_rumble_apply(void) {
@@ -228,8 +229,8 @@ void platform_speaker_level(float level) {
 }
 // ... and a wired DualSense (it is a USB sound card too) plays it from its own speaker
 static SDL_AudioDeviceID g_ds_audio; static int g_ds_tried;
-void platform_speaker_pcm(const s16 *pcm, int n) {
-    if (!g_pad || SDL_GameControllerGetType(g_pad) != SDL_CONTROLLER_TYPE_PS5) return;
+int platform_speaker_pcm(const s16 *pcm, int n) {
+    if (!g_pad || SDL_GameControllerGetType(g_pad) != SDL_CONTROLLER_TYPE_PS5) return 0;
     if (!g_ds_tried) {
         g_ds_tried = 1;
         for (int i = 0; i < SDL_GetNumAudioDevices(0); i++) {
@@ -253,6 +254,7 @@ void platform_speaker_pcm(const s16 *pcm, int n) {
         }
         SDL_QueueAudio(g_ds_audio, out, (Uint32)m * 2);
     }
+    return g_ds_audio != 0;
 }
 static float g_pad_px = 0.5f, g_pad_py = 0.5f;
 static void pad_open(int index) {
@@ -429,6 +431,6 @@ void prompts_update(int force) { (void)force; }
 void platform_wii_used(void) {}
 void platform_rumble(int on) { void whid_rumble(int on); whid_rumble(on); }
 void platform_speaker_level(float level) { (void)level; }
-void platform_speaker_pcm(const s16 *pcm, int n) { (void)pcm; (void)n; }
+int platform_speaker_pcm(const s16 *pcm, int n) { (void)pcm; (void)n; return 0; }
 void platform_audio_stats(char *buf, int n) { if (n) buf[0] = 0; }
 #endif

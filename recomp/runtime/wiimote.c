@@ -121,6 +121,7 @@ static void rec_init(void) {
 static WiiState g_wii; static int g_wii_on, g_wii_ptr;   // a real Wii Remote (wiimote_hid.c), and whether its pointer sees the sensor bar
 static float g_wii_px, g_wii_py, g_wii_hx = 1, g_wii_hy, g_wii_dist = 1.5f;
 int wiimote_native(void) { return g_wii_on; }
+int platform_last_dev(void);
 void wiimote_frame(void) {
     static int init; if (!init) { init = 1; parse_script(); rec_init(); }
     {   static int was; static unsigned short lastb;
@@ -354,7 +355,9 @@ void f_8025F830(CPU *c) {
             wf(buf + 0x48, g_wii_dist); wf(buf + 0x4C, g_wii_dist - ld); wf(buf + 0x50, fabsf(g_wii_dist - ld));
             lhx = g_wii_hx; lhy = g_wii_hy; ld = g_wii_dist;
             W8(buf + 0x5E, (u8)g_wii_ptr);
-        } else W8(buf + 0x5E, 0);
+        } else if (platform_last_dev() == 3) W8(buf + 0x5E, 0);   // pointing off the screen - unless the mouse or a
+        // controller is what's being used: then the Remote lying on the table mustn't hide their pointer (the game
+        // drew an arrow at the edge pointing to where the Remote was aimed)
         if (g_wii.nunchuk) {
             const float *n = g_wii.nacc;
             wf(buf + 0x68, n[0]); wf(buf + 0x6C, n[1]); wf(buf + 0x70, n[2]);
