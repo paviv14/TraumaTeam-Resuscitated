@@ -84,12 +84,14 @@ void f_80314B80(CPU *c) {
 // the dialogue lines that wait for them (Naomi's phone calls). Here channel 0's speaker always works.
 void rt_call(CPU *c, u32 addr);
 static int g_spk_enabled;
+static void spk_volume_check(CPU *c);
 // WPADIsSpeakerEnabled(chan) -> bool
 void f_80254250(CPU *c) { c->r[3] = c->r[3] == 0 && g_spk_enabled; }
 // WPADControlSpeaker(chan, cmd, cb) -> 0; cb(chan, 0) once done. cmd: 0 off, 1 on, 2 mute, 3 unmute, 4 play
 void f_802542A0(CPU *c) {
     u32 chan = c->r[3], cmd = c->r[4], cb = c->r[5];
     static int lines; if (lines++ < 40) fprintf(stderr, "[speaker] WPADControlSpeaker(%u, %u)\n", chan, cmd);
+    spk_volume_check(c);
     if (chan != 0) { c->r[3] = (u32)-1; return; }   // WPAD_ERR_NO_CONTROLLER
     if (cmd == 0) g_spk_enabled = 0; else if (cmd == 1) g_spk_enabled = 1;
     if (cb) { u32 lr = c->lr; c->r[3] = chan; c->r[4] = 0; rt_call(c, cb); c->lr = lr; }
@@ -123,3 +125,15 @@ void f_80255B00(CPU *c) {
     }
     c->r[3] = 0;
 }
+
+// WPADGetSpeakerVolume() -> 0..127 (the console's setting, BT.SPKV in SYSCONF, read by WPADInit). A save without
+// that setting reads as 0, and at 0 the game sends nothing to the Remote's speaker and skips the lines that need
+// it: then use the console's default.
+static void spk_volume_check(CPU *c) {
+    static int checked; if (checked) return; checked = 1;
+    u32 addr = c->r[13] + 4294949991u;   // WPAD's copy of the setting (SDA)
+    int v = R8(addr);
+    fprintf(stderr, "[speaker] Remote speaker volume setting: %d%s\n", v, v ? "" : " - using 88 (the Wii's default)");
+    if (!v) W8(addr, 88);
+}
+void f_802558A0(CPU *c) { spk_volume_check(c); c->r[3] = R8(c->r[13] + 4294949991u); }
