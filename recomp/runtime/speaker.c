@@ -39,9 +39,11 @@ void speaker_mix(s16 *lr, int frames, int rate) {
     unsigned adv = (unsigned)pos; g_r += adv; pos -= adv;
 }
 
-static int mode(void) {   // 0 off, 1 automatic, 2 PC always
+// Many PC Bluetooth adapters (Intel's among them) never play a Remote's speaker data, and there is no way to
+// tell from here, so the sound plays on the PC too unless TTPC_SPEAKER=remote.
+static int mode(void) {   // 0 off, 1 Remote + PC, 2 PC only, 3 Remote only
     static int m = -1;
-    if (m < 0) { const char *e = getenv("TTPC_SPEAKER"); m = !e ? 1 : *e == '0' ? 0 : !strcmp(e, "pc") ? 2 : 1; }
+    if (m < 0) { const char *e = getenv("TTPC_SPEAKER"); m = !e ? 1 : *e == '0' ? 0 : !strcmp(e, "pc") ? 2 : !strcmp(e, "remote") ? 3 : 1; }
     return m;
 }
 
@@ -62,13 +64,13 @@ void f_80314B80(CPU *c) {
         {   static u32 last_data[4]; static int lines;
             if (last_data[ch] + 0x50 != data && lines < 200) { lines++;   // a new sound started on this channel
                 fprintf(stderr, "[speaker] ch %d sound %d: %d bytes, volume %d -> %s\n", ch, (int)R32(st + 0x58), left, vol,
-                        ch ? "dropped (not channel 0)" : !(mode() == 1 && wiimote_native()) ? "PC" : "Wii Remote");
+                        ch ? "dropped (not channel 0)" : !(mode() != 2 && wiimote_native()) ? "PC" : mode() == 3 ? "Wii Remote" : "Wii Remote + PC");
             }
             last_data[ch] = data;
         }
         if (ch == 0) {
-            int sent = mode() == 1 && wiimote_native() && whid_speaker(pcm, 40);
-            if (!sent) { ring_push(pcm, 40); platform_speaker_pcm(pcm, 40); platform_speaker_level(sqrtf(e / 40) / 8000.f); }
+            int sent = mode() != 2 && wiimote_native() && whid_speaker(pcm, 40);
+            if (!sent || mode() != 3) { ring_push(pcm, 40); platform_speaker_pcm(pcm, 40); platform_speaker_level(sqrtf(e / 40) / 8000.f); }
         }
         W32(st + 0x50, data + 0x50);
         int rem = left - 0x50; W32(st + 0x54, (u32)rem);
@@ -105,8 +107,9 @@ void f_80255B00(CPU *c) {
     if (chan != 0 || !mode()) { c->r[3] = chan ? (u32)-1 : 0; return; }
     if (len > 20) len = 20; if (len < 0) len = 0;
     u8 b[20]; for (int i = 0; i < len; i++) b[i] = R8(data + i);
-    static int lines; if (lines < 3) { lines++; fprintf(stderr, "[speaker] stream data from the sound library (%d bytes) -> %s\n", len, mode() == 1 && wiimote_native() ? "Wii Remote" : "PC"); }
-    if (!(mode() == 1 && wiimote_native() && whid_speaker_raw(b, len))) {
+    static int lines; if (lines < 3) { lines++; fprintf(stderr, "[speaker] stream data from the sound library (%d bytes) -> %s\n", len, mode() != 2 && wiimote_native() ? (mode() == 3 ? "Wii Remote" : "Wii Remote + PC") : "PC"); }
+    int sent = mode() != 2 && wiimote_native() && whid_speaker_raw(b, len);
+    if (!sent || mode() != 3) {
         static const int DIFF[16] = { 1, 3, 5, 7, 9, 11, 13, 15, -1, -3, -5, -7, -9, -11, -13, -15 };
         static const int SCALE[8] = { 230, 230, 230, 230, 307, 409, 512, 614 };
         static int pred, step = 127;
