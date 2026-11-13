@@ -629,13 +629,18 @@ static void lay_ensure(void) {
     glFramebufferRenderbuffer_(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, g_depth);
     g_lay_w = g_W; g_lay_h = g_H; lay_clear();
 }
+static u32 g_comic_frame = 0xFFFF0000u;   // the last frame a comic page's panels were drawn (the side vignette)
 // a comic panel standing still: the same piece in the same place last frame (pieces sliding past the edge, as on
 // the map pages, are left alone - picked up on some frames and not others, the sides flickered)
 static int comic_steady(const Setup *s, float mn, float mx, float y0, float y1) {
     u64 sig = (s->tex[0].e ? s->tex[0].e->data_hash : (u64)s->tex[0].gl_copy) * 0x9E3779B97F4A7C15ull ^ 0xC0311Cull;
     sig ^= (u64)(int)mn * 131 + (u64)(int)mx * 65537 + (u64)(int)y0 * 7919 + (u64)(int)y1 * 104729;
     if (!sig) sig = 1;
-    return tile_seen(sig, 1) >= 1;
+    // once taken for a panel, it stays one for a second (decided afresh each frame, it flickered)
+    u64 keep = sig ^ 0x5EEDull;
+    if (tile_seen(sig, 1) >= 1) { tile_kept(keep, 1); g_comic_frame = g_tframe; return 1; }
+    if (tile_kept(keep, 0)) { g_comic_frame = g_tframe; return 1; }
+    return 0;
 }
 static void tile_frame(void) { g_tframe++; g_tcur ^= 1; memset(g_tsig[g_tcur], 0, sizeof g_tsig[0]); memset(g_tcnt[g_tcur], 0, sizeof g_tcnt[0]); }
 void gpu_draw(const Setup *s, const Out *v, int n) {
@@ -804,6 +809,7 @@ static void gpu_timer_frame(void) {
     if (g_tq_n - head < 4) { glBeginQuery_(0x88BF, g_tq[g_tq_n & 3]); g_tq_n++; g_tq_active = 1; }
     else g_tq_active = 0;
 }
+static void side_vignette(int ww, int wh);
 void gpu_present(int x0, int y0, int w, int h) {
     int ww, wh; SDL_GL_GetDrawableSize(g_sdl_window, &ww, &wh);
     view_rect(ww, wh);
@@ -846,6 +852,7 @@ void gpu_present(int x0, int y0, int w, int h) {
     glClearColor_(0, 0, 0, 1); glColorMask_(1, 1, 1, 1); glClear_(GL_COLOR_BUFFER_BIT);
     glBlitFramebuffer_(0, 0, lw, lh, g_pic_x, wh - g_pic_y - vh, g_pic_x + vw, wh - g_pic_y, GL_COLOR_BUFFER_BIT, g_disp_sharp ? GL_NEAREST : GL_LINEAR);
     }
+    side_vignette(ww, wh);
     glEnable_(GL_SCISSOR_TEST);
     if (g_tq_active) { glEndQuery_(0x88BF); g_tq_active = 0; }
     u64 ts = host_now_ns();
@@ -930,6 +937,29 @@ static void ov_quad(int mode, float x0, float y0, float x1, float y1, float u0, 
                 { x0, y1, u0, v1, c[0], c[1], c[2], c[3] }, { x1, y1, u1, v1, c[0], c[1], c[2], c[3] } };
     g_ov[g_nov++] = q[0]; g_ov[g_nov++] = q[1]; g_ov[g_nov++] = q[2];
     g_ov[g_nov++] = q[1]; g_ov[g_nov++] = q[3]; g_ov[g_nov++] = q[2];
+}
+// On comic pages the sides fade to black towards the window's edges, so the page's mirrored rows of panels and
+// the widened scene trail off instead of ending in a hard edge (fades in and out with the page).
+static void side_vignette(int ww, int wh) {
+    static float k;
+    float target = g_M && g_cfg.wide_fill && g_tframe - g_comic_frame < 30 ? 1.f : 0.f;
+    k += (target - k) * 0.15f; if (k < 0.01f) { k = 0; return; }
+    if (!overlay_init()) return;
+    int L = g_view_x - g_pic_x; if (L < 4) return;
+    glBindFramebuffer_(GL_FRAMEBUFFER, 0); glViewport_(0, 0, ww, wh); glDisable_(GL_SCISSOR_TEST); glDisable_(GL_DEPTH_TEST);
+    glEnable_(GL_BLEND); glBlendEquation_(GL_FUNC_ADD); glBlendFunc_(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram_(g_oprog); glBindVertexArray_(g_ovao);
+    GLfloat sc[2] = { (float)ww, (float)wh }; glUniform2fv_(g_ou_screen, 1, sc);
+    g_omode = -1; g_nov = 0;
+    const int N = 24; float y0 = (float)g_pic_y, y1 = (float)(g_pic_y + g_pic_h);
+    for (int i = 0; i < N; i++) {   // darker towards the outside: (1 - t)^1.6, up to 90%
+        float t0 = (float)i / N, t1 = (float)(i + 1) / N, a = 0.9f * k * powf(1.f - (t0 + t1) / 2, 1.6f);
+        float c[4] = { 0, 0, 0, a };
+        ov_quad(0, g_pic_x + L * t0, y0, g_pic_x + L * t1, y1, 0, 0, 0, 0, c);
+        ov_quad(0, g_pic_x + g_pic_w - L * t1, y0, g_pic_x + g_pic_w - L * t0, y1, 0, 0, 0, 0, c);
+    }
+    ov_flush();
+    glDisable_(GL_BLEND); glUseProgram_(g_prog); glBindVertexArray_(g_vao); glBindBuffer_(GL_ARRAY_BUFFER, g_vbo);
 }
 // Start an overlay frame: the last game picture (dimmed by `dim`) fills the window as usual.
 int gpu_overlay_begin(int *w, int *h, float dim) {
