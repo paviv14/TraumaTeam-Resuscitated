@@ -723,27 +723,38 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
         }
         n = m;
     }
-    if (comic && n >= 6 && g_M >= 24) {   // (one tall panel down each side, the page's own corner art turned upright)
+    if (comic && n >= 6 && g_M >= 24) {
+        // The sides of a comic page get panels of their own: a black column with two panels in it, each a slice
+        // of the page's corner art shown upright at its own proportions (zoomed in, not turned or stretched).
         int m = n;
-            float u0[8], u1[8], v0[8], v1[8];
-            for (int k = 0; k < 8; k++) { u0[k] = v0[k] = 1e9f; u1[k] = v1[k] = -1e9f;
-                for (int i = 0; i < 6; i++) { float a = buf[i].t[k][0], b = buf[i].t[k][1];
-                    if (a < u0[k]) u0[k] = a; if (a > u1[k]) u1[k] = a; if (b < v0[k]) v0[k] = b; if (b > v1[k]) v1[k] = b; } }
-            float gap = 6.f, X0 = comic_l ? gap : g_NW - g_M + gap, X1 = comic_l ? g_M - 2 * gap : g_NW - gap;
-            if (!comic_l) X0 += gap;
-            float Y0 = gap, Y1 = 480.f - gap;
-            if (Y1 - Y0 > 40.f) {
-                // corners of the side panel: (X0,Y0) (X1,Y0) (X1,Y1) (X0,Y1), the picture turned a quarter
-                float X[4] = { X0, X1, X1, X0 }, Y[4] = { Y0, Y0, Y1, Y1 };
-                int ord[6] = { 0, 1, 2, 0, 2, 3 };
-                for (int j = 0; j < 6; j++) { int c = ord[j]; GV g = buf[0];
-                    g.pos[0] = X[c] / half - 1.f; g.pos[1] = 1.f - Y[c] / 264.f; g.pos[3] = 1.f;
-                    for (int k = 0; k < 8; k++) {   // x along the side panel = the picture's v, y = its u
-                        float fx = c == 1 || c == 2 ? 1.f : 0.f, fy = c >= 2 ? 1.f : 0.f;
-                        g.t[k][0] = u0[k] + (u1[k] - u0[k]) * (comic_l ? fy : 1.f - fy);
-                        g.t[k][1] = v0[k] + (v1[k] - v0[k]) * (comic_l ? 1.f - fx : fx); }
-                    buf[m++] = g; }
-            }
+        float u0[8], u1[8], v0[8], v1[8];
+        for (int k = 0; k < 8; k++) { u0[k] = v0[k] = 1e9f; u1[k] = v1[k] = -1e9f;
+            for (int i = 0; i < 6; i++) { float a = buf[i].t[k][0], b = buf[i].t[k][1];
+                if (a < u0[k]) u0[k] = a; if (a > u1[k]) u1[k] = a; if (b < v0[k]) v0[k] = b; if (b > v1[k]) v1[k] = b; } }
+        float pw = 0, ph = cy1 - cy0;   // the corner piece's size on screen
+        { float a = 1e9f, b = -1e9f; for (int i = 0; i < 6; i++) { float X = (buf[i].pos[0] / buf[i].pos[3] + 1.f) * half; if (X < a) a = X; if (X > b) b = X; } pw = b - a; }
+        float g = 6.f, XL = comic_l ? 0.f : g_NW - g_M, XR = comic_l ? (float)g_M : (float)g_NW;
+        // (rect, u window 0..1 of the piece, black?)
+        struct { float x0, y0, x1, y1, ua, ub; int black; } r[3] = {
+            { XL, 0.f, XR, 528.f, 0.45f, 0.55f, 1 },
+            { XL + g, g, XR - g, 240.f - g / 2, 0, 0, 0 },
+            { XL + g, 240.f + g / 2, XR - g, 480.f - g, 0, 0, 0 } };
+        for (int q = 1; q < 3; q++) {   // a slice as wide as the panel's shape asks for, at two places along the art
+            float want = ph * (r[q].x1 - r[q].x0) / (r[q].y1 - r[q].y0) / (pw > 1 ? pw : 1);
+            if (want > 0.9f) want = 0.9f;
+            float at = comic_l ? (q == 1 ? 0.12f : 0.55f) : (q == 1 ? 0.55f : 0.12f);
+            r[q].ua = at; r[q].ub = at + want;
+        }
+        for (int q = 0; q < 3; q++) {
+            float X[4] = { r[q].x0, r[q].x1, r[q].x1, r[q].x0 }, Y[4] = { r[q].y0, r[q].y0, r[q].y1, r[q].y1 };
+            float U[4] = { r[q].ua, r[q].ub, r[q].ub, r[q].ua }, V[4] = { 0, 0, 1, 1 };
+            static const int ord[6] = { 0, 1, 2, 0, 2, 3 };
+            for (int j = 0; j < 6; j++) { int c = ord[j]; GV v = buf[0];
+                v.pos[0] = X[c] / half - 1.f; v.pos[1] = 1.f - Y[c] / 264.f; v.pos[3] = 1.f;
+                for (int k = 0; k < 8; k++) { v.t[k][0] = u0[k] + (u1[k] - u0[k]) * U[c]; v.t[k][1] = v0[k] + (v1[k] - v0[k]) * V[c]; }
+                if (r[q].black) { v.c0[0] = v.c0[1] = v.c0[2] = 0; v.c1[0] = v.c1[1] = v.c1[2] = 0; v.c0[3] = v.c1[3] = 1.f; }
+                buf[m++] = v; }
+        }
         n = m;
     }
     glBindFramebuffer_(GL_FRAMEBUFFER, vr_sk == 2 && g_lay_fbo ? g_lay_fbo : g_fbo);
