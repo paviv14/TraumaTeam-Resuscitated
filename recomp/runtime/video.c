@@ -1050,7 +1050,10 @@ static void draw_prims(int prim, int vat, int n, u32 *p) {
             fprintf(g_dlf, "    st%d map %d coord %d chan %d C[%d %d %d %d] b%d s%d c%d x%d d%d A[%d %d %d %d] d%d K %.2f %.2f %.2f %.2f KA %.2f",
                 st, m, g->coord, g->chan, g->csel[0], g->csel[1], g->csel[2], g->csel[3], g->cb, g->csub, g->cclamp, g->cscale, g->cdest,
                 g->asel[0], g->asel[1], g->asel[2], g->asel[3], g->adest, g->K[0], g->K[1], g->K[2], g->K[3], g->KA);
-            if (m >= 0 && S.tex[m].e) fprintf(g_dlf, " | tex %08X %dx%d fmt %d", S.tex[m].e->addr, S.tex[m].w, S.tex[m].h, (S.tex[m].e->img0 >> 20) & 15);
+            if (m >= 0 && S.tex[m].e) { TexEntry *te = S.tex[m].e;   // with its texture-pack id and what replaces it (or "original")
+                fprintf(g_dlf, " | tex %08X %dx%d fmt %d id %016llX", te->addr, S.tex[m].w, S.tex[m].h, (te->img0 >> 20) & 15, (unsigned long long)te->hash);
+                if (te->partner) fprintf(g_dlf, " pair %016llX", (unsigned long long)te->partner);
+                fprintf(g_dlf, " -> %s", te->rid >= 0 ? texpack_path(te->rid) : "original"); }
             fprintf(g_dlf, "\n");
         }
         fprintf(g_dlf, "    ind: iref %06X ss %06X %06X mtx %06X %06X %06X | %06X %06X %06X | %06X %06X %06X cmd", bp[0x27], bp[0x25], bp[0x26],

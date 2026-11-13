@@ -36,6 +36,6 @@ Done (pass 1, 15 pictures): help bars (CHECK/BACK, BACK, SCROLL/ROTATE, SELECT/B
 the episode-select help (D-pad, A, +/-), the A and A+B speech bubbles (operations).
 
 Next:
-1. Button symbols inside dialogue text (font.brfnt glyph sheets).
+1. (Checked: font.brfnt has no button glyphs, so dialogue names buttons in words - a script-text pass, with ttre.)
 2. The Wii Remote / Nunchuk motion pictures (sprite/ope/rimokon.tpx, rimo_swing.tpx): show the PC move instead.
 3. Tutorial pages (327, tutorial/<mode>/tuto_*.tpx).

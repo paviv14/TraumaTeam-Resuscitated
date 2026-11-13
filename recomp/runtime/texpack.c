@@ -89,6 +89,7 @@ static const char *PSET_NAME[] = { "", "keyboard", "xbox", "ps4", "ps5" };
 static struct { u64 hash; int id; } *g_pset_map[NPSET]; static int g_pset_n[NPSET], g_pset_cap[NPSET];
 static int g_pset;
 int texpack_prompt_set(void) { return g_pset; }
+const char *texpack_path(int id) { return id >= 0 && id < g_nrepl ? g_repl[id].path : ""; }
 int texpack_is_prompt(int id) { return id >= 0 && id < g_nrepl && g_repl[id].set != 0; }
 void texpack_set_prompts(int set) { g_pset = set >= 0 && set < NPSET ? set : 0; }
 int texpack_prompt_count(int set) { return set > 0 && set < NPSET ? g_pset_n[set] : 0; }
