@@ -1706,7 +1706,11 @@ void vr_input(Input *in) {
       if (down && !prev && g_last_kind == 4 && g_office_now) g_door_req = 1;
       if (down && !prev && g_last_kind == 9) { g_niche_open = !g_niche_open; fprintf(stderr, "[vr] the hidden compartment %s\n", g_niche_open ? "opens" : "closes"); }
       if (down && !prev && g_last_kind == 10) { g_cr_panic = 4.f; fprintf(stderr, "[vr] you touched his dish: he panics\n"); }
-      if (g_last_kind == 9 || g_last_kind == 10) { in->a = in->lmb = 0; }
+      {   // a press that starts on the book or the dish belongs to VR until it's let go, even if the laser slips off meanwhile
+          static int swallow; if (down && !prev && (g_last_kind == 9 || g_last_kind == 10)) swallow = 1;
+          if (!down) swallow = 0;
+          if (swallow) { in->a = in->lmb = 0; }
+      }
       if (down && !prev && g_exam_now && (g_last_kind == 7 || g_last_kind == 8) && g_last_kind - 7 != g_exam_now - 1) {
           g_pending_bed = g_last_kind - 7; g_exit_t = 1; fprintf(stderr, "[vr] switching to the %s\n", g_pending_bed ? "personal effects" : "body"); }   // the door: if the game lets you go, it opens
       if (down && !prev && g_last_kind == 5 && g_office_now && g_mouse_held < 0) {   // using the mouse turns the computer on; you keep hold of it
