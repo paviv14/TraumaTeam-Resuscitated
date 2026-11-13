@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 Input g_input;
 int g_window_open;
@@ -34,7 +35,12 @@ static void wav_push(const s16 *lr, int frames, int rate) {
 #ifdef TTPC_SDL
 static void sdl_audio_push(const s16 *lr, int frames, int rate);
 #endif
-void platform_audio_push(const s16 *lr, int frames, int rate) {
+void speaker_mix(s16 *lr, int frames, int rate);   // speaker.c: the Wii Remote speaker's sounds, on the PC
+void platform_audio_push(const s16 *in, int frames, int rate) {
+    static s16 *mix; static int cap;
+    if (frames * 2 > cap) { free(mix); cap = frames * 2 + 1024; mix = malloc(sizeof *mix * (size_t)cap); }
+    const s16 *lr = in;
+    if (mix) { memcpy(mix, in, sizeof *mix * (size_t)frames * 2); speaker_mix(mix, frames, rate); lr = mix; }
     wav_push(lr, frames, rate);
 #ifdef TTPC_SDL
     sdl_audio_push(lr, frames, rate);
@@ -203,9 +209,40 @@ static int g_pointer_pad;                 // 1 = pad owns the pointer
 static int g_last_dev = 1;                // 1 = keyboard & mouse, 2 = controller, 3 = a real Wii Remote (used last)
 void platform_wii_used(void) { g_last_dev = 3; }
 // rumble from the game (WPADControlMotor, motion.c): a real Wii Remote and the controller both
+static int g_rumble_game; static float g_rumble_spk;
+static void pad_rumble_apply(void) {
+    if (!g_pad) return;
+    int lo = g_rumble_game ? 0x5000 : 0, hi = g_rumble_game ? 0xA000 : 0;
+    int s = (int)(g_rumble_spk * 0xC000); if (s > 0xC000) s = 0xC000;   // the speaker's loudness on the big motor
+    if (s > lo) lo = s;
+    SDL_GameControllerRumble(g_pad, (Uint16)lo, (Uint16)hi, lo || hi ? 5000 : 0);
+}
 void platform_rumble(int on) {
     void whid_rumble(int on); whid_rumble(on);
-    if (g_pad) SDL_GameControllerRumble(g_pad, on ? 0x5000 : 0, on ? 0xA000 : 0, on ? 5000 : 0);
+    g_rumble_game = on; pad_rumble_apply();
+}
+// the speaker's sound on the PC (speaker.c): the controller rumbles with its loudness ...
+void platform_speaker_level(float level) {
+    static float last; if (fabsf(level - last) < 0.05f && level) return; last = level;
+    g_rumble_spk = level < 0.08f ? 0 : level; pad_rumble_apply();
+}
+// ... and a wired DualSense (it is a USB sound card too) plays it from its own speaker
+static SDL_AudioDeviceID g_ds_audio; static int g_ds_tried;
+void platform_speaker_pcm(const s16 *pcm, int n) {
+    if (!g_pad || SDL_GameControllerGetType(g_pad) != SDL_CONTROLLER_TYPE_PS5) return;
+    if (!g_ds_tried) {
+        g_ds_tried = 1;
+        for (int i = 0; i < SDL_GetNumAudioDevices(0); i++) {
+            const char *nm = SDL_GetAudioDeviceName(i, 0);
+            if (nm && (strstr(nm, "DualSense") || strstr(nm, "Wireless Controller"))) {
+                SDL_AudioSpec want = { 0 }, have; want.freq = 6000; want.format = AUDIO_S16SYS; want.channels = 1; want.samples = 256;
+                g_ds_audio = SDL_OpenAudioDevice(nm, 0, &want, &have, 0);
+                if (g_ds_audio) { SDL_PauseAudioDevice(g_ds_audio, 0); fprintf(stderr, "[speaker] playing on the DualSense's speaker (%s)\n", nm); }
+                break;
+            }
+        }
+    }
+    if (g_ds_audio && SDL_GetQueuedAudioSize(g_ds_audio) < 6000 * 2 / 2) SDL_QueueAudio(g_ds_audio, pcm, (Uint32)n * 2);
 }
 static float g_pad_px = 0.5f, g_pad_py = 0.5f;
 static void pad_open(int index) {
@@ -250,7 +287,7 @@ void prompts_update(int force) {
     static const char *nm[] = { "Wii Remote (original)", "keyboard & mouse", "Xbox", "PlayStation 4", "PlayStation 5" };
     fprintf(stderr, "[prompts] showing %s buttons\n", nm[set]);
 }
-static int g_wheel_push, g_wheel_pull;
+static int g_wheel_push, g_wheel_pull, g_wheel_notch;
 void platform_poll(void) {
     if (!g_window_open) return;
     SDL_Event e;
@@ -267,8 +304,7 @@ void platform_poll(void) {
         if (e.type == SDL_MOUSEMOTION && (e.motion.xrel * e.motion.xrel + e.motion.yrel * e.motion.yrel) > 64) g_last_dev = 1;
         if (e.type == SDL_CONTROLLERBUTTONDOWN) g_last_dev = 2;
         if (e.type == SDL_CONTROLLERAXISMOTION && (e.caxis.value > 20000 || e.caxis.value < -20000)) g_last_dev = 2;
-        if (e.type == SDL_MOUSEWHEEL && e.wheel.y > 0) { g_wheel_push = 8; g_wheel_pull = 0; }   // each notch keeps the motion going ~0.13 s
-        if (e.type == SDL_MOUSEWHEEL && e.wheel.y < 0) { g_wheel_pull = 8; g_wheel_push = 0; }
+        if (e.type == SDL_MOUSEWHEEL && e.wheel.y) g_wheel_notch += e.wheel.y > 0 ? 1 : -1;   // used in platform_poll, by what is being played
         if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F9 && !e.key.repeat) { void video_capture_request(void); video_capture_request(); }
         if (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_F1 && !e.key.repeat && g_glctx) { menu_run(); return; }
         if (e.type == SDL_CONTROLLERBUTTONDOWN && g_pad && g_glctx &&
@@ -310,30 +346,62 @@ void platform_poll(void) {
     g_input.one = KEY(1);  g_input.two = KEY(2);
     g_input.c = KEY(C) || KEY(Q);  g_input.z = KEY(E) || KEY(F);   // Nunchuk buttons
     g_input.roll_l = KEY(J);  g_input.roll_r = KEY(L);              // twist the Remote
+    // The mouse wheel, by what is being played (CONTROLS.md): the endoscope drives with it (Ctrl + wheel twists the
+    // snare); elsewhere it twists the Remote one step a notch, and W + wheel up is the paddles' push.
+    extern char g_op_mode[3]; int endo = g_op_mode[0] == 'e' && g_op_mode[1] == 'n';
+    int ctrl = KEY(LCTRL) || KEY(RCTRL);
+    static int w_push;   // W is being used for the paddles' push (not the stick) until it is let go
+    g_input.twist = 0;
+    if (g_wheel_notch) {
+        int up = g_wheel_notch > 0;
+        if (endo && !ctrl) { if (up) { g_wheel_push = 5; g_wheel_pull = 0; } else { g_wheel_pull = 5; g_wheel_push = 0; } }
+        else if (!endo && up && KEY(W)) { g_wheel_push = 8; w_push = 1; }
+        else g_input.twist = g_wheel_notch * 0.2618f;   // 15 degrees a notch (up = clockwise)
+        g_wheel_notch = 0;
+    }
+    if (!KEY(W)) w_push = 0;
+    if (w_push) g_input.stick_up = 0;
     g_input.push = KEY(R) || KEY(TAB) || g_wheel_push > 0; if (g_wheel_push > 0) g_wheel_push--;
     g_input.pull = KEY(V) || g_wheel_pull > 0; if (g_wheel_pull > 0) g_wheel_pull--;
     g_input.swing = KEY(G) || g_input.mmb;
+    {   // a grab (left + right click) holds on while left click does: right click may be let go to turn with the wheel
+        static int grab; if (g_input.lmb && g_input.rmb) grab = 1; if (!g_input.lmb) grab = 0;
+        if (grab) g_input.rmb = 1;
+    }
 #undef KEY
     g_input.nx = g_input.ny = 0; g_input.has_analog = 0;
     if (g_pad) {
 #define PB(b) SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_##b)
-        g_input.a |= PB(A);                     g_input.b |= PB(B) || axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 0.3f;
-        g_input.z |= axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 0.3f;   g_input.c |= PB(LEFTSHOULDER);
+        // the settled layout (docs/CONTROLS.md)
+        int pa = PB(A), lt = axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 0.3f, rt = axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 0.3f;
+        int op = g_op_mode[0] && !(g_op_mode[0] == 'd' && g_op_mode[1] == 'i');   // in play where the Remote is twisted
+        g_input.a |= pa;
+        g_input.b |= PB(B) || (rt && (pa || lt));          // RT is only the B half of A+RT (grab) and LT+RT (defibrillator)
+        g_input.z |= lt;
+        int lb = PB(LEFTSHOULDER), rb = PB(RIGHTSHOULDER);
+        int twist_pad = op && (!endo || lt);                // LB / RB twist; in the endoscope only while Z is held (LB stays C)
+        if (twist_pad) { g_input.roll_l |= lb; g_input.roll_r |= rb; } else g_input.c |= lb;
         g_input.up |= PB(DPAD_UP); g_input.down |= PB(DPAD_DOWN); g_input.left |= PB(DPAD_LEFT); g_input.right |= PB(DPAD_RIGHT);
-        g_input.one |= PB(X); g_input.two |= PB(Y); g_input.push |= PB(RIGHTSTICK); g_input.swing |= PB(LEFTSTICK);
+        g_input.one |= PB(X);
+        g_input.swing |= PB(Y);                             // strike / CPR
+        g_input.push |= PB(LEFTSTICK) && PB(RIGHTSTICK);    // the paddles: both sticks pressed
         g_input.plus |= PB(START); g_input.minus |= PB(BACK); g_input.home |= PB(GUIDE);
-        // left stick = Nunchuk stick (y up)
-        g_input.nx = axis(SDL_CONTROLLER_AXIS_LEFTX); g_input.ny = -axis(SDL_CONTROLLER_AXIS_LEFTY);
-        g_input.has_analog = g_input.nx != 0 || g_input.ny != 0;
-        // right stick = pointer velocity (full tilt crosses the screen in ~0.6 s; squared for precision)
+        float lx = axis(SDL_CONTROLLER_AXIS_LEFTX), ly = -axis(SDL_CONTROLLER_AXIS_LEFTY);
         float rx = axis(SDL_CONTROLLER_AXIS_RIGHTX), ry = axis(SDL_CONTROLLER_AXIS_RIGHTY);
+        if (pa && (lx || ly)) { rx += lx; ry -= ly; lx = ly = 0; }   // dragging: both sticks move the pointer, the Nunchuk stick rests
+        g_input.nx = lx; g_input.ny = ly; g_input.has_analog = lx != 0 || ly != 0;
+        if (endo) {                                         // the endoscope: the right stick drives it (the pointer isn't used)
+            if (ry < -0.5f) g_input.push = 1; else if (ry > 0.5f) g_input.pull = 1;
+            rx = ry = 0;
+        }
+        // right stick = pointer velocity (full tilt crosses the screen in ~0.6 s; squared for precision)
         if (rx || ry) {
             if (!g_pointer_pad) { g_pad_px = g_input.mouse_x; g_pad_py = g_input.mouse_y; g_pointer_pad = 1; }
             static const float speeds[6] = { 0, 0.7f, 1.1f, 1.6f, 2.3f, 3.2f };   // screen widths per second, by setting
             const float speed = speeds[g_cfg.pointer_speed >= 1 && g_cfg.pointer_speed <= 5 ? g_cfg.pointer_speed : 3] / 60.f;
             g_pad_px += rx * (rx < 0 ? -rx : rx) * speed; g_pad_py += ry * (ry < 0 ? -ry : ry) * speed;
         }
-        if (PB(RIGHTSHOULDER)) { g_pad_px = 0.5f; g_pad_py = 0.5f; g_pointer_pad = 1; }
+        if (rb && !twist_pad) { g_pad_px = 0.5f; g_pad_py = 0.5f; g_pointer_pad = 1; }
         if (g_pad_px < 0) g_pad_px = 0; if (g_pad_px > 1) g_pad_px = 1; if (g_pad_py < 0) g_pad_py = 0; if (g_pad_py > 1) g_pad_py = 1;
 #undef PB
     }
@@ -350,5 +418,7 @@ void platform_set_title(const char *t) { (void)t; }
 void prompts_update(int force) { (void)force; }
 void platform_wii_used(void) {}
 void platform_rumble(int on) { void whid_rumble(int on); whid_rumble(on); }
+void platform_speaker_level(float level) { (void)level; }
+void platform_speaker_pcm(const s16 *pcm, int n) { (void)pcm; (void)n; }
 void platform_audio_stats(char *buf, int n) { if (n) buf[0] = 0; }
 #endif

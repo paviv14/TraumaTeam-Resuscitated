@@ -22,6 +22,7 @@
 #include <setupapi.h>
 #include <hidsdi.h>
 #include <process.h>
+#include <mmsystem.h>
 
 static CRITICAL_SECTION g_cs; static int g_cs_init;
 static HANDLE g_dev = INVALID_HANDLE_VALUE; static int g_outlen = 22;
@@ -66,6 +67,60 @@ static void setup(void) {
     u8 st[2] = { 0x15, 0x00 }; send(st, 2);           // status: is an extension plugged in?
     set_mode();
 }
+// ---------------------------------------------------------------- speaker: 4-bit Yamaha ADPCM, 6000 Hz, 40 samples per report 0x18
+static int g_spk_on;
+static void speaker_init(void) {
+    u8 en[2] = { 0x14, 0x04 }, mute[2] = { 0x19, 0x04 }, unmute[2] = { 0x19, 0x00 };
+    send(en, 2); Sleep(20); send(mute, 2); Sleep(20);
+    u8 v = 0x01; write_reg(0xA20009, &v, 1); v = 0x08; write_reg(0xA20001, &v, 1);
+    static const u8 cfg[7] = { 0x00, 0x00, 0xD0, 0x07, 0x40, 0x00, 0x00 };   // ADPCM, the game's own rate value, volume 0x40
+    write_reg(0xA20001, cfg, 7);
+    v = 0x01; write_reg(0xA20008, &v, 1);
+    send(unmute, 2); g_spk_on = 1;
+}
+static const int ADPCM_DIFF[16] = { 1, 3, 5, 7, 9, 11, 13, 15, -1, -3, -5, -7, -9, -11, -13, -15 };
+static const int ADPCM_SCALE[8] = { 230, 230, 230, 230, 307, 409, 512, 614 };
+static int g_pred, g_step = 127;
+static u8 adpcm_nibble(int x) {
+    int d = x - g_pred, code = 0;
+    if (d < 0) { code = 8; d = -d; }
+    int st = g_step;
+    if (d >= st) { code |= 4; d -= st; } st >>= 1;
+    if (d >= st) { code |= 2; d -= st; } st >>= 1;
+    if (d >= st) code |= 1;
+    g_pred += g_step * ADPCM_DIFF[code] / 8;
+    if (g_pred > 32767) g_pred = 32767; if (g_pred < -32768) g_pred = -32768;
+    g_step = g_step * ADPCM_SCALE[code & 7] >> 8;
+    if (g_step < 127) g_step = 127; if (g_step > 24576) g_step = 24576;
+    return (u8)code;
+}
+// packets go out from their own thread, one every 6.67 ms (the Remote plays them as they come)
+#define SPQ 64
+static u8 g_spq[SPQ][22]; static volatile unsigned g_spw, g_spr; static int g_sp_thread;
+static unsigned __stdcall speaker_thread(void *a) {
+    (void)a; timeBeginPeriod(1);
+    LARGE_INTEGER f, t0, t; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&t0); double next = 0;
+    while (!g_stop) {
+        QueryPerformanceCounter(&t); double now = (double)(t.QuadPart - t0.QuadPart) / f.QuadPart;
+        if (g_spr != g_spw && g_connected && now >= next) {
+            send(g_spq[g_spr % SPQ], 22); g_spr++;
+            next = (next < now - 0.05 ? now : next) + 1.0 / 150.0;
+        } else Sleep(1);
+    }
+    return 0;
+}
+int whid_speaker(const s16 *pcm, int n) {
+    if (!g_connected) return 0;
+    if (!g_spk_on) { speaker_init(); g_pred = 0; g_step = 127; }
+    if (!g_sp_thread) { g_sp_thread = 1; _beginthreadex(NULL, 0, speaker_thread, NULL, 0, NULL); }
+    if (g_spw - g_spr >= SPQ) return 1;   // behind: drop
+    u8 *r = g_spq[g_spw % SPQ]; memset(r, 0, 22);
+    r[0] = 0x18; r[1] = 20 << 3;
+    for (int i = 0; i < 40 && i < n; i += 2) r[2 + i / 2] = (u8)(adpcm_nibble(pcm[i]) << 4 | adpcm_nibble(pcm[i + 1]));
+    g_spw++;
+    return 1;
+}
+
 static void init_ext(void) {
     u8 v = 0x55; write_reg(0xA400F0, &v, 1); v = 0x00; write_reg(0xA400FB, &v, 1);   // unencrypted
     read_mem(1, 0xA40020, 16);                                                      // Nunchuk calibration
@@ -185,7 +240,7 @@ int whid_poll(WiiState *out) {
         if (now - last_try < 3000 && last_try) return 0;   // look again every 3 s (pair it any time)
         last_try = now;
         if (!try_open()) return 0;
-        memset(&g_st, 0, sizeof g_st); g_ext_ready = 0;
+        memset(&g_st, 0, sizeof g_st); g_ext_ready = 0; g_spk_on = 0;
         g_connected = 1; g_stop = 0;
         setup();
         _beginthreadex(NULL, 0, reader, NULL, 0, NULL);
@@ -203,6 +258,7 @@ void whid_rumble(int on) {
 }
 #else
 int whid_poll(WiiState *out) { (void)out; return 0; }
+int whid_speaker(const s16 *pcm, int n) { (void)pcm; (void)n; return 0; }
 void whid_rumble(int on) { (void)on; }
 #endif
 

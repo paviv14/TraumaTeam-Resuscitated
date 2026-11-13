@@ -12,6 +12,7 @@ typedef struct {
     int push, pull;           // move the Remote toward / away from the screen (wheel, R / V, right-stick click)
     int swing;                // swing the Remote (and Nunchuk) down hard: CPR compressions (middle mouse, G, left-stick click)
     int roll_l, roll_r;       // twist the Remote left / right about its pointing axis (J / L): bandages, turning tools
+    float twist;              // a twist step to add now (radians; the mouse wheel)
 } Input;
 extern Input g_input;
 

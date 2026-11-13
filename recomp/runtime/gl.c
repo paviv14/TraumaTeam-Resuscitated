@@ -589,14 +589,27 @@ static int mirror_side(const GV *tri, GV *out, float lo, float hi, float axis, f
 }
 // Repeating patterns are laid as many copies of one identical tile (same texture, same texture
 // coordinates, same size). Counted per frame; a tile seen 3+ times last frame repeats outwards.
-#define TSIG 2048
+#define TSIG 8192
 static u64 g_tsig[2][TSIG]; static u8 g_tcnt[2][TSIG]; static int g_tcur;
+// tiles recognised recently stay tiles for a second, so a pattern drawn a little differently from one frame to the
+// next doesn't switch between repeated and not (the sides flickered on the title screen)
+#define TKEEP 256
+static u64 g_tkeep[TKEEP]; static u32 g_tkeep_t[TKEEP]; static u32 g_tframe;
+static int tile_kept(u64 sig, int mark) {
+    int i = (int)(sig % TKEEP);
+    for (int k = 0; k < 4; k++) { int j = (i + k) % TKEEP;
+        if (g_tkeep[j] == sig) { if (mark) g_tkeep_t[j] = g_tframe; return g_tframe - g_tkeep_t[j] < 60; } }
+    if (mark) { int best = i; for (int k = 0; k < 4; k++) { int j = (i + k) % TKEEP; if (!g_tkeep[j] || g_tframe - g_tkeep_t[j] > g_tframe - g_tkeep_t[best]) best = j; }
+        g_tkeep[best] = sig; g_tkeep_t[best] = g_tframe; }
+    return 0;
+}
 static int tile_seen(u64 sig, int add) {   // returns last frame's count
     int i = (int)(sig % TSIG), prev = g_tcur ^ 1, r = 0;
-    for (int k = 0; k < 8; k++) { int j = (i + k) % TSIG; if (g_tsig[prev][j] == sig) { r = g_tcnt[prev][j]; break; } if (!g_tsig[prev][j]) break; }
-    if (add) for (int k = 0; k < 8; k++) { int j = (i + k) % TSIG;
+    for (int k = 0; k < 32; k++) { int j = (i + k) % TSIG; if (g_tsig[prev][j] == sig) { r = g_tcnt[prev][j]; break; } if (!g_tsig[prev][j]) break; }
+    if (add) for (int k = 0; k < 32; k++) { int j = (i + k) % TSIG;
         if (g_tsig[g_tcur][j] == sig) { if (g_tcnt[g_tcur][j] < 255) g_tcnt[g_tcur][j]++; break; }
         if (!g_tsig[g_tcur][j]) { g_tsig[g_tcur][j] = sig; g_tcnt[g_tcur][j] = 1; break; } }
+    if (r >= 3) tile_kept(sig, 1); else if (tile_kept(sig, 0)) r = 3;
     return r;
 }
 // VR: HUD pieces the room shows somewhere else (the LIMIT hearts) are drawn into their own layer, keyed like the frame
@@ -616,7 +629,7 @@ static void lay_ensure(void) {
     glFramebufferRenderbuffer_(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, g_depth);
     g_lay_w = g_W; g_lay_h = g_H; lay_clear();
 }
-static void tile_frame(void) { g_tcur ^= 1; memset(g_tsig[g_tcur], 0, sizeof g_tsig[0]); memset(g_tcnt[g_tcur], 0, sizeof g_tcnt[0]); }
+static void tile_frame(void) { g_tframe++; g_tcur ^= 1; memset(g_tsig[g_tcur], 0, sizeof g_tsig[0]); memset(g_tcnt[g_tcur], 0, sizeof g_tcnt[0]); }
 void gpu_draw(const Setup *s, const Out *v, int n) {
     static GV *buf; static int cap;
     if (n * 7 > cap) { free(buf); cap = n * 7 + 1024; buf = malloc(sizeof *buf * (size_t)cap); }
@@ -626,10 +639,11 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
     // ultrawide: 2D (w == 1 everywhere) spanning the game's whole width is stretched to the EFB's
     float xs = 1.f, xm = (float)g_M; int touch_l = 0, touch_r = 0; float tile_w = 0, edge_l = 0, edge_r = 0;
     if (g_M) {
-        int flat = 1; float mn = 1e9f, mx = -1e9f;
+        int flat = 1; float mn = 1e9f, mx = -1e9f, hy0 = 1e9f, hy1 = -1e9f;
         for (int i = 0; i < n && flat; i++) {
             if (v[i].w != 1.f) { flat = 0; break; }
             float x = v[i].x * wd + xo; if (x < mn) mn = x; if (x > mx) mx = x;
+            float y = v[i].y * ht + yo; if (y < hy0) hy0 = y; if (y > hy1) hy1 = y;
         }
         if (flat && g_cfg.wide_fill && n <= 6) {   // one quad: is it a tile of a repeating pattern?
             float u0 = 1e9f, u1 = -1e9f, t0 = 1e9f, t1 = -1e9f, ymn = 1e9f, ymx = -1e9f;
@@ -648,7 +662,9 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
         // their edge); narrow strips at the frame edge (borders) are mirrored outwards; tiles of a
         // repeating pattern are repeated outwards; other partial pieces of a picture are left alone.
         if (flat && mn <= 0.5f && mx >= 639.5f) { xs = (float)g_NW / 640.f; xm = 0; }
-        else if (flat && g_cfg.wide_fill && (tile_w > 0 || mx - mn <= 120.f)) {
+        // (a strip to mirror is a border: taller than a pointer or an icon pushed against the edge - those mirrored
+        // into the side showed a second, flipped pointer)
+        else if (flat && g_cfg.wide_fill && (tile_w > 0 || (mx - mn <= 120.f && hy1 - hy0 >= 96.f))) {
             touch_l = mn <= 0.5f && mn + g_M > 0.5f; touch_r = mx >= 639.5f && mx + g_M < g_NW - 0.5f; edge_l = mn + g_M; edge_r = mx + g_M; }
     }
     float half = g_NW * 0.5f;

@@ -4,6 +4,7 @@
 //
 // FST entry (12 bytes): u8 is_dir, u24 name offset, u32 file offset >> 2 (Wii) / parent, u32 size / next.
 // Drive read offsets are also in 4-byte units, relative to the game partition.
+char g_op_mode[3];   // what is being played: su or em en au di (from the files it loads)
 #include "cpu.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -104,6 +105,12 @@ static int read_host(u64 off, u32 len, u8 *buf) {
         {   // VR: which forensics case is loaded (autopsy/<lang>/<stage>/start.bf; other cases' card text gets read too) -> its autopsy report on the desk
             extern int g_vr_case; const char *q = strstr(f->path, "autopsy/");
             if (q && (q[8] == 'e' || q[8] == 'j') && q[11] == '/' && q[12] >= '0' && q[12] <= '9' && q[15] == '/' && !strcmp(q + 16, "start.bf")) { int c = atoi(q + 12); if (c > 0 && c != g_vr_case) { g_vr_case = c; fprintf(stderr, "[disc] case %d from %s\n", c, f->path); } }
+        }
+        {   // which kind of play this is (the controls change with it, platform.c): su/or/em/en operations, au forensics, di diagnosis
+            extern char g_op_mode[3]; const char *q = strstr(f->path, "operation2/data/"), *m = NULL;
+            if (q && q[16] >= 'a' && q[16] <= 'z' && q[17] >= 'a' && q[17] <= 'z') m = q + 16;
+            else if (strstr(f->path, "autopsy/")) m = "au"; else if (strstr(f->path, "diagnostic/")) m = "di";
+            if (m && (g_op_mode[0] != m[0] || g_op_mode[1] != m[1])) { g_op_mode[0] = m[0]; g_op_mode[1] = m[1]; fprintf(stderr, "[mode] %.2s\n", g_op_mode); }
         }
         if (g_log && !f->logged) { f->logged = 1; fprintf(stderr, "[disc] %s +%llX (%u bytes)\n", f->path, (unsigned long long)in, n); }
         off += n; len -= n; buf += n;

@@ -43,10 +43,18 @@ right click may be let go.
 - Real Wii Remote: runtime/wiimote_hid.c. Buttons, accelerometer, IR pointer (roll-corrected; TTPC_WII_GAIN,
   TTPC_WII_FLIPY), Nunchuk stick + accelerometer; looked for every 3 s (pair any time, or a DolphinBar in
   mode 4). Prompts show the original Wii pictures while it is in use. Untested.
-- Speaker: WPADCanSendStreamData 0x80255A70, WPADSendStreamData 0x80255B00 (report 0x18, 4-bit ADPCM),
-  driven by the game's speaker module around 0x80313F70-0x80315200 (SpeakerSe.arc). Next: answer them,
-  forward to a real Remote, decode to PC audio and the DualSense.
-- To do: the per-tool hooks for twist / strike / push / endoscope (EMERGENCY_RE.md has the bandage pattern).
+- Speaker: the game's 6.67 ms speaker alarm (0x80314B80) is replaced by runtime/speaker.c, which takes the
+  40 samples per tick (6000 Hz, scaled by the game's volume) and sends them to: a real Remote (4-bit ADPCM over
+  report 0x18, paced 150 packets/s), else the PC speakers (mixed into the game audio) + rumble following the
+  loudness, + a DualSense's own speaker when one is connected. TTPC_SPEAKER=0 off, =pc PC only. Untested.
+- Inputs implemented (13 Nov): what is being played comes from the files the game loads (disc.c: su/or/em/en, au,
+  di). Wheel = 15 degree twist (level again after ~2.5 s untouched with A/B up); in the endoscope wheel / R / V
+  drive (no A+B needed, gentler: TTPC_ENDO_SPEED, default 0.5) and Ctrl+wheel twists the snare; W + wheel up =
+  paddles (W stops being the stick until let go); a grab holds while left click does. Pad: RT = B only with A or
+  LT, LB/RB twist (endoscope: only with LT), Y swing, X = 1, L3+R3 paddles, endoscope on the right stick, both
+  sticks move the pointer while A is held.
+- Ultrawide: pieces mirrored into the sides must be at least 96 px tall (the pointer was mirrored); repeating
+  tiles stay tiles for 60 frames once seen (the title-screen sides flickered).
 
 ## Button prompts (runtime: texpack.c prompt sets, platform.c prompts_update)
 

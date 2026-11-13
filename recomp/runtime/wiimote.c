@@ -29,6 +29,7 @@
 //   Also: su sd sl sr (Nunchuk stick up/down/left/right) and @x/y (pointer, -1..1) for the event's span.
 #include "cpu.h"
 #include "platform.h"
+static float g_twist_step;   // mouse-wheel twist waiting to be applied (roll_motion)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -144,6 +145,11 @@ void wiimote_frame(void) {
     if (in->pull) h |= PULL_FLAG;
     if (in->swing) h |= SWING_FLAG;
     if (in->roll_l) h |= ROLL_L_FLAG;   if (in->roll_r) h |= ROLL_R_FLAG;
+    g_twist_step += in->twist;
+    {   // the endoscope drives with A + B held on the Wii; here the wheel / right stick does it without them
+        extern char g_op_mode[3];
+        if (g_op_mode[0] == 'e' && g_op_mode[1] == 'n' && (in->push || in->pull)) h |= BTN_A | BTN_B;
+    }
     { static int got;   // while a TTPC_INPUT script is still driving a menu (e.g. --mission), ignore the real controls
       if (!got) { got = 1; for (int k = 0; k < g_nscript; k++) if (g_script[k].from + g_script[k].len > script_end) script_end = g_script[k].from + g_script[k].len; }
       if (g_reads < script_end + 30) h = 0; }
@@ -176,7 +182,8 @@ void wiimote_frame(void) {
 static float g_dist = 1.5f, g_dist_prev = 1.5f;
 static void push_motion(int dir, u32 hold, float *acc_z) {
     static float v;   // current speed in m per read, eased toward the target
-    float target = dir * 0.008f;
+    static float speed = -1; if (speed < 0) { const char *e = getenv("TTPC_ENDO_SPEED"); speed = e ? (float)atof(e) : 0.5f; if (speed <= 0 || speed > 4) speed = 0.5f; }
+    float target = dir * 0.008f * speed;   // gentler than before (13 Nov: "too aggressive"); TTPC_ENDO_SPEED scales it
     v += (target - v) * 0.35f;
     if (fabsf(v) < 1e-5f) v = 0;
     g_dist_prev = g_dist;
@@ -225,10 +232,12 @@ static float circle_motion(float px, float py, int valid, u32 hold) {
 static float g_twist;   // the Remote's (and Nunchuk's) current twist, radians
 float wiimote_twist(void) { return g_twist; }
 static float roll_motion(int dir, u32 hold, float turn) {
-    static float a;
+    static float a; static int idle;
+    turn += g_twist_step; g_twist_step = 0;
     a += turn;
+    if (dir || turn) idle = 0; else idle++;
     if (dir) a += dir * 0.105f;   // radians per read
-    else if (!turn && !(hold & (BTN_A | BTN_B))) a *= 0.7f;
+    else if (idle > 150 && !(hold & (BTN_A | BTN_B))) a *= 0.7f;   // back to level once it's been left alone ~2.5 s
     if (fabsf(a) < 1e-3f) a = 0;
     while (a > (float)M_PI) a -= 2 * (float)M_PI;
     while (a < -(float)M_PI) a += 2 * (float)M_PI;
