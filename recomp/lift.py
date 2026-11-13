@@ -100,6 +100,7 @@ WRAP = {
     0x8000B7C0,  # Nunchuk acceleration (runtime/motion.c: the twist)
     0x80173870,  # emergency bandage wrap calc (logged)
     0x80314B80,  # the speaker alarm: Wii Remote speaker sounds to the PC / a real Remote (runtime/speaker.c)
+    0x80254250, 0x802542A0, 0x80255A70, 0x80255B00,  # WPAD speaker: always there on channel 0 (runtime/speaker.c)
     0x80253960,  # WPADControlMotor: rumble to a real Wii Remote and the controller (runtime/motion.c)
 }
 

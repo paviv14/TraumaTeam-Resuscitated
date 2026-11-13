@@ -76,3 +76,24 @@ void f_80314B80(CPU *c) {
     }
     (void)c;
 }
+
+// ---------------------------------------------------------------- the speaker as WPAD sees it
+// The console's Bluetooth stack isn't run (the Wii Remote is answered at KPAD level, wiimote.c), so WPAD's own
+// speaker calls failed and WPADIsSpeakerEnabled stayed false: the game then skipped every speaker sound - and
+// the dialogue lines that wait for them (Naomi's phone calls). Here channel 0's speaker always works.
+void rt_call(CPU *c, u32 addr);
+static int g_spk_enabled;
+// WPADIsSpeakerEnabled(chan) -> bool
+void f_80254250(CPU *c) { c->r[3] = c->r[3] == 0 && g_spk_enabled; }
+// WPADControlSpeaker(chan, cmd, cb) -> 0; cb(chan, 0) once done. cmd: 0 off, 1 on, 2 mute, 3 unmute, 4 play
+void f_802542A0(CPU *c) {
+    u32 chan = c->r[3], cmd = c->r[4], cb = c->r[5];
+    static int lines; if (lines++ < 40) fprintf(stderr, "[speaker] WPADControlSpeaker(%u, %u)\n", chan, cmd);
+    if (chan != 0) { c->r[3] = (u32)-1; return; }   // WPAD_ERR_NO_CONTROLLER
+    if (cmd == 0) g_spk_enabled = 0; else if (cmd == 1) g_spk_enabled = 1;
+    if (cb) { u32 lr = c->lr; c->r[3] = chan; c->r[4] = 0; rt_call(c, cb); c->lr = lr; }
+    c->r[3] = 0;
+}
+// WPADCanSendStreamData(chan) -> bool; WPADSendStreamData(chan, data, len) -> 0 (the alarm above sends instead)
+void f_80255A70(CPU *c) { c->r[3] = c->r[3] == 0 && g_spk_enabled; }
+void f_80255B00(CPU *c) { c->r[3] = c->r[3] == 0 ? 0 : (u32)-1; }
