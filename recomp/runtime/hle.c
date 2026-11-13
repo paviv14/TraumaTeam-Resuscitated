@@ -13,6 +13,24 @@ HLE(8021A9A0, __OSInitAudioSystem) { (void)c; fprintf(stderr, "[hle] __OSInitAud
 // Debug hook for functions listed in RECOMP_LOG at lift time. Prints arguments and the game's
 // frame-pacing state (queue at 0x804860B0, flags in small data) - adjust freely while investigating.
 void rt_logfn(CPU *c, u32 addr) {
+    {   // forensics investigation (TTPC_AUTTRACE=1): the body-examination module (0x8012E490..0x80132350) and the script-VM entry
+        // points it calls. Each function is logged when its arguments change, so a click shows up as a short burst.
+        static int on = -1; if (on < 0) on = getenv("TTPC_AUTTRACE") && *getenv("TTPC_AUTTRACE") != '0';
+        if ((addr >= 0x8012E000u && addr < 0x80132800u) || (addr >= 0x80028000u && addr < 0x8002F000u) || addr == 0x80076CF0u) {
+            if (!on) return;
+            static u32 seen[512][4]; static int ns; int k;
+            for (k = 0; k < ns; k++) if (seen[k][0] == addr) break;
+            if (k == ns && ns < 512) { seen[ns][0] = addr; ns++; seen[k][1] = ~0u; }
+            if (k < 512 && seen[k][1] == c->r[3] && seen[k][2] == c->r[4] && seen[k][3] == c->r[5]) return;
+            if (k < 512) { seen[k][1] = c->r[3]; seen[k][2] = c->r[4]; seen[k][3] = c->r[5]; }
+            char sx[3][40]; for (int i = 0; i < 3; i++) { u32 p = c->r[3 + i]; sx[i][0] = 0;
+                if (p >= 0x80000000u && p < 0x81800000u) { int n = 0; for (; n < 32; n++) { u8 ch = R8(p + n); if (!ch) break; if (ch < 32 || ch > 126) { n = -1; break; } sx[i][n] = (char)ch; } if (n > 2) sx[i][n] = 0; else sx[i][0] = 0; } }
+            fprintf(stderr, "[aut] %08X lr %08X r3 %08X%s%s%s r4 %08X%s%s%s r5 %08X%s%s%s r6 %08X f1 %.3f\n", addr, c->lr,
+                    c->r[3], sx[0][0] ? " \"" : "", sx[0], sx[0][0] ? "\"" : "", c->r[4], sx[1][0] ? " \"" : "", sx[1], sx[1][0] ? "\"" : "",
+                    c->r[5], sx[2][0] ? " \"" : "", sx[2], sx[2][0] ? "\"" : "", c->r[6], c->f[1].ps0);
+            return;
+        }
+    }
     if (addr == 0x8000C660u || addr == 0x8000C6D0u) return;   // per-retrace callbacks: too chatty
     if (addr == 0x80248120u) {   // nandConvertErrorCode(ios_result): log every non-success
         if (c->r[3]) fprintf(stderr, "[nand] IOS result %d converted (caller lr %08X)\n", (s32)c->r[3], c->lr);
