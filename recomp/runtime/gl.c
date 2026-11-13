@@ -646,7 +646,6 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
     if (vr_sk == 2) lay_ensure();
     // ultrawide: 2D (w == 1 everywhere) spanning the game's whole width is stretched to the EFB's
     float xs = 1.f, xm = (float)g_M; int touch_l = 0, touch_r = 0; float tile_w = 0, edge_l = 0, edge_r = 0;
-    int comic = 0, comic_l = 0; float cy0 = 0, cy1 = 0;   // a comic page's corner panel (see below)
     if (g_M) {
         int flat = 1; float mn = 1e9f, mx = -1e9f, hy0 = 1e9f, hy1 = -1e9f;
         for (int i = 0; i < n && flat; i++) {
@@ -672,19 +671,20 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
         // repeating pattern are repeated outwards; other partial pieces of a picture are left alone.
         // (a layer wider than the screen is a picture zoomed past its edges - a character close up - unless it
         // also covers the whole height (a panning background): stretching it drew that piece wider than the rest)
-        // Only a layer the size of the screen is stretched (fades, screen copies, backgrounds at their own size).
+        // Only a layer the size of the screen is stretched (fades, screen copies, backgrounds at their own size),
+        // and thin bars across it (the black gutters between rows of comic panels).
         // Anything reaching past the screen's edges - a zoomed background, a close-up character's pieces - is left
         // at its own scale: what lies past the edge already fills the sides, and stretching some pieces of a
         // character but not others drew it in two widths.
-        if (flat && mn <= 0.5f && mx >= 639.5f && mn >= -8.f && mx <= 648.f && hy0 <= 8.f && hy1 >= 470.f && hy0 >= -8.f && hy1 <= 540.f) { xs = (float)g_NW / 640.f; xm = 0; }
+        if (flat && mn <= 0.5f && mx >= 639.5f && mn >= -8.f && mx <= 648.f && ((hy0 <= 8.f && hy1 >= 470.f && hy0 >= -8.f && hy1 <= 540.f) || hy1 - hy0 <= 24.f)) { xs = (float)g_NW / 640.f; xm = 0; }
         // (a strip to mirror is a border: taller than a pointer or an icon pushed against the edge - those mirrored
         // into the side showed a second, flipped pointer)
-        // A comic page's corner panels (the frame of panels around the office, Naomi's room, the story pages):
-        // a strip at the top reaching a side edge lends that side a tall panel of its own (below).
+        // A comic page's rows of panels (the frame around the office, Naomi's room, the story pages): a strip at the
+        // top or bottom reaching a side edge is mirrored outwards, so the rows of panels run on across the sides.
         else if (flat && g_cfg.wide_fill && (mn <= 1.f || mx >= 639.f) && mx - mn >= 120.f && mx - mn <= 400.f &&
                  hy1 - hy0 >= 24.f && hy1 - hy0 <= 200.f && (hy0 <= 2.f || hy1 >= 476.f) && !tile_w &&
                  comic_steady(s, mn, mx, hy0, hy1)) {
-            comic = hy0 <= 2.f; cy0 = hy0; cy1 = hy1; comic_l = mn <= 1.f; }
+            touch_l = mn <= 1.f; touch_r = !touch_l && mx >= 639.f; edge_l = mn + g_M; edge_r = mx + g_M; }
         else if (flat && g_cfg.wide_fill && (tile_w > 0 || (mx - mn <= 120.f && hy1 - hy0 >= 96.f))) {
             touch_l = mn <= 0.5f && mn + g_M > 0.5f; touch_r = mx >= 639.5f && mx + g_M < g_NW - 0.5f; edge_l = mn + g_M; edge_r = mx + g_M; }
     }
@@ -720,40 +720,6 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
             // mirror about the layer's own outer edge, just enough to reach the screen edge
             if (touch_l) m += mirror_side(&buf[i], &buf[m], edge_l, 2 * edge_l, edge_l, half);
             if (touch_r) m += mirror_side(&buf[i], &buf[m], 2 * edge_r - g_NW, edge_r, edge_r, half);
-        }
-        n = m;
-    }
-    if (comic && n >= 6 && g_M >= 24) {
-        // The sides of a comic page get panels of their own: a black column with two panels in it, each a slice
-        // of the page's corner art shown upright at its own proportions (zoomed in, not turned or stretched).
-        int m = n;
-        float u0[8], u1[8], v0[8], v1[8];
-        for (int k = 0; k < 8; k++) { u0[k] = v0[k] = 1e9f; u1[k] = v1[k] = -1e9f;
-            for (int i = 0; i < 6; i++) { float a = buf[i].t[k][0], b = buf[i].t[k][1];
-                if (a < u0[k]) u0[k] = a; if (a > u1[k]) u1[k] = a; if (b < v0[k]) v0[k] = b; if (b > v1[k]) v1[k] = b; } }
-        float pw = 0, ph = cy1 - cy0;   // the corner piece's size on screen
-        { float a = 1e9f, b = -1e9f; for (int i = 0; i < 6; i++) { float X = (buf[i].pos[0] / buf[i].pos[3] + 1.f) * half; if (X < a) a = X; if (X > b) b = X; } pw = b - a; }
-        float g = 6.f, XL = comic_l ? 0.f : g_NW - g_M, XR = comic_l ? (float)g_M : (float)g_NW;
-        // (rect, u window 0..1 of the piece, black?)
-        struct { float x0, y0, x1, y1, ua, ub; int black; } r[3] = {
-            { XL, 0.f, XR, 528.f, 0.45f, 0.55f, 1 },
-            { XL + g, g, XR - g, 240.f - g / 2, 0, 0, 0 },
-            { XL + g, 240.f + g / 2, XR - g, 480.f - g, 0, 0, 0 } };
-        for (int q = 1; q < 3; q++) {   // a slice as wide as the panel's shape asks for, at two places along the art
-            float want = ph * (r[q].x1 - r[q].x0) / (r[q].y1 - r[q].y0) / (pw > 1 ? pw : 1);
-            if (want > 0.9f) want = 0.9f;
-            float at = comic_l ? (q == 1 ? 0.12f : 0.55f) : (q == 1 ? 0.55f : 0.12f);
-            r[q].ua = at; r[q].ub = at + want;
-        }
-        for (int q = 0; q < 3; q++) {
-            float X[4] = { r[q].x0, r[q].x1, r[q].x1, r[q].x0 }, Y[4] = { r[q].y0, r[q].y0, r[q].y1, r[q].y1 };
-            float U[4] = { r[q].ua, r[q].ub, r[q].ub, r[q].ua }, V[4] = { 0, 0, 1, 1 };
-            static const int ord[6] = { 0, 1, 2, 0, 2, 3 };
-            for (int j = 0; j < 6; j++) { int c = ord[j]; GV v = buf[0];
-                v.pos[0] = X[c] / half - 1.f; v.pos[1] = 1.f - Y[c] / 264.f; v.pos[3] = 1.f;
-                for (int k = 0; k < 8; k++) { v.t[k][0] = u0[k] + (u1[k] - u0[k]) * U[c]; v.t[k][1] = v0[k] + (v1[k] - v0[k]) * V[c]; }
-                if (r[q].black) { v.c0[0] = v.c0[1] = v.c0[2] = 0; v.c1[0] = v.c1[1] = v.c1[2] = 0; v.c0[3] = v.c1[3] = 1.f; }
-                buf[m++] = v; }
         }
         n = m;
     }
