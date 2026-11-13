@@ -10,6 +10,7 @@
 //     to the sound's loudness (a heartbeat thumps) - and a wired DualSense's own speaker when there is one.
 // TTPC_SPEAKER=pc forces the PC's sound even with a real Remote; TTPC_SPEAKER=0 turns it all off.
 #include "cpu.h"
+#include "platform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,9 +46,10 @@ void speaker_mix(s16 *lr, int frames, int rate) {
 
 // Some PC Bluetooth adapters never play a Remote's speaker data: TTPC_SPEAKER=both plays it on the PC as well.
 static int mode(void) {   // 0 off, 1 the Remote if there is one (else the PC), 2 PC only, 3 Remote only, 4 both
-    static int m = -1;
-    if (m < 0) { const char *e = getenv("TTPC_SPEAKER"); m = !e ? 1 : *e == '0' ? 0 : !strcmp(e, "pc") ? 2 : !strcmp(e, "remote") ? 3 : !strcmp(e, "both") ? 4 : 1; }
-    return m;
+    const char *e = getenv("TTPC_SPEAKER");
+    if (e) return *e == '0' ? 0 : !strcmp(e, "pc") ? 2 : !strcmp(e, "remote") ? 3 : !strcmp(e, "both") ? 4 : 1;
+    static const int map[5] = { 1, 2, 3, 4, 0 };   // settings: Automatic, PC, Remote, Both, Off
+    return map[g_cfg.speaker >= 0 && g_cfg.speaker <= 4 ? g_cfg.speaker : 0];
 }
 
 // fn_80314B80: the speaker alarm (all channels). Channel 0 is ours; the rest stay silent, as there is no Remote.

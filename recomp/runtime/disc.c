@@ -126,8 +126,18 @@ static void to_guest(u32 dst, const u8 *buf, u32 len) {
 // VR: where the forensics models (model/autopsy/kensiNN_body / _things.brres) sit in guest memory, so the VR
 // layer can tell their draws apart (any texture inside a file's range belongs to that model).
 u32 g_vr_mdl_lo[2], g_vr_mdl_hi[2];   // [0] body, [1] personal effects (physical addresses)
+// The Wii Remote models (model/remo/*.brres: the 3D Remote the help shows being swung / twisted): their places in
+// guest memory, so gl.c can leave them out when another controller is in use.
+u32 g_remo_lo[16], g_remo_hi[16];
 static void note_model(u64 off, u32 dst) {
-    DiscFile *f = find_file(off); if (!f || !strstr(f->path, "model/autopsy/kensi") || strstr(f->path, "collision")) return;
+    DiscFile *f = find_file(off);
+    if (f && strstr(f->path, "model/remo/")) {
+        u32 base = (dst & 0x1FFFFFFF) - (u32)(off - f->off); int k, fr = -1;
+        for (k = 0; k < 16; k++) { if (g_remo_lo[k] == base) break; if (!g_remo_hi[k] && fr < 0) fr = k; }
+        if (k == 16) { k = fr >= 0 ? fr : 0; g_remo_lo[k] = base; g_remo_hi[k] = base + (u32)f->size; fprintf(stderr, "[disc] Remote model %s at %08X\n", f->path, base); }
+        return;
+    }
+    if (!f || !strstr(f->path, "model/autopsy/kensi") || strstr(f->path, "collision")) return;
     int k = strstr(f->path, "_body.brres") ? 0 : strstr(f->path, "_things.brres") ? 1 : -1; if (k < 0) return;
     u32 base = (dst & 0x1FFFFFFF) - (u32)(off - f->off);
     if (g_vr_mdl_lo[k] != base) { g_vr_mdl_lo[k] = base; g_vr_mdl_hi[k] = base + (u32)f->size; fprintf(stderr, "[disc] VR: %s at %08X\n", f->path, base); }

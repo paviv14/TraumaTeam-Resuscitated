@@ -18,11 +18,16 @@ static struct { const char *key; int *v; int lo, hi; } KEYS[] = {
     { "aspect_ratio", &g_cfg.stretch, 0, 3 }, { "ultrawide_sides", &g_cfg.wide_fill, 0, 1 }, { "texture_size_limit", &g_cfg.tex_limit, 0, 2 }, { "texture_compression", &g_cfg.tex_compress, 0, 1 }, { "texture_memory_mb", &g_cfg.tex_vram_mb, 256, 65536 }, { "sharp_pixels", &g_cfg.sharp, 0, 1 },
     { "vsync", &g_cfg.vsync, 0, 1 }, { "texture_pack", &g_cfg.textures, 0, 1 },
     { "volume", &g_cfg.volume, 0, 100 }, { "pointer_speed", &g_cfg.pointer_speed, 1, 5 },
-    { "button_prompts", &g_cfg.prompts, 0, 3 }, { "controller_style", &g_cfg.pad_style, 0, 3 },
+    { "button_prompts", &g_cfg.prompts, 0, 3 }, { "remote_speaker", &g_cfg.speaker, 0, 4 }, { "controller_style", &g_cfg.pad_style, 0, 3 },
 };
 #define NKEYS (int)(sizeof KEYS / sizeof KEYS[0])
 
+static void binds_defaults_init(void) {
+    static int done; if (done) return; done = 1;
+    for (int i = 0; i < NBIND; i++) { g_bind[i].dkey = g_bind[i].key; g_bind[i].dkey2 = g_bind[i].key2; g_bind[i].dpad = g_bind[i].pad; }
+}
 void settings_load(void) {
+    binds_defaults_init();
     FILE *f = fopen(CFG_PATH, "r");
     if (f) {
         char line[256];
@@ -30,6 +35,12 @@ void settings_load(void) {
             char k[64]; int v;
             if (line[0] == '#' || line[0] == ';' || sscanf(line, " %63[^= ] = %d", k, &v) != 2) continue;
             if (!strcmp(k, "stretch_to_window")) { if (v) g_cfg.stretch = 2; continue; }   // older settings files
+            for (int i = 0; i < NBIND; i++) {
+                char n[64];
+                snprintf(n, sizeof n, "key_%s", g_bind[i].id); if (!strcmp(k, n)) g_bind[i].key = v;
+                snprintf(n, sizeof n, "key2_%s", g_bind[i].id); if (!strcmp(k, n)) g_bind[i].key2 = v;
+                snprintf(n, sizeof n, "pad_%s", g_bind[i].id); if (!strcmp(k, n)) g_bind[i].pad = v;
+            }
             for (int i = 0; i < NKEYS; i++) if (!strcmp(k, KEYS[i].key))
                 *KEYS[i].v = v < KEYS[i].lo ? KEYS[i].lo : v > KEYS[i].hi ? KEYS[i].hi : v;
         }
@@ -43,6 +54,8 @@ void settings_save(void) {
     if (!f) { fprintf(stderr, "[settings] cannot write %s\n", CFG_PATH); return; }
     fprintf(f, "# Trauma Team settings (also changed in game: F1 or Back + Start)\n");
     for (int i = 0; i < NKEYS; i++) fprintf(f, "%s = %d\n", KEYS[i].key, *KEYS[i].v);
+    fprintf(f, "# controls: SDL scancodes (0 = none) and controller buttons (30 = left trigger, 31 = right trigger, -1 = none)\n");
+    for (int i = 0; i < NBIND; i++) fprintf(f, "key_%s = %d\nkey2_%s = %d\npad_%s = %d\n", g_bind[i].id, g_bind[i].key, g_bind[i].id, g_bind[i].key2, g_bind[i].id, g_bind[i].pad);
     fclose(f);
 }
 
@@ -90,10 +103,16 @@ static void value_text(const Item *it, char *b, size_t n) {
     else if (it->v == &g_cfg.wide_fill) snprintf(b, n, v ? "Extend game art" : "Black");
     else if (it->v == &g_cfg.prompts) { static const char *s[] = { "Automatic", "Wii Remote", "Keyboard & mouse", "Controller" }; snprintf(b, n, "%s", s[v]); }
     else if (it->v == &g_cfg.pad_style) { static const char *s[] = { "Automatic", "Xbox", "PlayStation 4", "PlayStation 5" }; snprintf(b, n, "%s", s[v]); }
+    else if (it->v == &g_cfg.speaker) { static const char *s[] = { "Automatic", "PC speakers", "Wii Remote", "Both", "Off" }; snprintf(b, n, "%s", s[v]); }
     else if (it->v == &g_cfg.tex_limit) { static const char *s[] = { "Up to 1024", "Up to 2048", "Full (up to 4096)" }; snprintf(b, n, "%s", s[v]); }
     else snprintf(b, n, v ? "On" : "Off");
 }
 
+// Tabs and their settings. Item.tab says which tab; the Controls tab also lists the remappable buttons.
+enum { T_DISPLAY, T_GRAPHICS, T_AUDIO, T_CONTROLS, T_REMAP, T_DEV, NTAB };
+static const char *TABS[NTAB] = { "Display", "Graphics", "Audio", "Controls", "Remap", "Developer" };
+static const int ITEM_TAB[] = { T_DISPLAY, T_DISPLAY, T_DISPLAY, T_DISPLAY, T_GRAPHICS, T_DISPLAY, T_DISPLAY, T_GRAPHICS, T_AUDIO, T_AUDIO,
+                                T_CONTROLS, T_CONTROLS, T_CONTROLS, T_DEV };
 static Item ITEMS[] = {
     { "Resolution", "Internal rendering resolution. Higher is sharper and needs a faster GPU.", &g_cfg.scale, 1, 6, 1 },
     { "Display", "Window or borderless fullscreen (F11 also switches).", &g_cfg.fullscreen, 0, 1, 1 },
@@ -104,6 +123,7 @@ static Item ITEMS[] = {
     { "VSync", "Sync to the monitor's refresh. Off is smoothest on a 60 Hz screen.", &g_cfg.vsync, 0, 1, 1 },
     { "Texture pack", "Use the upscaled textures in the 'textures' folder.", &g_cfg.textures, 0, 1, 1 },
     { "Volume", "Game sound volume.", &g_cfg.volume, 0, 100, 10 },
+    { "Wii Remote speaker", "Where the sounds the Wii played from the Remote's speaker go: Automatic (the Remote when one is connected and in use, else the PC), the PC, the Remote, both, or off.", &g_cfg.speaker, 0, 4, 1 },
     { "Pointer speed", "How fast the controller's right stick moves the pointer.", &g_cfg.pointer_speed, 1, 5, 1 },
     { "Button prompts", "Which buttons the game's help shows: Automatic follows what you used last (keyboard & mouse or a controller), or always one of them. Wii Remote keeps the original pictures.", &g_cfg.prompts, 0, 3, 1 },
     { "Controller style", "Button names for a controller: Automatic asks the controller what it is; or always Xbox, PlayStation 4 or PlayStation 5.", &g_cfg.pad_style, 0, 3, 1 },
@@ -115,7 +135,8 @@ static void change(int i, int dir) {
     Item *it = &ITEMS[i];
     int v = *it->v + dir * it->step;
     if (it->hi - it->lo == 1) v = *it->v ? 0 : 1;          // toggles wrap
-    else if (it->v == &g_cfg.stretch || it->v == &g_cfg.prompts || it->v == &g_cfg.pad_style) v = (v + 4) % 4;     // so do these lists
+    else if (it->v == &g_cfg.stretch || it->v == &g_cfg.prompts || it->v == &g_cfg.pad_style) v = (v + 4) % 4;
+    else if (it->v == &g_cfg.speaker) v = (v + 5) % 5;     // so do these lists
     else if (it->v == &g_dev_pick) v = (v + NDEV) % NDEV;
     if (it->v == &g_dev_pick) { *it->v = v; return; }      // a choice, not a setting
     else if (v < it->lo) v = it->lo; else if (v > it->hi) v = it->hi;
@@ -127,86 +148,175 @@ static void change(int i, int dir) {
     if (it->v == &g_cfg.prompts || it->v == &g_cfg.pad_style) prompts_update(1);
 }
 
+// rows of the open tab: >= 0 an item, -1 - n bind n, R_RESET, R_CLOSE
+#define R_RESET (-1000)
+#define R_CLOSE (-1001)
+static int build_rows(int tab, int *rows) {
+    int n = 0;
+    if (tab == T_REMAP) { for (int b = 0; b < NBIND; b++) rows[n++] = -1 - b; rows[n++] = R_RESET; }
+    else for (int i = 0; i < NITEMS; i++) if (ITEM_TAB[i] == tab) rows[n++] = i;
+    rows[n++] = R_CLOSE;
+    return n;
+}
+static const char *key_name(int sc) { if (sc <= 0) return "-"; const char *k = SDL_GetScancodeName((SDL_Scancode)sc); return *k ? k : "?"; }
+static void bind_set(int b, int col, int v) {
+    int *slot = col == 0 ? &g_bind[b].key : col == 1 ? &g_bind[b].key2 : &g_bind[b].pad;
+    *slot = v; settings_save(); prompts_update(1);
+}
+
 // Runs the menu until it is closed; the game is paused meanwhile.
 void menu_run(void) {
     if (!g_gpu) return;
     platform_audio_pause(1);
     SDL_ShowCursor(SDL_ENABLE);
-    int sel = 0, done = 0, mx = -1, my = -1, rows_y[NITEMS + 1], row_h = 1, panel_x = 0, panel_w = 0;
+    static int tab = T_DISPLAY;
+    int rows[NBIND + NITEMS + 4], nrows = build_rows(tab, rows);
+    int sel = 0, col = 0, scroll = 0, done = 0, capture = 0, mx = -1, my = -1, row_h = 1, panel_x = 0, panel_w = 0, list_y = 0, vis = 1;
+    int tab_x[NTAB + 1] = {0}, tab_y = 0, tab_h = 1, col_x[4] = {0};
+    Uint32 capture_t = 0;
     while (!done) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) { fprintf(stderr, "[platform] window closed\n"); exit(0); }
-            int key = e.type == SDL_KEYDOWN ? e.key.keysym.sym : 0;
+            int key = e.type == SDL_KEYDOWN ? e.key.keysym.sym : 0, sc = e.type == SDL_KEYDOWN ? e.key.keysym.scancode : 0;
             int btn = e.type == SDL_CONTROLLERBUTTONDOWN ? e.cbutton.button : -1;
+            if (capture) {           // waiting for the new key / button
+                int b = -1 - rows[sel];
+                if (SDL_GetTicks() - capture_t < 150) continue;
+                if (col < 2) {
+                    if (key == SDLK_ESCAPE || btn == SDL_CONTROLLER_BUTTON_B || btn == SDL_CONTROLLER_BUTTON_START) capture = 0;
+                    else if (sc) { bind_set(b, col, sc); capture = 0; }
+                } else {
+                    if (key == SDLK_ESCAPE) capture = 0;
+                    else if (btn >= 0) { bind_set(b, col, btn); capture = 0; }
+                    else if (e.type == SDL_CONTROLLERAXISMOTION && e.caxis.value > 20000 &&
+                             (e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT || e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERRIGHT)) {
+                        bind_set(b, col, e.caxis.axis == SDL_CONTROLLER_AXIS_TRIGGERLEFT ? PAD_LT : PAD_RT); capture = 0;
+                    }
+                }
+                continue;
+            }
+            int newtab = tab;
+            if (key == SDLK_TAB || key == SDLK_PAGEDOWN || key == SDLK_e || btn == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) newtab = (tab + 1) % NTAB;
+            if (key == SDLK_PAGEUP || key == SDLK_q || btn == SDL_CONTROLLER_BUTTON_LEFTSHOULDER) newtab = (tab + NTAB - 1) % NTAB;
+            if (e.type == SDL_MOUSEBUTTONDOWN && my >= tab_y && my < tab_y + tab_h)
+                for (int t = 0; t < NTAB; t++) if (mx >= tab_x[t] && mx < tab_x[t + 1]) newtab = t;
+            if (newtab != tab) { tab = newtab; nrows = build_rows(tab, rows); sel = 0; scroll = 0; col = 0; continue; }
             if (key == SDLK_ESCAPE || key == SDLK_F1 || key == SDLK_BACKSPACE || btn == SDL_CONTROLLER_BUTTON_B || btn == SDL_CONTROLLER_BUTTON_START) done = 1;
-            if (key == SDLK_UP || key == SDLK_w || btn == SDL_CONTROLLER_BUTTON_DPAD_UP) sel = (sel + NITEMS) % (NITEMS + 1);
-            if (key == SDLK_DOWN || key == SDLK_s || btn == SDL_CONTROLLER_BUTTON_DPAD_DOWN) sel = (sel + 1) % (NITEMS + 1);
+            if (key == SDLK_UP || key == SDLK_w || btn == SDL_CONTROLLER_BUTTON_DPAD_UP) sel = (sel + nrows - 1) % nrows;
+            if (key == SDLK_DOWN || key == SDLK_s || btn == SDL_CONTROLLER_BUTTON_DPAD_DOWN) sel = (sel + 1) % nrows;
             int dir = (key == SDLK_LEFT || key == SDLK_a || btn == SDL_CONTROLLER_BUTTON_DPAD_LEFT) ? -1
                     : (key == SDLK_RIGHT || key == SDLK_d || btn == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) ? 1 : 0;
-            if (key == SDLK_RETURN || key == SDLK_SPACE || btn == SDL_CONTROLLER_BUTTON_A) {
-                if (sel == NITEMS) done = 1;
-                else if (ITEMS[sel].v == &g_dev_pick) { g_dev_seq_request = DEV[g_dev_pick].seq; done = 1; }
-                else dir = 1;
-            }
-            if (dir && sel < NITEMS) change(sel, dir);
-            if (key == SDLK_F11) { g_cfg.fullscreen ^= 1; settings_apply(); settings_save(); }
+            int r = rows[sel], enter = key == SDLK_RETURN || key == SDLK_SPACE || btn == SDL_CONTROLLER_BUTTON_A;
+            int clear = key == SDLK_DELETE || btn == SDL_CONTROLLER_BUTTON_X;
             if (e.type == SDL_MOUSEMOTION) {
                 int ww, wh, dw, dh; SDL_GetWindowSize(g_sdl_window, &ww, &wh); SDL_GL_GetDrawableSize(g_sdl_window, &dw, &dh);
                 mx = e.motion.x * dw / (ww ? ww : 1); my = e.motion.y * dh / (wh ? wh : 1);
-                for (int i = 0; i <= NITEMS; i++) if (mx >= panel_x && mx < panel_x + panel_w && my >= rows_y[i] && my < rows_y[i] + row_h) sel = i;
-            }
-            if (e.type == SDL_MOUSEBUTTONDOWN && mx >= panel_x && mx < panel_x + panel_w) {
-                for (int i = 0; i <= NITEMS; i++) if (my >= rows_y[i] && my < rows_y[i] + row_h) {
-                    sel = i;
-                    if (i == NITEMS) done = 1;
-                    else if (ITEMS[i].v == &g_dev_pick && e.button.button == SDL_BUTTON_LEFT) { g_dev_seq_request = DEV[g_dev_pick].seq; done = 1; }
-                    else change(i, e.button.button == SDL_BUTTON_RIGHT ? -1 : 1);
+                if (mx >= panel_x && mx < panel_x + panel_w && my >= list_y && my < list_y + vis * row_h) {
+                    int i = scroll + (my - list_y) / row_h; if (i < nrows) sel = i;
+                    if (rows[sel] < 0 && rows[sel] > R_RESET) for (int c = 0; c < 3; c++) if (mx >= col_x[c] && mx < col_x[c + 1]) col = c;
                 }
+                r = rows[sel];
             }
-            if (e.type == SDL_MOUSEWHEEL && sel < NITEMS) change(sel, e.wheel.y > 0 ? 1 : -1);
+            int click = e.type == SDL_MOUSEBUTTONDOWN && mx >= panel_x && mx < panel_x + panel_w && my >= list_y && my < list_y + vis * row_h;
+            if (click && e.button.button == SDL_BUTTON_RIGHT && r < 0 && r > R_RESET) { clear = 1; click = 0; }
+            if (click) { if (r >= 0 && ITEMS[r].v != &g_dev_pick) dir = 1; else enter = 1; }
+            if (r == R_CLOSE) { if (enter) done = 1; }
+            else if (r == R_RESET) {
+                if (enter) { for (int b = 0; b < NBIND; b++) { g_bind[b].key = g_bind[b].dkey; g_bind[b].key2 = g_bind[b].dkey2; g_bind[b].pad = g_bind[b].dpad; } settings_save(); }
+            } else if (r < 0) {           // a button: left / right picks the column, Enter waits for the new one
+                int b = -1 - r;
+                if (dir) col = (col + 3 + dir) % 3;
+                if (enter) { capture = 1; capture_t = SDL_GetTicks(); }
+                if (clear) bind_set(b, col, col < 2 ? 0 : -1);
+            } else {
+                if (enter) { if (ITEMS[r].v == &g_dev_pick) { g_dev_seq_request = DEV[g_dev_pick].seq; done = 1; } else dir = 1; }
+                if (dir) change(r, dir);
+                if (e.type == SDL_MOUSEWHEEL) change(r, e.wheel.y > 0 ? 1 : -1);
+            }
+            if (e.type == SDL_MOUSEWHEEL && r < 0) { scroll -= e.wheel.y; }
+            if (key == SDLK_F11) { g_cfg.fullscreen ^= 1; settings_apply(); settings_save(); }
         }
         // draw
         int W, H;
         if (!gpu_overlay_begin(&W, &H, 0.55f)) break;
         float u = H / 30.f; if (u * 30 > W) u = W / 30.f;     // layout unit: scales with the window
-        panel_w = (int)(u * 28); panel_x = (W - panel_w) / 2; row_h = (int)(u * 1.6f);
-        int ph = (int)(u * 4.2f) + row_h * (NITEMS + 1) + (int)(u * 4.2f), py = (H - ph) / 2;
+        panel_w = (int)(u * 28); panel_x = (W - panel_w) / 2; row_h = (int)(u * 1.5f);
+        vis = 14; if (vis > nrows) vis = nrows;
+        if (sel < scroll) scroll = sel; if (sel >= scroll + vis) scroll = sel - vis + 1;
+        if (scroll > nrows - vis) scroll = nrows - vis; if (scroll < 0) scroll = 0;
+        int ph = (int)(u * 5.6f) + row_h * vis + (int)(u * 4.2f), py = (H - ph) / 2;
         static const float bg[4] = { 0.06f, 0.07f, 0.09f, 0.92f }, hi[4] = { 0.80f, 0.12f, 0.16f, 0.95f }, line[4] = { 0.80f, 0.12f, 0.16f, 1 };
-        static const float white[4] = { 1, 1, 1, 1 }, grey[4] = { 0.72f, 0.74f, 0.78f, 1 }, dimc[4] = { 0.5f, 0.52f, 0.56f, 1 };
+        static const float white[4] = { 1, 1, 1, 1 }, grey[4] = { 0.72f, 0.74f, 0.78f, 1 }, dimc[4] = { 0.5f, 0.52f, 0.56f, 1 }, tabbg[4] = { 0.14f, 0.15f, 0.18f, 1 };
         gpu_overlay_rect((float)panel_x, (float)py, (float)panel_w, (float)ph, bg);
         gpu_overlay_rect((float)panel_x, (float)py, (float)panel_w, u * 0.25f, line);
-        gpu_overlay_text(panel_x + u, py + u * 0.9f, u * 1.6f, "Options", white);
-        int y = py + (int)(u * 3.4f);
-        for (int i = 0; i <= NITEMS; i++) {
-            rows_y[i] = y;
-            if (i == sel) gpu_overlay_rect((float)panel_x, (float)y, (float)panel_w, (float)row_h, hi);
-            float ty = y + (row_h - u) / 2.f;
-            if (i == NITEMS) {
-                const char *c = "Close"; gpu_overlay_text(panel_x + (panel_w - gpu_overlay_text_width(u, c)) / 2, ty, u, c, white);
+        gpu_overlay_text(panel_x + u, py + u * 0.8f, u * 1.4f, "Options", white);
+        // tabs
+        tab_y = py + (int)(u * 2.6f); tab_h = (int)(u * 1.5f);
+        {   float tx = (float)panel_x + u * 0.5f, ts = u * 0.85f;
+            for (int t = 0; t < NTAB; t++) {
+                float tw = gpu_overlay_text_width(ts, TABS[t]) + u * 1.2f;
+                tab_x[t] = (int)tx;
+                gpu_overlay_rect(tx, (float)tab_y, tw - u * 0.2f, (float)tab_h, t == tab ? hi : tabbg);
+                gpu_overlay_text(tx + u * 0.5f, tab_y + (tab_h - ts) / 2.f, ts, TABS[t], t == tab ? white : grey);
+                tx += tw;
+            }
+            tab_x[NTAB] = (int)tx;
+            gpu_overlay_text(tx + u * 0.3f, tab_y + (tab_h - u * 0.6f) / 2.f, u * 0.6f, "Q / E   LB / RB", dimc);
+        }
+        list_y = tab_y + tab_h + (int)(u * 0.6f);
+        int y = list_y;
+        col_x[0] = panel_x + (int)(u * 12); col_x[1] = panel_x + (int)(u * 17.5f); col_x[2] = panel_x + (int)(u * 22.5f); col_x[3] = panel_x + panel_w;
+        for (int k = scroll; k < scroll + vis; k++) {
+            int r = rows[k];
+            if (k == sel && !(r < 0 && r > R_RESET)) gpu_overlay_rect((float)panel_x, (float)y, (float)panel_w, (float)row_h, hi);
+            float ty = y + (row_h - u * 0.9f) / 2.f, ts = u * 0.9f;
+            if (r == R_CLOSE || r == R_RESET) {
+                const char *c = r == R_CLOSE ? "Close" : "Reset all controls to default";
+                gpu_overlay_text(panel_x + (panel_w - gpu_overlay_text_width(ts, c)) / 2, ty, ts, c, white);
+            } else if (r < 0) {
+                int b = -1 - r;
+                if (k == sel) { gpu_overlay_rect((float)panel_x, (float)y, (float)panel_w, (float)row_h, tabbg);
+                                gpu_overlay_rect((float)col_x[col], (float)y, (float)(col_x[col + 1] - col_x[col]), (float)row_h, hi); }
+                gpu_overlay_text(panel_x + u, ty, ts, g_bind[b].name, k == sel ? white : grey);
+                const char *v[3] = { key_name(g_bind[b].key), key_name(g_bind[b].key2), bind_pad_name(g_bind[b].pad) };
+                for (int c = 0; c < 3; c++) {
+                    const char *t = (capture && k == sel && c == col) ? "press..." : v[c];
+                    gpu_overlay_text(col_x[c] + u * 0.4f, ty, ts * 0.9f, t, white);
+                }
             } else {
-                gpu_overlay_text(panel_x + u, ty, u, ITEMS[i].label, i == sel ? white : grey);
-                char v[64]; value_text(&ITEMS[i], v, sizeof v);
-                char b[80]; snprintf(b, sizeof b, i == sel ? "<  %s  >" : "%s", v);
-                gpu_overlay_text(panel_x + panel_w - u - gpu_overlay_text_width(u, b), ty, u, b, white);
+                gpu_overlay_text(panel_x + u, ty, ts, ITEMS[r].label, k == sel ? white : grey);
+                char v[64]; value_text(&ITEMS[r], v, sizeof v);
+                char b[80]; snprintf(b, sizeof b, k == sel ? "<  %s  >" : "%s", v);
+                gpu_overlay_text(panel_x + panel_w - u - gpu_overlay_text_width(ts, b), ty, ts, b, white);
             }
             y += row_h;
         }
-        const char *help = sel < NITEMS ? ITEMS[sel].help : "Back to the game.";
+        if (tab == T_REMAP) {   // column titles over the list
+            static const char *ct[3] = { "Key", "Alt key", "Controller" };
+            for (int c = 0; c < 3; c++) gpu_overlay_text(col_x[c] + u * 0.4f, list_y - u * 0.55f, u * 0.5f, ct[c], dimc);
+        }
+        if (scroll > 0) gpu_overlay_text(panel_x + panel_w - u * 1.2f, list_y - u * 0.55f, u * 0.6f, "^", grey);
+        if (scroll + vis < nrows) gpu_overlay_text(panel_x + panel_w - u * 1.2f, y + u * 0.05f, u * 0.6f, "v", grey);
+        int r = rows[sel];
+        const char *help = r == R_CLOSE ? "Back to the game." : r == R_RESET ? "Every key and controller button back to the standard layout."
+                         : r < 0 ? (capture ? (col < 2 ? "Press the new key (Esc: cancel)." : "Press the new controller button or trigger (Esc: cancel).")
+                                            : "Left / right: key, alt key or controller. Enter / A: set a new one. Delete / X or right click: none. The mouse stays fixed (left click A, right click B, middle Swing).")
+                         : ITEMS[r].help;
         {   // help text, wrapped to the panel (two lines at most)
-            char line1[160] = "", line2[160] = ""; const char *w = help; float maxw = panel_w - 2 * u, hs = u * 0.75f;
+            char line1[200] = "", line2[200] = ""; const char *w = help; float maxw = panel_w - 2 * u, hs = u * 0.7f;
             char *cur = line1;
             while (*w) {
                 const char *e = strchr(w, ' '); int len = e ? (int)(e - w) : (int)strlen(w);
-                char t[160]; snprintf(t, sizeof t, "%s%s%.*s", cur, *cur ? " " : "", len, w);
+                char t[200]; snprintf(t, sizeof t, "%s%s%.*s", cur, *cur ? " " : "", len, w);
                 if (*cur && gpu_overlay_text_width(hs, t) > maxw && cur == line1) { cur = line2; snprintf(t, sizeof t, "%.*s", len, w); }
-                snprintf(cur, 160, "%s", t);
+                snprintf(cur, 200, "%s", t);
                 w += len; while (*w == ' ') w++;
             }
-            gpu_overlay_text(panel_x + u, y + u * 0.5f, hs, line1, grey);
-            if (*line2) gpu_overlay_text(panel_x + u, y + u * 1.4f, hs, line2, grey);
+            gpu_overlay_text(panel_x + u, y + u * 0.6f, hs, line1, grey);
+            if (*line2) gpu_overlay_text(panel_x + u, y + u * 1.45f, hs, line2, grey);
         }
-        gpu_overlay_text(panel_x + u, y + u * 2.5f, u * 0.7f, "Arrows / D-pad: choose and change    Enter / A: change    Esc / B: close", dimc);
+        gpu_overlay_text(panel_x + u, y + u * 2.6f, u * 0.62f, "Arrows / D-pad: choose and change    Enter / A: change    Q E / LB RB: tabs    Esc / B: close", dimc);
         gpu_overlay_end();
         SDL_Delay(15);
     }

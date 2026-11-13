@@ -27,9 +27,19 @@ void vr_set_layer(unsigned tex);   // gl.c: this frame's HUD layer (keyed like t
 void vr_input(Input *in);
 
 // Settings (settings.ini, options menu in menu.c)
-typedef struct { int scale, fullscreen, stretch, sharp, vsync, textures, volume, pointer_speed, wide_fill, tex_limit, tex_compress, tex_vram_mb, prompts, pad_style; } Settings;
+typedef struct { int scale, fullscreen, stretch, sharp, vsync, textures, volume, pointer_speed, wide_fill, tex_limit, tex_compress, tex_vram_mb, prompts, pad_style, speaker; } Settings;
 void prompts_update(int force);   // platform.c: pick the button-prompt set (settings + the device used last)
 extern Settings g_cfg;
+
+// Remappable controls (menu.c "Controls" tab; settings.ini key_<id> / key2_<id> / pad_<id>).
+// key / key2: SDL scancodes (0 = none). pad: an SDL controller button, PAD_LT / PAD_RT for the triggers, -1 = none.
+enum { B_A, B_B, B_Z, B_C, B_ONE, B_TWO, B_PLUS, B_MINUS, B_HOME, B_UP, B_DOWN, B_LEFT, B_RIGHT,
+       B_ST_UP, B_ST_DOWN, B_ST_LEFT, B_ST_RIGHT, B_SWING, B_PUSH, B_PULL, B_TW_L, B_TW_R, B_GRAB, B_CENTER, NBIND };
+#define PAD_LT 30
+#define PAD_RT 31
+typedef struct { const char *id, *name; int key, key2, pad, dkey, dkey2, dpad; } Bind;
+extern Bind g_bind[NBIND];
+const char *bind_pad_name(int pad);
 void settings_load(void);
 void settings_save(void);
 void settings_apply(void);

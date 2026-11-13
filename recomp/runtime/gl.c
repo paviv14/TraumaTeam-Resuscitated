@@ -648,6 +648,11 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
     if (n * 7 > cap) { free(buf); cap = n * 7 + 1024; buf = malloc(sizeof *buf * (size_t)cap); }
     float wd = s->vp[0], ht = s->vp[1], zr = s->vp[2], xo = s->vp[3] - 342.f, yo = s->vp[4] - 342.f, fz = s->vp[5];
     int vr_sk = vr_draw_skip(s, v, n, wd, ht, xo, yo); if (vr_sk == 1) return;
+    {   // the 3D Wii Remote of the help animations: only while the Wii Remote's prompts are shown
+        extern u32 g_remo_lo[16], g_remo_hi[16]; extern int g_prompt_set;
+        if (g_prompt_set) for (int m = 0; m < 8; m++) { TexEntry *e = s->tex[m].e; if (!e) continue; u32 a = e->addr & 0x1FFFFFFF;
+            for (int k = 0; k < 16; k++) if (g_remo_hi[k] && a >= g_remo_lo[k] && a < g_remo_hi[k]) return; }
+    }
     if (vr_sk == 2) lay_ensure();
     // ultrawide: 2D (w == 1 everywhere) spanning the game's whole width is stretched to the EFB's
     float xs = 1.f, xm = (float)g_M; int touch_l = 0, touch_r = 0; float tile_w = 0, edge_l = 0, edge_r = 0;

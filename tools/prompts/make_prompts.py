@@ -28,12 +28,12 @@ PLATES = {
     "help_a_b_168x48": [("A", 16, 10, 17, 26, "plate"), ("B", 90, 10, 17, 26, "plate")],
     "help_b_back_96x48": [("B", 21, 10, 17, 26, "plate")],
     "help_200x88": [("stick", 13, 10, 20, 24, "bare"), ("stick", 13, 53, 20, 24, "bare")],
-    "a__56x64": [("A", 15, 9, 18, 26, "plate")], "a_02_56x64": [("A", 15, 9, 18, 26, "plate")],
-    "a_03_56x64": [("A", 15, 9, 18, 26, "plate")], "a_04_56x64": [("A", 15, 9, 18, 26, "plate")],
-    "a_b_88x64": [("A", 15, 9, 18, 26, "plate"), ("B", 48, 9, 18, 26, "plate")],
-    "a_b02_88x64": [("A", 15, 9, 18, 26, "plate"), ("B", 48, 9, 18, 26, "plate")],
-    "a_b03_88x64": [("A", 15, 9, 18, 26, "plate"), ("B", 48, 9, 18, 26, "plate")],
-    "a_b04_88x64": [("A", 15, 9, 18, 26, "plate"), ("B", 48, 9, 18, 26, "plate")],
+    "a__56x64": [("A", 15, 9, 18, 26, "plate")], "a_02_56x64": [("A", 16, 9, 18, 26, "plate")],
+    "a_03_56x64": [("A", 16, 22, 18, 26, "plate")], "a_04_56x64": [("A", 16, 22, 18, 26, "plate")],
+    "a_b_88x64": [("A", 15, 9, 18, 26, "plate"), ("B", 48, 9, 17, 26, "plate")],
+    "a_b02_88x64": [("A", 16, 9, 18, 26, "plate"), ("B", 49, 9, 17, 26, "plate")],
+    "a_b03_88x64": [("A", 16, 22, 18, 26, "plate"), ("B", 49, 22, 17, 26, "plate")],
+    "a_b04_88x64": [("A", 16, 22, 18, 26, "plate"), ("B", 49, 22, 17, 26, "plate")],
 }
 
 # ---------------------------------------------------------------------------------------------- what each button becomes
@@ -185,18 +185,19 @@ def make(orig_img, base_img, slots, style):
         plate, ink = colours(orig, x, y, w, h)
         X, Y, Wd, Hd = round(x * S), round(y * S), round(w * S), round(h * S)
         if kind == "plate":
-            # the plate's inside (keep its rim and rounded corners): refill, then the new symbol
+            # a whole new plate over the old one (its rim and the old symbol showed through a refill): the plate's
+            # own colour, opaque, rounded like the game's, with the new symbol in dark ink
+            pc = plate[:3] + (255,)
+            ink2 = ink if ink[3] else (24, 24, 24, 255)
+            if sum(pc[:3]) < 3 * 110:                   # a dark plate: light symbol instead
+                ink2 = (235, 235, 235, 255)
+            px0, py0 = round((x - 1) * S), round((y - 1) * S); pw, ph = round((w + 2) * S), round((h + 2) * S)
+            plate_im = Image.new("RGBA", (pw, ph), (0, 0, 0, 0))
+            ImageDraw.Draw(plate_im).rounded_rectangle([0, 0, pw - 1, ph - 1], radius=min(pw, ph) * 0.22, fill=pc)
+            out.alpha_composite(plate_im, (px0, py0))
             ix, iy = round((x + 2) * S), round((y + 2) * S); iw, ih = round((w - 4) * S), round((h - 4) * S)
-            fill = Image.new("RGBA", (iw, ih), plate)
-            out.paste(fill, (ix, iy))
-            glyph, cut = draw_symbol(sym[0], sym[1], iw, ih, ink if ink[3] else (255, 255, 255, 255))
-            if ink[3] == 0:                             # see-through symbol: punch it out of the plate
-                region = np.array(out.crop((ix, iy, ix + iw, iy + ih)))
-                a = np.array(glyph)[..., 3].astype(np.int32)
-                region[..., 3] = (region[..., 3] * (255 - a) // 255).astype(np.uint8)
-                out.paste(Image.fromarray(region), (ix, iy))
-            else:
-                out.alpha_composite(glyph, (ix, iy))
+            glyph, cut = draw_symbol(sym[0], sym[1], iw, ih, ink2)
+            out.alpha_composite(glyph, (ix, iy))
         else:
             # a bare icon: clear it (to transparent, or to the surrounding colour) and draw the new one in the plate colour
             ring = np.concatenate([orig[max(0, y - 2), x:x + w], orig[min(orig.shape[0] - 1, y + h + 1), x:x + w]])

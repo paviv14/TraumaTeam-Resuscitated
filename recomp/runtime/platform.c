@@ -278,11 +278,52 @@ static float axis(SDL_GameControllerAxis a) {
     if (v > dz) return (v - dz) / (1 - dz); if (v < -dz) return (v + dz) / (1 - dz); return 0;
 }
 
+#define SC(n) SDL_SCANCODE_##n
+#define CB(n) SDL_CONTROLLER_BUTTON_##n
+// The settled layout (docs/CONTROLS.md); the mouse buttons stay fixed (left = A, right = B, middle = swing).
+Bind g_bind[NBIND] = {
+    [B_A] = { "a", "A", SC(SPACE), SC(RETURN), CB(A) },       [B_B] = { "b", "B", SC(LSHIFT), SC(X), CB(B) },
+    [B_Z] = { "z", "Z (Nunchuk)", SC(E), SC(F), PAD_LT },     [B_C] = { "c", "C (Nunchuk)", SC(Q), SC(C), CB(LEFTSHOULDER) },
+    [B_ONE] = { "one", "1", SC(1), 0, CB(X) },                [B_TWO] = { "two", "2", SC(2), 0, -1 },
+    [B_PLUS] = { "plus", "+", SC(EQUALS), SC(P), CB(START) }, [B_MINUS] = { "minus", "-", SC(MINUS), SC(M), CB(BACK) },
+    [B_HOME] = { "home", "HOME", SC(ESCAPE), SC(H), CB(GUIDE) },
+    [B_UP] = { "up", "D-pad up", SC(UP), 0, CB(DPAD_UP) },    [B_DOWN] = { "down", "D-pad down", SC(DOWN), 0, CB(DPAD_DOWN) },
+    [B_LEFT] = { "left", "D-pad left", SC(LEFT), 0, CB(DPAD_LEFT) }, [B_RIGHT] = { "right", "D-pad right", SC(RIGHT), 0, CB(DPAD_RIGHT) },
+    [B_ST_UP] = { "stick_up", "Stick up", SC(W), 0, -1 },     [B_ST_DOWN] = { "stick_down", "Stick down", SC(S), 0, -1 },
+    [B_ST_LEFT] = { "stick_left", "Stick left", SC(A), 0, -1 }, [B_ST_RIGHT] = { "stick_right", "Stick right", SC(D), 0, -1 },
+    [B_SWING] = { "swing", "Swing / CPR", SC(G), 0, CB(Y) },
+    [B_PUSH] = { "push", "Push (paddles, scope)", SC(R), SC(TAB), -1 }, [B_PULL] = { "pull", "Pull (scope)", SC(V), 0, -1 },
+    [B_TW_L] = { "twist_l", "Twist left", SC(J), 0, CB(LEFTSHOULDER) }, [B_TW_R] = { "twist_r", "Twist right", SC(L), 0, CB(RIGHTSHOULDER) },
+    [B_GRAB] = { "grab", "Grab / shock (B half)", 0, 0, PAD_RT }, [B_CENTER] = { "center", "Centre pointer", 0, 0, CB(RIGHTSHOULDER) },
+};
+#undef SC
+#undef CB
+static int pad_down(int p) {
+    if (!g_pad || p < 0) return 0;
+    if (p == PAD_LT) return axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 0.3f;
+    if (p == PAD_RT) return axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 0.3f;
+    return SDL_GameControllerGetButton(g_pad, (SDL_GameControllerButton)p);
+}
+const char *bind_pad_name(int p) {
+    static const char *x[] = { "A", "B", "X", "Y", "View", "Guide", "Menu", "L-stick", "R-stick", "LB", "RB", "D-up", "D-down", "D-left", "D-right",
+                               "Share", "Paddle 1", "Paddle 2", "Paddle 3", "Paddle 4", "Touchpad" };
+    static const char *ps[] = { "Cross", "Circle", "Square", "Triangle", "Share", "PS", "Options", "L3", "R3", "L1", "R1", "D-up", "D-down", "D-left", "D-right",
+                                "Mute", "Paddle 1", "Paddle 2", "Paddle 3", "Paddle 4", "Touchpad" };
+    int sty = 0;   // 0 Xbox, 1 PS4, 2 PS5
+    { int st = g_cfg.pad_style; if (!st && g_pad) { int t = SDL_GameControllerGetType(g_pad); st = t == SDL_CONTROLLER_TYPE_PS4 ? 2 : t == SDL_CONTROLLER_TYPE_PS5 ? 3 : 1; } sty = st >= 2 ? st - 1 : 0; }
+    if (p < 0) return "-";
+    if (p == PAD_LT) return sty ? "L2" : "LT";
+    if (p == PAD_RT) return sty ? "R2" : "RT";
+    if (p < 21) return sty ? (sty == 2 && p == 4 ? "Create" : ps[p]) : x[p];
+    return "?";
+}
+
 void platform_set_title(const char *t) { if (g_win) SDL_SetWindowTitle(g_win, t); }
 
 // Button prompts: which set of help pictures the game shows (texpack.c prompt sets). Settings: Automatic (the
 // device used last), Wii Remote (the original pictures), Keyboard & mouse, Controller; the controller's style is
 // asked from SDL (PS4 / PS5 / everything else Xbox) unless the settings fix it.
+int g_prompt_set;   // 0 Wii Remote pictures, else another controller's (gl.c hides the 3D Remote then)
 void prompts_update(int force) {
     static int cur = -1;
     int wiimote_native(void);
@@ -303,7 +344,7 @@ void prompts_update(int force) {
     }
     if (set && !texpack_prompt_count(set)) set = set == 4 && texpack_prompt_count(3) ? 3 : 0;   // a missing set: fall back
     if (set == cur && !force) return;
-    cur = set;
+    cur = set; g_prompt_set = set;
     texpack_set_prompts(set);
     video_retarget_textures();
     static const char *nm[] = { "Wii Remote (original)", "keyboard & mouse", "Xbox", "PlayStation 4", "PlayStation 5" };
@@ -356,18 +397,19 @@ void platform_poll(void) {
     g_input.rmb = (mb & SDL_BUTTON_RMASK) != 0;
     g_input.mmb = (mb & SDL_BUTTON_MMASK) != 0;
 #define KEY(n) (k[SDL_SCANCODE_##n] != 0)
-    g_input.up = KEY(UP);       g_input.down = KEY(DOWN);
-    g_input.left = KEY(LEFT);   g_input.right = KEY(RIGHT);
-    g_input.stick_up = KEY(W);  g_input.stick_down = KEY(S);
-    g_input.stick_left = KEY(A); g_input.stick_right = KEY(D);
-    g_input.a = KEY(SPACE) || KEY(RETURN) || KEY(Z);
-    g_input.b = KEY(LSHIFT) || KEY(X) || KEY(BACKSPACE);
-    g_input.plus = KEY(EQUALS) || KEY(KP_PLUS) || KEY(P);
-    g_input.minus = KEY(MINUS) || KEY(KP_MINUS) || KEY(M);
-    g_input.home = KEY(ESCAPE) || KEY(H);
-    g_input.one = KEY(1);  g_input.two = KEY(2);
-    g_input.c = KEY(C) || KEY(Q);  g_input.z = KEY(E) || KEY(F);   // Nunchuk buttons
-    g_input.roll_l = KEY(J);  g_input.roll_r = KEY(L);              // twist the Remote
+#define BK(b) ((g_bind[b].key > 0 && k[g_bind[b].key]) || (g_bind[b].key2 > 0 && k[g_bind[b].key2]))
+    g_input.up = BK(B_UP);       g_input.down = BK(B_DOWN);
+    g_input.left = BK(B_LEFT);   g_input.right = BK(B_RIGHT);
+    g_input.stick_up = BK(B_ST_UP);  g_input.stick_down = BK(B_ST_DOWN);
+    g_input.stick_left = BK(B_ST_LEFT); g_input.stick_right = BK(B_ST_RIGHT);
+    g_input.a = BK(B_A);
+    g_input.b = BK(B_B);
+    g_input.plus = BK(B_PLUS);
+    g_input.minus = BK(B_MINUS);
+    g_input.home = BK(B_HOME);
+    g_input.one = BK(B_ONE);  g_input.two = BK(B_TWO);
+    g_input.c = BK(B_C);  g_input.z = BK(B_Z);       // Nunchuk buttons
+    g_input.roll_l = BK(B_TW_L);  g_input.roll_r = BK(B_TW_R);     // twist the Remote
     // The mouse wheel, by what is being played (CONTROLS.md): the endoscope drives with it (Ctrl + wheel twists the
     // snare); elsewhere it twists the Remote one step a notch, and W + wheel up is the paddles' push.
     extern char g_op_mode[3]; int endo = g_op_mode[0] == 'e' && g_op_mode[1] == 'n';
@@ -377,37 +419,42 @@ void platform_poll(void) {
     if (g_wheel_notch) {
         int up = g_wheel_notch > 0;
         if (endo && !ctrl) { if (up) { g_wheel_push = 5; g_wheel_pull = 0; } else { g_wheel_pull = 5; g_wheel_push = 0; } }
-        else if (!endo && up && KEY(W)) { g_wheel_push = 8; w_push = 1; }
+        else if (!endo && up && BK(B_ST_UP)) { g_wheel_push = 8; w_push = 1; }
         else g_input.twist = g_wheel_notch * 0.2618f;   // 15 degrees a notch (up = clockwise)
         g_wheel_notch = 0;
     }
-    if (!KEY(W)) w_push = 0;
+    if (!BK(B_ST_UP)) w_push = 0;
     if (w_push) g_input.stick_up = 0;
-    g_input.push = KEY(R) || KEY(TAB) || g_wheel_push > 0; if (g_wheel_push > 0) g_wheel_push--;
-    g_input.pull = KEY(V) || g_wheel_pull > 0; if (g_wheel_pull > 0) g_wheel_pull--;
-    g_input.swing = KEY(G) || g_input.mmb;
+    g_input.push = BK(B_PUSH) || g_wheel_push > 0; if (g_wheel_push > 0) g_wheel_push--;
+    g_input.pull = BK(B_PULL) || g_wheel_pull > 0; if (g_wheel_pull > 0) g_wheel_pull--;
+    g_input.swing = BK(B_SWING) || g_input.mmb;
     {   // a grab (left + right click) holds on while left click does: right click may be let go to turn with the wheel
         static int grab; if (g_input.lmb && g_input.rmb) grab = 1; if (!g_input.lmb) grab = 0;
         if (grab) g_input.rmb = 1;
     }
 #undef KEY
+#undef BK
     g_input.nx = g_input.ny = 0; g_input.has_analog = 0;
     if (g_pad) {
 #define PB(b) SDL_GameControllerGetButton(g_pad, SDL_CONTROLLER_BUTTON_##b)
+#define PP(b) pad_down(g_bind[b].pad)
         // the settled layout (docs/CONTROLS.md)
-        int pa = PB(A), lt = axis(SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 0.3f, rt = axis(SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 0.3f;
+        int pa = PP(B_A), lt = PP(B_Z), rt = PP(B_GRAB);
         int op = g_op_mode[0] && !(g_op_mode[0] == 'd' && g_op_mode[1] == 'i');   // in play where the Remote is twisted
         g_input.a |= pa;
-        g_input.b |= PB(B) || (rt && (pa || lt));          // RT is only the B half of A+RT (grab) and LT+RT (defibrillator)
+        g_input.b |= PP(B_B) || (rt && (pa || lt));        // Grab (RT) is only the B half of A+RT (grab) and LT+RT (defibrillator)
         g_input.z |= lt;
-        int lb = PB(LEFTSHOULDER), rb = PB(RIGHTSHOULDER);
-        int twist_pad = op && (!endo || lt);                // LB / RB twist; in the endoscope only while Z is held (LB stays C)
-        if (twist_pad) { g_input.roll_l |= lb; g_input.roll_r |= rb; } else g_input.c |= lb;
-        g_input.up |= PB(DPAD_UP); g_input.down |= PB(DPAD_DOWN); g_input.left |= PB(DPAD_LEFT); g_input.right |= PB(DPAD_RIGHT);
-        g_input.one |= PB(X);
-        g_input.swing |= PB(Y);                             // strike / CPR
-        g_input.push |= PB(LEFTSTICK) && PB(RIGHTSTICK);    // the paddles: both sticks pressed
-        g_input.plus |= PB(START); g_input.minus |= PB(BACK); g_input.home |= PB(GUIDE);
+        int lb = PP(B_TW_L), rb = PP(B_TW_R);
+        int twist_pad = op && (!endo || lt);                // twist buttons; in the endoscope only while Z is held (else C)
+        if (twist_pad) { g_input.roll_l |= lb; g_input.roll_r |= rb; }
+        g_input.c |= PP(B_C) && !(twist_pad && g_bind[B_C].pad == g_bind[B_TW_L].pad);
+        g_input.up |= PP(B_UP); g_input.down |= PP(B_DOWN); g_input.left |= PP(B_LEFT); g_input.right |= PP(B_RIGHT);
+        g_input.one |= PP(B_ONE); g_input.two |= PP(B_TWO);
+        g_input.swing |= PP(B_SWING);                       // strike / CPR
+        g_input.push |= PP(B_PUSH) || (PB(LEFTSTICK) && PB(RIGHTSTICK));   // the paddles: both sticks pressed
+        g_input.pull |= PP(B_PULL);
+        g_input.plus |= PP(B_PLUS); g_input.minus |= PP(B_MINUS); g_input.home |= PP(B_HOME);
+        int center = PP(B_CENTER) && !(twist_pad && g_bind[B_CENTER].pad == g_bind[B_TW_R].pad);
         float lx = axis(SDL_CONTROLLER_AXIS_LEFTX), ly = -axis(SDL_CONTROLLER_AXIS_LEFTY);
         float rx = axis(SDL_CONTROLLER_AXIS_RIGHTX), ry = axis(SDL_CONTROLLER_AXIS_RIGHTY);
         if (pa && (lx || ly)) { rx += lx; ry -= ly; lx = ly = 0; }   // dragging: both sticks move the pointer, the Nunchuk stick rests
@@ -423,9 +470,10 @@ void platform_poll(void) {
             const float speed = speeds[g_cfg.pointer_speed >= 1 && g_cfg.pointer_speed <= 5 ? g_cfg.pointer_speed : 3] / 60.f;
             g_pad_px += rx * (rx < 0 ? -rx : rx) * speed; g_pad_py += ry * (ry < 0 ? -ry : ry) * speed;
         }
-        if (rb && !twist_pad) { g_pad_px = 0.5f; g_pad_py = 0.5f; g_pointer_pad = 1; }
+        if (center) { g_pad_px = 0.5f; g_pad_py = 0.5f; g_pointer_pad = 1; }
         if (g_pad_px < 0) g_pad_px = 0; if (g_pad_px > 1) g_pad_px = 1; if (g_pad_py < 0) g_pad_py = 0; if (g_pad_py > 1) g_pad_py = 1;
 #undef PB
+#undef PP
     }
     if (g_pointer_pad) { g_input.mouse_x = g_pad_px; g_input.mouse_y = g_pad_py; g_input.mouse_in = 1; }
     prompts_update(0);
@@ -433,6 +481,8 @@ void platform_poll(void) {
 }
 
 #else   // headless build
+Bind g_bind[NBIND];
+int g_prompt_set;
 int platform_init(void) { return 0; }
 void platform_present(const u32 *px, int x0, int y0, int w, int h, int stride) { (void)px; (void)x0; (void)y0; (void)w; (void)h; (void)stride; }
 void platform_poll(void) {}
