@@ -147,3 +147,12 @@ static void log_line(const char *what, u32 line, u32 lr) {
 }
 void f_802EF410(CPU *c) { log_line("new channel", c->r[7], c->lr); orig_802EF410(c); }
 void f_80302EA0(CPU *c) { log_line("voice", c->r[4], c->lr); orig_80302EA0(c); }
+void orig_80024690(CPU *c); void orig_802EE990(CPU *c);
+void f_80024690(CPU *c) {   // the game: drop the speakers of Remotes that aren't there from an output mask
+    u32 in = c->r[3], lr = c->lr; orig_80024690(c);
+    static int n; if (n < 60 && (in & ~1u)) { n++; fprintf(stderr, "[speaker] sound for the Remote: lines %X -> %X (from %08X)\n", in, c->r[3], lr); }
+}
+void f_802EE990(CPU *c) {   // BasicSound output lines
+    if (c->r[4] & ~1u) { static int n; if (n++ < 60) fprintf(stderr, "[speaker] sound %08X output lines %X (from %08X)\n", c->r[3], c->r[4], c->lr); }
+    orig_802EE990(c);
+}

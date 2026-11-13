@@ -102,6 +102,7 @@ WRAP = {
     0x80314B80,  # the speaker alarm: Wii Remote speaker sounds to the PC / a real Remote (runtime/speaker.c)
     0x802EF410, 0x80302EA0,  # sound channel output line (logged, speaker.c)
     0x80253D50,  # WPADRead (wiimote.c)
+    0x80024690, 0x802EE990,  # output-line masking by connected Remotes (logged, speaker.c)
     0x80254250, 0x802542A0, 0x80255A70, 0x80255B00, 0x802558A0,  # WPAD speaker: always there on channel 0 (runtime/speaker.c)
     0x80253960,  # WPADControlMotor: rumble to a real Wii Remote and the controller (runtime/motion.c)
 }

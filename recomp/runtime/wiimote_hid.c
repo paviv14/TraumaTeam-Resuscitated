@@ -75,7 +75,8 @@ static void speaker_init(void) {
     u8 en[2] = { 0x14, 0x04 }, mute[2] = { 0x19, 0x04 }, unmute[2] = { 0x19, 0x00 };
     send(en, 2); Sleep(20); send(mute, 2); Sleep(20);
     u8 v = 0x01; write_reg(0xA20009, &v, 1); v = 0x08; write_reg(0xA20001, &v, 1);
-    static const u8 cfg[7] = { 0x00, 0x00, 0xD0, 0x07, 0x40, 0x00, 0x00 };   // ADPCM, the game's own rate value, volume 0x40
+    u8 cfg[7] = { 0x00, 0x00, 0xD0, 0x07, 0x7F, 0x00, 0x00 };   // ADPCM, the game's own rate value, volume (0x40 was quiet; TTPC_SPEAKER_VOL 0-127)
+    { const char *e = getenv("TTPC_SPEAKER_VOL"); if (e) { int v = atoi(e); if (v >= 0 && v <= 127) cfg[4] = (u8)v; } }
     write_reg(0xA20001, cfg, 7);
     v = 0x01; write_reg(0xA20008, &v, 1);
     send(unmute, 2); g_spk_on = 1;
