@@ -105,7 +105,8 @@ static void m4_dir(M4 a, const float p[3], float o[3]) { for (int i = 0; i < 3; 
 
 // ---------------------------------------------------------------- the room (glTF)
 typedef struct { float base[4], emis[3]; GLuint tex, etex; int blend, mask; float cutoff; int screen, name_paper; } Mat;
-typedef struct { GLuint vao; int n; int mat; int grp; int room; } Prim;   // grp: 1 door, 3 mouse (moved at draw time); room: 0 office, 1 morgue
+typedef struct { GLuint vao; int n; int mat; int grp; int room; int lm; } Prim;   // lm: lit from the room's lightmap (else its vertex colours)
+static GLuint g_lm_tex[2]; static GLint u_lm, u_use_lm;   // grp: 1 door, 3 mouse (moved at draw time); room: 0 office, 1 morgue
 static int g_room;                         // which room is shown
 static int g_exam_now, g_morgue_now, g_click_t, g_pending_bed = -1, g_exit_t; static float g_click_px[2]; static float g_exam_fade;
 typedef struct Ray Ray;
@@ -195,6 +196,19 @@ static int load_room(const char *path, int room) {
     if (cgltf_parse_file(&opt, path, &d) != cgltf_result_success || cgltf_load_buffers(&opt, d, path) != cgltf_result_success) {
         fprintf(stderr, "[vr] can't load %s\n", path); if (d) cgltf_free(d); return 0;
     }
+    {   // the room's lightmap: <room>_light.png next to it (baked in Blender; lightmap UVs are the meshes' second UV set)
+        char lp[512]; snprintf(lp, sizeof lp, "%s", path); char *dot = strrchr(lp, '.'); if (dot) snprintf(dot, sizeof lp - (dot - lp), "_light.png");
+        FILE *f = fopen(lp, "rb"); g_lm_tex[room] = 0;
+        if (f) { fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET); u8 *buf = malloc(sz > 0 ? sz : 1);
+            if (fread(buf, 1, sz, f) == (size_t)sz) { int w, h, c; u8 *px = stbi_load_from_memory(buf, (int)sz, &w, &h, &c, 4);
+                if (px) { GLuint t; vGenTextures(1, &t); vBindTexture(GL_TEXTURE_2D, t); vPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                    vTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px); vGenerateMipmap(GL_TEXTURE_2D);
+                    vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                    vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); vTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                    g_lm_tex[room] = t; free(px); fprintf(stderr, "[vr] lightmap %s: %dx%d\n", lp, w, h); }
+                else fprintf(stderr, "[vr] lightmap %s: %s\n", lp, stbi_failure_reason()); }
+            free(buf); fclose(f); }
+    }
     GLuint *img_lin = calloc(d->images_count + 1, sizeof *img_lin);
     int mbase = g_nmat; g_nmat += (int)d->materials_count; g_mat = realloc(g_mat, (g_nmat + 1) * sizeof *g_mat);
     memset(g_mat + mbase, 0, (g_nmat + 1 - mbase) * sizeof *g_mat);
@@ -221,23 +235,25 @@ static int load_room(const char *path, int room) {
         int obj = room != 0 || !nd->name ? -1 : !strncmp(nd->name, "recorder", 8) ? 0 : !strncmp(nd->name, "door_exit", 9) ? 1 : !strncmp(nd->name, "monitor", 7) ? 2 : !strncmp(nd->name, "mouse", 5) ? 3 : !strncmp(nd->name, "secret_book", 11) ? 4 : !strncmp(nd->name, "secret_panel_r", 14) ? 6 : !strncmp(nd->name, "secret_panel", 12) ? 5 : -1;
         for (cgltf_size pi = 0; pi < nd->mesh->primitives_count; pi++) {
             cgltf_primitive *pr = &nd->mesh->primitives[pi];
-            const cgltf_accessor *ap = NULL, *at = NULL, *ac = NULL;
+            const cgltf_accessor *ap = NULL, *at = NULL, *ac = NULL, *al = NULL;
             for (cgltf_size a = 0; a < pr->attributes_count; a++) {
                 cgltf_attribute *A = &pr->attributes[a];
                 if (A->type == cgltf_attribute_type_position) ap = A->data;
                 if (A->type == cgltf_attribute_type_texcoord && A->index == 0) at = A->data;
                 if (A->type == cgltf_attribute_type_color && A->index == 0) ac = A->data;
+                if (A->type == cgltf_attribute_type_texcoord && A->index == 1) al = A->data;
             }
             if (!ap) continue;
-            int nv = (int)ap->count; float *v = malloc(sizeof(float) * 9 * nv);
+            int nv = (int)ap->count; float *v = malloc(sizeof(float) * 11 * nv);
             for (int k = 0; k < nv; k++) {
                 float p[3], q[4] = { 1, 1, 1, 1 }, t[2] = { 0, 0 };
-                cgltf_accessor_read_float(ap, k, p, 3); m4_point(W, p, v + k * 9);
+                cgltf_accessor_read_float(ap, k, p, 3); m4_point(W, p, v + k * 11);
                 if (at) cgltf_accessor_read_float(at, k, t, 2);
                 if (ac) cgltf_accessor_read_float(ac, k, q, ac->type == cgltf_type_vec3 ? 3 : 4);
-                v[k * 9 + 3] = t[0]; v[k * 9 + 4] = t[1]; memcpy(v + k * 9 + 5, q, 16);
+                v[k * 11 + 3] = t[0]; v[k * 11 + 4] = t[1]; memcpy(v + k * 11 + 5, q, 16);
+                if (al) cgltf_accessor_read_float(al, k, v + k * 11 + 9, 2); else v[k * 11 + 9] = v[k * 11 + 10] = 0;
                 if (obj >= 0) for (int c = 0; c < 3; c++) {
-                    float x = v[k * 9 + c];
+                    float x = v[k * 11 + c];
                     if (!g_obj_ok[obj] || x < g_obj_min[obj][c]) g_obj_min[obj][c] = x;
                     if (!g_obj_ok[obj] || x > g_obj_max[obj][c]) g_obj_max[obj][c] = x;
                     if (c == 2) g_obj_ok[obj] = 1;
@@ -249,9 +265,9 @@ static int load_room(const char *path, int room) {
             if (mi >= 0 && g_mat[mi].screen && !g_have_screen) {   // corners from the UVs: (0,0) top-left, u right, v down
                 float best[3] = { 1e9f, 1e9f, 1e9f }; float *P00 = NULL, *P10 = NULL, *P01 = NULL;
                 for (int k = 0; k < nv; k++) {
-                    float u = v[k * 9 + 3], w = v[k * 9 + 4];
+                    float u = v[k * 11 + 3], w = v[k * 11 + 4];
                     float d0 = u * u + w * w, d1 = (u - 1) * (u - 1) + w * w, d2 = u * u + (w - 1) * (w - 1);
-                    if (d0 < best[0]) { best[0] = d0; P00 = v + k * 9; } if (d1 < best[1]) { best[1] = d1; P10 = v + k * 9; } if (d2 < best[2]) { best[2] = d2; P01 = v + k * 9; }
+                    if (d0 < best[0]) { best[0] = d0; P00 = v + k * 11; } if (d1 < best[1]) { best[1] = d1; P10 = v + k * 11; } if (d2 < best[2]) { best[2] = d2; P01 = v + k * 11; }
                 }
                 for (int c = 0; c < 3; c++) { g_scr_o[c] = P00[c]; g_scr_u[c] = P10[c] - P00[c]; g_scr_v[c] = P01[c] - P00[c]; }
                 g_have_screen = 1;
@@ -259,13 +275,14 @@ static int load_room(const char *path, int room) {
                         sqrtf(g_scr_u[0] * g_scr_u[0] + g_scr_u[1] * g_scr_u[1] + g_scr_u[2] * g_scr_u[2]), sqrtf(g_scr_v[0] * g_scr_v[0] + g_scr_v[1] * g_scr_v[1] + g_scr_v[2] * g_scr_v[2]));
             }
             if (g_nprim == cap) { cap = cap ? cap * 2 : 256; g_prim = realloc(g_prim, cap * sizeof *g_prim); }
-            Prim *o = &g_prim[g_nprim++]; o->n = ni_; o->mat = mi; o->grp = obj == 1 || obj == 3 ? obj : obj == 4 ? 6 : obj == 5 ? 5 : obj == 6 ? 7 : 0; o->room = room;
+            Prim *o = &g_prim[g_nprim++]; o->n = ni_; o->mat = mi; o->grp = obj == 1 || obj == 3 ? obj : obj == 4 ? 6 : obj == 5 ? 5 : obj == 6 ? 7 : 0; o->room = room; o->lm = al && g_lm_tex[room];
             GLuint vb, ib; vGenVertexArrays(1, &o->vao); vBindVertexArray(o->vao);
-            vGenBuffers(1, &vb); vBindBuffer(GL_ARRAY_BUFFER, vb); vBufferData(GL_ARRAY_BUFFER, sizeof(float) * 9 * nv, v, GL_STATIC_DRAW);
+            vGenBuffers(1, &vb); vBindBuffer(GL_ARRAY_BUFFER, vb); vBufferData(GL_ARRAY_BUFFER, sizeof(float) * 11 * nv, v, GL_STATIC_DRAW);
             vGenBuffers(1, &ib); vBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ib); vBufferData(GL_ELEMENT_ARRAY_BUFFER, 4 * ni_, ix, GL_STATIC_DRAW);
-            vEnableVertexAttribArray(0); vVertexAttribPointer(0, 3, GL_FLOAT, 0, 36, (void *)0);
-            vEnableVertexAttribArray(1); vVertexAttribPointer(1, 2, GL_FLOAT, 0, 36, (void *)12);
-            vEnableVertexAttribArray(2); vVertexAttribPointer(2, 4, GL_FLOAT, 0, 36, (void *)20);
+            vEnableVertexAttribArray(0); vVertexAttribPointer(0, 3, GL_FLOAT, 0, 44, (void *)0);
+            vEnableVertexAttribArray(1); vVertexAttribPointer(1, 2, GL_FLOAT, 0, 44, (void *)12);
+            vEnableVertexAttribArray(2); vVertexAttribPointer(2, 4, GL_FLOAT, 0, 44, (void *)20);
+            vEnableVertexAttribArray(3); vVertexAttribPointer(3, 2, GL_FLOAT, 0, 44, (void *)36);
             vBindVertexArray(0); free(v); free(ix);
         }
     }
@@ -276,12 +293,12 @@ static int load_room(const char *path, int room) {
 
 static const char *VS =
     "#version 330 core\n"
-    "layout(location=0) in vec3 aP; layout(location=1) in vec2 aT; layout(location=2) in vec4 aC;\n"
-    "uniform mat4 uMVP; uniform mat4 uModel; out vec2 vT; out vec4 vC;\n"
-    "void main() { gl_Position = uMVP * uModel * vec4(aP, 1.0); vT = aT; vC = aC; }\n";
+    "layout(location=0) in vec3 aP; layout(location=1) in vec2 aT; layout(location=2) in vec4 aC; layout(location=3) in vec2 aL;\n"
+    "uniform mat4 uMVP; uniform mat4 uModel; out vec2 vT; out vec4 vC; out vec2 vL;\n"
+    "void main() { gl_Position = uMVP * uModel * vec4(aP, 1.0); vT = aT; vC = aC; vL = aL; }\n";
 static const char *FS =
     "#version 330 core\n"
-    "in vec2 vT; in vec4 vC; uniform vec4 uBase; uniform vec3 uEmis; uniform sampler2D uTex, uETex; uniform vec3 uLit; uniform float uCut;\n"
+    "in vec2 vT; in vec4 vC; in vec2 vL; uniform sampler2D uLM; uniform int uUseLM; uniform vec4 uBase; uniform vec3 uEmis; uniform sampler2D uTex, uETex; uniform vec3 uLit; uniform float uCut;\n"
     "uniform int uScreen; uniform vec2 uScrK; uniform vec4 uCrop; uniform vec4 uHole; out vec4 o;\n"
     "void main() {\n"
     "  if (uScreen == 2) {   // the game's interface over a magenta key (the office painting was left out)\n"
@@ -300,7 +317,8 @@ static const char *FS =
     "  if (uScreen == 3) { vec4 t = texture(uTex, vT) * vC * uBase; o = t; return; }   // the examination tunnel: glowing, see-through\n"
     "  if (uScreen == 4) { vec4 t = texture(uTex, vT); o = vec4(mix(vC.rgb * 2.0, t.rgb, t.a * 0.9), 1.0); return; }   // the body: its marks over the glow\n"
     "  vec4 b = uBase * texture(uTex, vT); if (b.a < uCut) discard;\n"
-    "  vec3 c = b.rgb * (uLit.x > 0.0 ? uLit : vC.rgb * 2.0) + uEmis * texture(uETex, vT).rgb;   // baked light was stored at half range\n"
+    "  vec3 L = uUseLM == 1 ? texture(uLM, vL).rgb * 2.0 : vC.rgb * 2.0;   // the room's lightmap, or light baked into the vertices\n"
+    "  vec3 c = b.rgb * (uLit.x > 0.0 ? uLit : L) + uEmis * texture(uETex, vT).rgb;   // baked light was stored at half range\n"
     "  o = vec4(c, 1.0);\n"
     "}\n";
 static const char *LVS = "#version 330 core\nlayout(location=0) in vec3 aP; uniform mat4 uMVP; void main() { gl_Position = uMVP * vec4(aP, 1.0); }\n";
@@ -347,7 +365,8 @@ static void vr_shot_save(int w, int h) {   // the framebuffer just drawn -> PNG 
 static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
     M4 vp = m4_mul(proj, view);
     vUseProgram(g_prog); vUniformMatrix4fv(u_mvp, 1, 0, vp.m);
-    vUniform1i(u_tex, 0); vUniform1i(u_etex, 1);
+    vUniform1i(u_tex, 0); vUniform1i(u_etex, 1); vUniform1i(u_lm, 2);
+    vActiveTexture(GL_TEXTURE2); vBindTexture(GL_TEXTURE_2D, g_lm_tex[g_room] ? g_lm_tex[g_room] : g_white); vActiveTexture(GL_TEXTURE0);
     // keep the game's shape on the screen: shrink the longer side of the screen's UV range
     float sw = sqrtf(g_scr_u[0] * g_scr_u[0] + g_scr_u[1] * g_scr_u[1] + g_scr_u[2] * g_scr_u[2]);
     float sh = sqrtf(g_scr_v[0] * g_scr_v[0] + g_scr_v[1] * g_scr_v[1] + g_scr_v[2] * g_scr_v[2]);
@@ -390,9 +409,10 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
         vUniform4fv(u_base, 1, m ? m->base : one); vUniform3fv(u_emis, 1, m ? m->emis : zero);
         vUniform1f(u_cut, m && m->mask ? m->cutoff : -1.f);
         { static const float lamp[3] = { 1.08f, 1.02f, 0.92f }, no[3] = { 0, 0, 0 }; vUniform3fv(u_lit, 1, m && m->name_paper ? lamp : no); }   // the report sits in the desk lamp's light
+        vUniform1i(u_use_lm, p->lm);
         vBindVertexArray(p->vao); vDrawElements(GL_TRIANGLES, p->n, GL_UNSIGNED_INT, 0);
     }
-    vUniformMatrix4fv(u_model, 1, 0, ident.m); vUniform4f(u_hole, 2, 2, 2, 2);
+    vUniformMatrix4fv(u_model, 1, 0, ident.m); vUniform4f(u_hole, 2, 2, 2, 2); vUniform1i(u_use_lm, 0);
     { static const float no[3] = { 0, 0, 0 }; vUniform3fv(u_lit, 1, no); }
     if (g_room == 0) creature_draw();   // the little swimmer in the hidden compartment
     if (g_room == 1 && g_exam_fade > 0.01f && g_head_ok) {   // examining: the room fades into a dark void
@@ -599,8 +619,8 @@ static void place_pane(void) {
     g_pan_placed = 1;
 }
 // pointer: where the laser meets the screen (0..1 across the game picture), honouring the letterbox
-static int ray_screen(const Ray *r, int gw, int gh, float *px, float *py, float *dist) {
-    (void)gw; (void)gh; return laser_target(r, px, py, dist) != 0;
+static int ray_screen(const Ray *r, int gw, int gh, float *px, float *py, float *dist) {   // (the book and the dishes count as hits too:
+    (void)gw; (void)gh; return laser_target(r, px, py, dist) != 0 || g_last_kind == 9 || g_last_kind == 10;   // the laser stops on them)
 }
 static int ray_screen_old(const Ray *r, int gw, int gh, float *px, float *py, float *dist) {
     if (!g_have_screen || !r->valid) return 0;
@@ -832,18 +852,21 @@ static void creature_update(void) {   // once per frame: every dish's occupants
         float U[3] = { up[0] * cosf(bank) + S[0] * sinf(bank), up[1] * cosf(bank) + S[1] * sinf(bank), up[2] * cosf(bank) + S[2] * sinf(bank) };
         ci_update(&g_ci[g_ci_of[0][0]], p > 0, 1 + 1.8f * p, C, F, U, 0.03f); }
     // 2: the pair: drift around the dish keeping apart; touched, they spiral into one yin-yang (and back apart next time)
-    if (g_dish_ok[1] && g_nci_of[1] == 2) { static float a, fz; float tg = g_dish_tog[1] ? 1.f : 0.f; int moving = fabsf(fz - tg) > 0.01f;
+    if (g_dish_ok[1] && g_nci_of[1] == 2) { static float a, fz, hd[2], hd_ok; float tg = g_dish_tog[1] ? 1.f : 0.f; int moving = fabsf(fz - tg) > 0.01f;
         fz += (tg > fz ? 1 : -1) * 0.012f; if (fabsf(fz - tg) < 0.012f) fz = tg; a += dt * 0.55f; float f = smooth01(fz);
-        float cx = g_dish[1][0] + 0.009f * cosf(t * 0.45f), cz = g_dish[1][2] + 0.009f * sinf(t * 0.45f), sp = t * 1.7f;
+        float oa = t * 0.35f, cx = g_dish[1][0] + 0.016f * cosf(oa), cz = g_dish[1][2] + 0.016f * sinf(oa), sp = t * 1.4f;   // the fused one drifts round the dish
         for (int k = 0; k < 2; k++) {
             float ang = a + k * ((float)M_PI + 0.5f * sinf(t * 0.6f)), r0 = 0.026f + 0.003f * sinf(t * 0.9f + k);
-            float ux = g_dish[1][0] + r0 * cosf(ang), uz = g_dish[1][2] + r0 * sinf(ang), Fu[3] = { -sinf(ang), 0, cosf(ang) };   // apart
-            float s2 = sp + k * (float)M_PI, fx = cx + 0.0065f * cosf(s2), fz2 = cz + 0.0065f * sinf(s2), Ff[3] = { -sinf(s2), 0, cosf(s2) };   // fused: chasing tails
-            float C[3] = { ux + (fx - ux) * f, g_dish[1][1] + 0.018f + 0.002f * sinf(t * 1.3f + k * 2), uz + (fz2 - uz) * f };
-            float F[3] = { Fu[0] + (Ff[0] - Fu[0]) * f, 0, Fu[2] + (Ff[2] - Fu[2]) * f };
-            if (F[0] * F[0] + F[2] * F[2] < 1e-6f) { F[0] = Ff[0]; F[2] = Ff[2]; }
-            ci_update(&g_ci[g_ci_of[1][k]], moving, moving ? 1.6f : 1.f, C, F, up, 0.026f);
-        } }
+            float ux = g_dish[1][0] + r0 * cosf(ang), uz = g_dish[1][2] + r0 * sinf(ang), hu = atan2f(cosf(ang), -sinf(ang));   // apart: heading along its circle
+            float s2 = sp + k * (float)M_PI, fx = cx + 0.0075f * cosf(s2), fz2 = cz + 0.0075f * sinf(s2), hf = atan2f(cosf(s2), -sinf(s2));   // fused: head to tail
+            float want = hu + (float)remainderf(hf - hu, 2 * (float)M_PI) * f;   // turn the short way round, no flips
+            if (!hd_ok) hd[k] = want;
+            hd[k] += remainderf(want - hd[k], 2 * (float)M_PI) * 0.25f;          // and never snap: ease into the new heading
+            float C[3] = { ux + (fx - ux) * f, g_dish[1][1] + 0.018f + 0.002f * sinf(t * 1.3f + k * 2) + (k ? 0.0025f : -0.0025f) * f, uz + (fz2 - uz) * f };
+            float F[3] = { cosf(hd[k]), 0, sinf(hd[k]) };
+            ci_update(&g_ci[g_ci_of[1][k]], 0, moving ? 1.8f : 1.f, C, F, up, 0.026f);
+        }
+        hd_ok = 1; }
     // 3: the crystal plates: still at the bottom; touched, they glow
     if (g_dish_ok[2] && g_nci_of[2]) { CrInst *I = &g_ci[g_ci_of[2][0]]; CrType *T = &g_ct[I->type];
         float ext = 0; for (int i = 0; i < 3; i++) if (T->hi[i] - T->lo[i] > ext) ext = T->hi[i] - T->lo[i];
@@ -906,7 +929,7 @@ static GLuint g_game_tex; static int g_gw = 640, g_gh = 480;
 static int common_init(void) {
     g_prog = build(VS, FS); g_lineprog = build(LVS, LFS);
     u_mvp = vGetUniformLocation(g_prog, "uMVP"); u_model = vGetUniformLocation(g_prog, "uModel"); u_hole = vGetUniformLocation(g_prog, "uHole"); u_base = vGetUniformLocation(g_prog, "uBase"); u_emis = vGetUniformLocation(g_prog, "uEmis");
-    u_tex = vGetUniformLocation(g_prog, "uTex"); u_etex = vGetUniformLocation(g_prog, "uETex"); u_cut = vGetUniformLocation(g_prog, "uCut"); u_lit = vGetUniformLocation(g_prog, "uLit");
+    u_tex = vGetUniformLocation(g_prog, "uTex"); u_etex = vGetUniformLocation(g_prog, "uETex"); u_cut = vGetUniformLocation(g_prog, "uCut"); u_lit = vGetUniformLocation(g_prog, "uLit"); u_lm = vGetUniformLocation(g_prog, "uLM"); u_use_lm = vGetUniformLocation(g_prog, "uUseLM");
     u_screen = vGetUniformLocation(g_prog, "uScreen"); u_scr_k = vGetUniformLocation(g_prog, "uScrK"); u_crop = vGetUniformLocation(g_prog, "uCrop");
     u_line_mvp = vGetUniformLocation(g_lineprog, "uMVP"); u_line_col = vGetUniformLocation(g_lineprog, "uCol");
     vGenVertexArrays(1, &g_linevao); vGenBuffers(1, &g_linevbo);
