@@ -23,7 +23,8 @@ instead of translating the laser into Wii-pointer clicks on the game's own camer
   * 0x8012FAF0 / 0x80130AF0 - load col/rem scripts (0x8020B384 sprintf -> 0x80076CF0 path ->
     0x80028A60 load) and register per-zone names with 0x8002E0A0(name, 2, handler 0x801302F0, &slot):
     names come from sprintf(obj+532 format, table obj+352[i]); slots at obj+10456 + 8*i.
-    0x801302F0 is the per-zone handler (called when the script/zone fires) - next to read.
+    0x801302F0 turned out to be a completion callback (stores two handles into the slot), so these
+    registrations look like resource-load requests, not the zone hooks.
   * 0x8012F2C0 - per-frame update (called with a counter in r4 that runs 0..15 during the zoom).
 * Script VM entry points used: 0x80028A60 load, 0x80028AD0, 0x8002A260, 0x8002A500 run,
   0x8002E0A0 register named hook, 0x8002E5E0, 0x8002E600 (per step, very frequent).
@@ -35,6 +36,8 @@ instead of translating the laser into Wii-pointer clicks on the game's own camer
   over when the VR layer reports the morgue (TTPC_REPLAY_UNTIL=morgue).
 
 ## Next
-1. Read 0x801302F0 (zone handler) and the hit test that picks the zone from the pointer.
+1. Find the per-frame pointer hit test and the zone -> procedure dispatch: candidates are the calls at the
+   end of the state machine's state 0 (0x80131040, 0x80131A00, 0x801313D0 - which steps the script VM -,
+   0x80131EC0, 0x80131DF0) and 0x80131730 / 0x80131800.
 2. Decode MHD2 fully; check zone outlines against the kensi01 body in 3D.
 3. VR: own hit test on the zones -> call the handler path for that zone; drop the pointer/zoom path.
