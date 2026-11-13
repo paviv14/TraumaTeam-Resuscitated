@@ -240,7 +240,17 @@ int platform_speaker_pcm(const s16 *pcm, int n) {
                 // speaker alone (sent to all four, it came out as vibration), at the device's own 48 kHz
                 SDL_AudioSpec want = { 0 }, have; want.freq = 48000; want.format = AUDIO_S16SYS; want.channels = 4; want.samples = 512;
                 g_ds_audio = SDL_OpenAudioDevice(nm, 0, &want, &have, 0);
-                if (g_ds_audio) { SDL_PauseAudioDevice(g_ds_audio, 0); fprintf(stderr, "[speaker] playing on the DualSense's speaker (%s)\n", nm); }
+                if (g_ds_audio) {
+                    SDL_PauseAudioDevice(g_ds_audio, 0);
+                    // the controller sends its sound to the headphone jack until told otherwise: route it to the
+                    // built-in speaker (output path 3: the right channel to the speaker) at a good volume
+                    u8 fx[47] = { 0 };
+                    fx[0] = 0x20 | 0x80;   // valid: speaker volume, audio control
+                    fx[5] = 0x64;          // speaker volume
+                    fx[7] = 3 << 4;        // audio control: output path = speaker
+                    int r = SDL_GameControllerSendEffect(g_pad, fx, sizeof fx);
+                    fprintf(stderr, "[speaker] playing on the DualSense's speaker (%s)%s\n", nm, r ? " - couldn't switch it to the speaker" : "");
+                }
                 break;
             }
         }

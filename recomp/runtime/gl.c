@@ -646,7 +646,7 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
     if (vr_sk == 2) lay_ensure();
     // ultrawide: 2D (w == 1 everywhere) spanning the game's whole width is stretched to the EFB's
     float xs = 1.f, xm = (float)g_M; int touch_l = 0, touch_r = 0; float tile_w = 0, edge_l = 0, edge_r = 0;
-    int comic = 0; float cy0 = 0, cy1 = 0;   // a comic page's corner panel (see below)
+    int comic = 0, comic_l = 0; float cy0 = 0, cy1 = 0;   // a comic page's corner panel (see below)
     if (g_M) {
         int flat = 1; float mn = 1e9f, mx = -1e9f, hy0 = 1e9f, hy1 = -1e9f;
         for (int i = 0; i < n && flat; i++) {
@@ -680,13 +680,11 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
         // (a strip to mirror is a border: taller than a pointer or an icon pushed against the edge - those mirrored
         // into the side showed a second, flipped pointer)
         // A comic page's corner panels (the frame of panels around the office, Naomi's room, the story pages):
-        // a strip at the top or bottom reaching a side edge. Mirrored outwards they carry the frame on across the
-        // sides, and a top one also lends the sides a panel of their own (below).
+        // a strip at the top reaching a side edge lends that side a tall panel of its own (below).
         else if (flat && g_cfg.wide_fill && (mn <= 1.f || mx >= 639.f) && mx - mn >= 120.f && mx - mn <= 400.f &&
                  hy1 - hy0 >= 24.f && hy1 - hy0 <= 200.f && (hy0 <= 2.f || hy1 >= 476.f) && !tile_w &&
                  comic_steady(s, mn, mx, hy0, hy1)) {
-            comic = hy0 <= 2.f; cy0 = hy0; cy1 = hy1;
-            touch_l = mn <= 1.f; touch_r = !touch_l && mx >= 639.f; edge_l = mn + g_M; edge_r = mx + g_M; }
+            comic = hy0 <= 2.f; cy0 = hy0; cy1 = hy1; comic_l = mn <= 1.f; }
         else if (flat && g_cfg.wide_fill && (tile_w > 0 || (mx - mn <= 120.f && hy1 - hy0 >= 96.f))) {
             touch_l = mn <= 0.5f && mn + g_M > 0.5f; touch_r = mx >= 639.5f && mx + g_M < g_NW - 0.5f; edge_l = mn + g_M; edge_r = mx + g_M; }
     }
@@ -723,15 +721,17 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
             if (touch_l) m += mirror_side(&buf[i], &buf[m], edge_l, 2 * edge_l, edge_l, half);
             if (touch_r) m += mirror_side(&buf[i], &buf[m], 2 * edge_r - g_NW, edge_r, edge_r, half);
         }
-        if (comic && n >= 6 && g_M >= 24) {
-            // the side's own panel: the same picture turned on its side, standing in the side between the top
-            // and bottom rows of panels
+        n = m;
+    }
+    if (comic && n >= 6 && g_M >= 24) {   // (one tall panel down each side, the page's own corner art turned upright)
+        int m = n;
             float u0[8], u1[8], v0[8], v1[8];
             for (int k = 0; k < 8; k++) { u0[k] = v0[k] = 1e9f; u1[k] = v1[k] = -1e9f;
                 for (int i = 0; i < 6; i++) { float a = buf[i].t[k][0], b = buf[i].t[k][1];
                     if (a < u0[k]) u0[k] = a; if (a > u1[k]) u1[k] = a; if (b < v0[k]) v0[k] = b; if (b > v1[k]) v1[k] = b; } }
-            float gap = 8.f, X0 = touch_l ? gap : g_NW - g_M + gap, X1 = touch_l ? g_M - gap : g_NW - gap;
-            float Y0 = cy1 + gap, Y1 = 480.f - (cy1 - cy0) - gap;
+            float gap = 6.f, X0 = comic_l ? gap : g_NW - g_M + gap, X1 = comic_l ? g_M - 2 * gap : g_NW - gap;
+            if (!comic_l) X0 += gap;
+            float Y0 = gap, Y1 = 480.f - gap;
             if (Y1 - Y0 > 40.f) {
                 // corners of the side panel: (X0,Y0) (X1,Y0) (X1,Y1) (X0,Y1), the picture turned a quarter
                 float X[4] = { X0, X1, X1, X0 }, Y[4] = { Y0, Y0, Y1, Y1 };
@@ -740,11 +740,10 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
                     g.pos[0] = X[c] / half - 1.f; g.pos[1] = 1.f - Y[c] / 264.f; g.pos[3] = 1.f;
                     for (int k = 0; k < 8; k++) {   // x along the side panel = the picture's v, y = its u
                         float fx = c == 1 || c == 2 ? 1.f : 0.f, fy = c >= 2 ? 1.f : 0.f;
-                        g.t[k][0] = u0[k] + (u1[k] - u0[k]) * (touch_l ? fy : 1.f - fy);
-                        g.t[k][1] = v0[k] + (v1[k] - v0[k]) * (touch_l ? 1.f - fx : fx); }
+                        g.t[k][0] = u0[k] + (u1[k] - u0[k]) * (comic_l ? fy : 1.f - fy);
+                        g.t[k][1] = v0[k] + (v1[k] - v0[k]) * (comic_l ? 1.f - fx : fx); }
                     buf[m++] = g; }
             }
-        }
         n = m;
     }
     glBindFramebuffer_(GL_FRAMEBUFFER, vr_sk == 2 && g_lay_fbo ? g_lay_fbo : g_fbo);
