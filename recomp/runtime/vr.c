@@ -677,14 +677,14 @@ static void creature_update(void) {   // once per frame: animate, skin, place on
         M4 a, b; memcpy(a.m, w, 64); memcpy(b.m, ib, 64); M4 r = m4_mul(a, b); memcpy(J[j], r.m, 64);
     }
     // the circle: head first along it, its face (the side with the orb) toward the open niche above, banking inward
-    float a = g_cr_orbit, rad = 0.085f + 0.02f * pan * sinf(g_cr_clock * 9.f), bob = (0.012f + 0.012f * pan) * sinf(g_cr_clock * 2.7f);
-    float c[3] = { g_cdish[0] + rad * cosf(a), g_cdish[1] + 0.13f + bob, g_cdish[2] + rad * sinf(a) };
+    float a = g_cr_orbit, rad = 0.022f + 0.006f * pan * sinf(g_cr_clock * 9.f), bob = (0.002f + 0.002f * pan) * sinf(g_cr_clock * 2.7f);
+    float c[3] = { g_cdish[0] + rad * cosf(a), g_cdish[1] + 0.008f + bob, g_cdish[2] + rad * sinf(a) };
     float f[3] = { -sinf(a), 0, cosf(a) }, up[3] = { 0, 1, 0 };
     float sd[3] = { f[1] * up[2] - f[2] * up[1], f[2] * up[0] - f[0] * up[2], f[0] * up[1] - f[1] * up[0] };
     float zm[3] = { sd[1] * f[2] - sd[2] * f[1], sd[2] * f[0] - sd[0] * f[2], sd[0] * f[1] - sd[1] * f[0] };
     float bank = 0.35f + 0.35f * pan + 0.15f * pan * sinf(g_cr_clock * 13.f), cb = cosf(bank), sb = sinf(bank), s2[3], z2[3];
     for (int i = 0; i < 3; i++) { s2[i] = sd[i] * cb + zm[i] * sb; z2[i] = -sd[i] * sb + zm[i] * cb; }
-    const float sc = 0.14f / 1.7f, oy = -0.85f;   // ~14 cm long; the body's middle on the circle
+    const float sc = 0.03f / 1.7f, oy = -0.85f;   // ~3 cm long: he lives inside the dish
     const float Ld[3] = { 0.2f, 0.9f, 0.3f };
     for (int k = 0; k < g_cr_nv; k++) {
         float p[3] = { 0, 0, 0 }, n[3] = { 0, 0, 0 }; const float *P = g_cr_p + k * 3, *N = g_cr_n + k * 3;
