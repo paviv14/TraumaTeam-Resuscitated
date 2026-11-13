@@ -8,11 +8,12 @@ SDL ?= 1
 ifeq ($(TARGET),windows)
 CC := x86_64-w64-mingw32-gcc
 BUILD ?= ../build-win
-EXE ?= $(BUILD)/ttpc.exe
+EXE ?= $(BUILD)/Resuscitated.exe
 SDL_DIR ?= ../third_party/SDL2-win
 SDL_CFLAGS ?= -I$(SDL_DIR)/include -DSDL_MAIN_HANDLED
 SDL_LIBS ?= -L$(SDL_DIR)/lib -lSDL2
-LDFLAGS += -static-libgcc -Wl,--stack,16777216
+LDFLAGS += -static-libgcc -Wl,--stack,16777216 -mwindows   # a windowed program: no console (logs to ttpc.log)
+WINRES := $(BUILD)/resuscitated_res.o
 XR_DIR ?= ../third_party/openxr
 RTFLAGS += -I$(XR_DIR)
 LIBS += $(XR_DIR)/libopenxr_loader.dll.a -lopengl32
@@ -39,8 +40,12 @@ RUNTIME := port runtime hle ios threads dsp ax gx disc video gl texpack platform
 GEN := $(wildcard ../generated/*.c)
 OBJ := $(patsubst ../generated/%.c,$(BUILD)/%.o,$(GEN)) $(patsubst %,$(BUILD)/rt_%.o,$(RUNTIME))
 
-$(EXE): $(OBJ)
+$(EXE): $(OBJ) $(WINRES)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LIBS) -lm
+
+$(BUILD)/resuscitated_res.o: res/resuscitated.rc res/resuscitated.ico
+	@mkdir -p $(BUILD)
+	x86_64-w64-mingw32-windres -I res res/resuscitated.rc -O coff -o $@
 
 $(BUILD)/%.o: ../generated/%.c runtime/cpu.h
 	@mkdir -p $(BUILD)

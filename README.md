@@ -23,7 +23,7 @@ Filesystem > Extract Entire Disc), Python 3.9+, gcc (Linux) or mingw-w64 (Window
 python -m recomp.lift <disc>/DATA/sys/main.dol <dtk>/config/symbols.txt generated   # your disc's code -> C
 cd recomp
 make -f build.mk -j                     # Linux: ../build/ttpc
-make -f build.mk -j TARGET=windows      # Windows: ../build-win/ttpc.exe (needs third_party/, see docs/RECOMP.md)
+make -f build.mk -j TARGET=windows      # Windows: ../build-win/Resuscitated.exe (needs third_party/, see docs/RECOMP.md)
 ```
 
 Run it next to your extracted disc (it looks for `disc/DATA`, `../disc/DATA`, ...; or set `TTPC_DISC`).

@@ -114,6 +114,7 @@ int platform_init(void) {
     if (getenv("TTPC_HEADLESS")) return 0;
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
     SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");   // full-resolution window with Windows display scaling
+    SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON, "1"); SDL_SetHint(SDL_HINT_WINDOWS_INTRESOURCE_ICON_SMALL, "1");   // the exe's icon (resuscitated.rc)
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
         fprintf(stderr, "[platform] no display (%s): running headless\n", SDL_GetError());
         return 0;
@@ -139,7 +140,7 @@ int platform_init(void) {
             SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
             SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
             SDL_GL_SetAttribute(SDL_GL_ACCELERATED_VISUAL, 1);   // never the Windows generic (GDI) OpenGL 1.1
-            g_win = SDL_CreateWindow("Trauma Team (native)", SDL_WINDOWPOS_CENTERED_DISPLAY(disp), SDL_WINDOWPOS_CENTERED_DISPLAY(disp),
+            g_win = SDL_CreateWindow("Trauma Team Resuscitated", SDL_WINDOWPOS_CENTERED_DISPLAY(disp), SDL_WINDOWPOS_CENTERED_DISPLAY(disp),
                                      win_w, win_h, SDL_WINDOW_RESIZABLE | SDL_WINDOW_OPENGL | SDL_WINDOW_ALLOW_HIGHDPI);
             if (!g_win) fprintf(stderr, "[platform] window: %s\n", SDL_GetError());
             else if (!(g_glctx = SDL_GL_CreateContext(g_win))) fprintf(stderr, "[platform] OpenGL context: %s\n", SDL_GetError());
@@ -169,7 +170,7 @@ int platform_init(void) {
             "Could not start GPU rendering (OpenGL 3.3), so the game will run with the slow software renderer.\n\n"
             "Restarting the game usually fixes this. If it keeps happening, update the graphics driver.", NULL);
     }
-    g_win = SDL_CreateWindow("Trauma Team (native, software)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+    g_win = SDL_CreateWindow("Trauma Team Resuscitated (software renderer)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                              640 * zoom, 480 * zoom, SDL_WINDOW_RESIZABLE);
     if (!g_win) { fprintf(stderr, "[platform] window: %s\n", SDL_GetError()); return 0; }
     g_ren = SDL_CreateRenderer(g_win, -1, SDL_RENDERER_ACCELERATED);

@@ -1137,7 +1137,7 @@ static void perf_title(void) {
     double secs = (now - t_last) / 1e9, fps = frames / secs;
     double gx = (g_gx_ns - gx_last) / 1e6 / (frames ? frames : 1);
     double frame_ms = 1000.0 / (fps > 0 ? fps : 1);
-    char b[160]; snprintf(b, sizeof b, "Trauma Team - %.0f fps | frame %.1f ms: graphics %.1f ms, game %.1f ms", fps, frame_ms, gx, frame_ms - gx > 0 ? frame_ms - gx : 0);
+    char b[160]; snprintf(b, sizeof b, "Trauma Team Resuscitated - %.0f fps | frame %.1f ms: graphics %.1f ms, game %.1f ms", fps, frame_ms, gx, frame_ms - gx > 0 ? frame_ms - gx : 0);
     platform_set_title(b);
     static int log = -1; if (log < 0) log = getenv("TTPC_PERFLOG") != NULL;
     if (log) { double fr = frames ? frames : 1;

@@ -38,9 +38,11 @@ static void dump_trace(void) {
 }
 void rt_dump_threads(void);
 static void dump(CPU *c);
+void launcher_error(const char *msg);
 static void on_crash(void) {
     fprintf(stderr, "CRASH (host stack overflow or bad pointer)\n");
     dump(&g_cpu); dump_trace(); report_seen(); rt_dump_threads();
+    launcher_error("Trauma Team Resuscitated stopped with an error.\n\nThe details are in ttpc.log next to Resuscitated.exe - please include it when you report the problem.");
 }
 void gx_dump(void); void video_dump_stats(void);
 u32 g_wp = 0xFFFFFFFFu, g_wp_len = 0;   // TTPC_WP=<phys addr>[,<len>]
@@ -324,6 +326,65 @@ static void setenv_portable(const char *k, const char *v) {
 #endif
 }
 
+/* ---------------------------------------------------------------- the launcher (what Play.bat used to do)
+   Resuscitated.exe is started by a double click: it works from its own folder, writes its log to ttpc.log there
+   (the previous one kept as ttpc.prev.log), records the session's input with a copy of the save it started from
+   (recordings/), and picks up the texture pack in ../../textures/upscaled. Anything already set (by a .bat, or
+   stderr already redirected) is left alone. Errors that stop it show a message box. */
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
+#include <dirent.h>
+#include <sys/stat.h>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+void launcher_error(const char *msg) {
+    fprintf(stderr, "%s\n", msg);
+#ifdef _WIN32
+    MessageBoxA(NULL, msg, "Trauma Team Resuscitated", MB_OK | MB_ICONERROR);
+#endif
+}
+static void copy_tree(const char *from, const char *to) {   // a mirror of the save folder (small)
+    host_mkdir(to); DIR *d = opendir(from); if (!d) return;
+    struct dirent *e; char a[1024], b[1024];
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        snprintf(a, sizeof a, "%s/%s", from, e->d_name); snprintf(b, sizeof b, "%s/%s", to, e->d_name);
+        struct stat st; if (stat(a, &st)) continue;
+        if (S_ISDIR(st.st_mode)) { copy_tree(a, b); continue; }
+        FILE *fi = fopen(a, "rb"), *fo = fi ? fopen(b, "wb") : NULL; char buf[65536]; size_t n;
+        if (fi && fo) while ((n = fread(buf, 1, sizeof buf, fi)) > 0) fwrite(buf, 1, n, fo);
+        if (fi) fclose(fi); if (fo) fclose(fo);
+    }
+    closedir(d);
+}
+static void launcher_setup(void) {
+#ifdef _WIN32
+    {   char exe[MAX_PATH]; DWORD n = GetModuleFileNameA(NULL, exe, sizeof exe);   // work from the exe's folder
+        if (n && n < sizeof exe) { char *sl = strrchr(exe, '\\'); if (sl) { *sl = 0; SetCurrentDirectoryA(exe); } } }
+    HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+    int redirected = h && h != INVALID_HANDLE_VALUE && GetFileType(h) != FILE_TYPE_UNKNOWN;
+#else
+    int redirected = 1;
+#endif
+    if (!redirected) {   // started by a double click: our own log
+        remove("ttpc.prev.log"); rename("ttpc.log", "ttpc.prev.log");
+        if (!freopen("ttpc.log", "w", stderr)) {}
+        setvbuf(stderr, NULL, _IONBF, 0);
+    }
+#ifdef _OPENMP
+    if (!getenv("OMP_NUM_THREADS")) { int n = omp_get_num_procs(); omp_set_num_threads(n > 8 ? 8 : n); }
+#endif
+    if (!getenv("TTPC_PERFLOG")) setenv_portable("TTPC_PERFLOG", "1");
+    if (!getenv("TTPC_RECORD") && !getenv("TTPC_REPLAY")) {
+        setenv_portable("TTPC_RECORD", "auto");
+        struct stat st; if (!stat("nand", &st)) { host_mkdir("recordings"); copy_tree("nand", "recordings/session_start_nand"); }
+    }
+    if (!getenv("TTPC_TEXTURES")) { struct stat st; if (!stat("../../textures/upscaled", &st)) setenv_portable("TTPC_TEXTURES", "../../textures/upscaled"); }
+}
+
 /* --mission su110 (or TTPC_MISSION): go straight to one mission's gameplay part for testing.
    The game boots as usual, switches to the developer STAGE SELECT (sequence 32) and the
    menu is driven by scripted presses: mode, chapter, story, then the gameplay item.
@@ -354,8 +415,19 @@ static void mission_setup(const char *m) {
 }
 
 int main(int argc, char **argv) {
-    if (argc > 1 && !strcmp(argv[argc - 1], "--prepare-textures")) { int texpack_prepare(void); return texpack_prepare(); }
+    if (argc > 1 && !strcmp(argv[argc - 1], "--prepare-textures")) {   // a console job (PrepareTextures.bat)
+#ifdef _WIN32
+        if (AttachConsole(ATTACH_PARENT_PROCESS)) {   // the exe is a windowed program: write into the .bat's console
+            HANDLE ho = GetStdHandle(STD_OUTPUT_HANDLE);
+            if (!ho || GetFileType(ho) == FILE_TYPE_UNKNOWN) { if (!freopen("CONOUT$", "w", stdout)) {} }
+            HANDLE he = GetStdHandle(STD_ERROR_HANDLE);
+            if (!he || GetFileType(he) == FILE_TYPE_UNKNOWN) { if (!freopen("CONOUT$", "w", stderr)) {} }
+        }
+#endif
+        int texpack_prepare(void); return texpack_prepare();
+    }
     setvbuf(stderr, NULL, _IONBF, 0);   // the log survives a crash or a forced exit (Windows buffers redirected stderr)
+    launcher_setup();
     for (int k = 1; k < argc; k++) if (!strcmp(argv[k], "--mission") && k + 1 < argc) {
         mission_setup(argv[k + 1]);
         for (int j = k; j + 2 <= argc; j++) argv[j] = argv[j + 2];
@@ -372,8 +444,10 @@ int main(int argc, char **argv) {
     if (argc > 1) snprintf(dolpath, sizeof dolpath, "%s", argv[1]);
     else snprintf(dolpath, sizeof dolpath, "%s/sys/main.dol", disc);
     if (!file_exists(dolpath)) {
-        fprintf(stderr, "Cannot find the game's main.dol (looked at %s).\n"
-                        "Set TTPC_DISC to the extracted disc folder (the one containing sys/ and files/).\n", dolpath);
+        char msg[1600]; snprintf(msg, sizeof msg, "Cannot find the game's main.dol (looked at %s).\n\n"
+                        "Put your extracted disc in a folder called disc next to Resuscitated.exe (disc\\DATA\\sys\\main.dol), "
+                        "or set TTPC_DISC to the extracted disc folder (the one containing sys and files).", dolpath);
+        launcher_error(msg);
         return 1;
     }
     g_mem = host_alloc_guest(0x14000000);
