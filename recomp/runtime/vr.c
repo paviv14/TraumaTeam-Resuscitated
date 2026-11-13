@@ -229,7 +229,7 @@ static int load_room(const char *path, int room) {
         if (!nd->mesh) {   // the morgue's bed markers: where the body and the personal effects are laid
             int k = !nd->name ? -1 : !strcmp(nd->name, "bed_body_spot") ? 0 : !strcmp(nd->name, "bed_effects_spot") ? 1 : -1;
             if (k >= 0) { memcpy(g_spot[k], W.m + 12, 12); g_spot_ok[k] = 1; }
-            if (room == 0 && nd->name && !strncmp(nd->name, "cdish_", 6)) { int d = atoi(nd->name + 6); if (d >= 0 && d < 7) { memcpy(g_dish[d], W.m + 12, 12); g_dish_ok[d] = 1; } }
+            if (room == 0 && nd->name && !strncmp(nd->name, "cdish_", 6)) { int d = 6 - atoi(nd->name + 6); if (d >= 0 && d < 7)   /* the markers count from the other end: first creature on the left */ { memcpy(g_dish[d], W.m + 12, 12); g_dish_ok[d] = 1; } }
             continue;
         }
         int obj = room != 0 || !nd->name ? -1 : !strncmp(nd->name, "recorder", 8) ? 0 : !strncmp(nd->name, "door_exit", 9) ? 1 : !strncmp(nd->name, "monitor", 7) ? 2 : !strncmp(nd->name, "mouse", 5) ? 3 : !strncmp(nd->name, "secret_book", 11) ? 4 : !strncmp(nd->name, "secret_panel_r", 14) ? 6 : !strncmp(nd->name, "secret_panel", 12) ? 5 : -1;
