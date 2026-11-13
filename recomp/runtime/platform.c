@@ -258,7 +258,7 @@ int platform_speaker_pcm(const s16 *pcm, int n) {
     if (g_ds_audio && SDL_GetQueuedAudioSize(g_ds_audio) < 48000 * 8 / 4) {
         static s16 out[40 * 8 * 4 * 4]; static s16 prev; int m = 0;
         for (int i = 0; i < n && i < 160; i++) for (int k = 0; k < 8; k++) {
-            int v = (prev + (pcm[i] - prev) * (k + 1) / 8) * 2; if (v > 32767) v = 32767; if (v < -32768) v = -32768;   // 6 -> 48 kHz, louder
+            int v = (prev + (pcm[i] - prev) * (k + 1) / 8) * 4;   // the controller's speaker is quiet if (v > 32767) v = 32767; if (v < -32768) v = -32768;   // 6 -> 48 kHz
             out[m++] = (s16)v; out[m++] = (s16)v; out[m++] = 0; out[m++] = 0;
             if (k == 7) prev = pcm[i];
         }
