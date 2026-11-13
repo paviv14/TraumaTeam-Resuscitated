@@ -254,6 +254,16 @@ void f_802533C0(CPU *c) {
     else { if (type) W32(type, 0xFD); c->r[3] = (u32)-1; }
 }
 
+// WPADRead(chan, WPADStatus *st): the core status (42 bytes: buttons, acc, 4 IR dots, dev, err). The game reads
+// it to decide which Remotes may play speaker sounds (err must be 0) - with WPAD's own copy empty, every sound
+// meant for the Remote's speaker was taken off it (auscultation, Naomi's calls).
+void f_80253D50(CPU *c) {
+    u32 chan = c->r[3], st = c->r[4];
+    for (int i = 0; i < 42; i++) W8(st + i, 0);
+    if (chan == 0) { W16(st, (u16)g_hold); W8(st + 40, 1); W8(st + 41, 0); }
+    else { W8(st + 40, 0xFD); W8(st + 41, 0xFF); }
+}
+
 // KPADReadEx(chan, KPADStatus *samples, u32 max, void *uwpad, s32 *err) -> number of samples.
 void f_8025F830(CPU *c) {
     u32 chan = c->r[3], buf = c->r[4], max = c->r[5], err = c->r[7];
