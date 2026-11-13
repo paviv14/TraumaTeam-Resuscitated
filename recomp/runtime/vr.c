@@ -171,7 +171,7 @@ typedef struct { float x0, y0, x1, y1; } Rect;
 static Rect g_ui[2][96]; static int g_nui[2], g_uicur;
 static int g_active, g_preview;
 static M4 g_world_from_stage;   // where the play area sits in the room
-static float g_seat[3] = { -0.55f, 0.0f, -1.62f };   // Naomi's chair (glTF frame), facing -x (the desk)
+static float g_seat[3] = { -1.55f, 0.0f, -1.62f };   // Naomi's chair (glTF frame), facing -x (the desk)
 static float g_turn = (float)(M_PI / 2);   // play area yaw (stage -z -> room -x)
 static int g_arrive;   // a room change: put the player at that room's arrival spot
 
@@ -362,7 +362,7 @@ static void draw_scene(M4 proj, M4 view, GLuint game_tex, int gw, int gh) {
     {   // the compartment: the wall panel steps back into the wall, then slides away along it; the book tips out
         float t = g_niche_t, in_ = t < 0.25f ? t / 0.25f : 1.f, sl = t > 0.25f ? (t - 0.25f) / 0.75f : 0.f;
         sl = sl * sl * (3 - 2 * sl);
-        panel_m.m[12] = panel_r_m.m[12] = -0.025f * in_; panel_m.m[14] = 0.56f * sl; panel_r_m.m[14] = -0.56f * sl;   // the two halves part
+        panel_m.m[12] = panel_r_m.m[12] = -0.025f * in_; panel_m.m[14] = -0.56f * sl; panel_r_m.m[14] = 0.56f * sl;   // (glTF z runs opposite to the room's)   // the two halves part
         if (g_obj_ok[4]) {
             float a = 0.42f * (t < 0.3f ? t / 0.3f : 1.f), c = cosf(a), sn = sinf(a);
             float py = g_obj_min[4][1], pz = g_obj_max[4][2];   // pivot: the book's bottom front edge
@@ -1676,7 +1676,7 @@ int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
     {   static int lr = -1; if (g_room != lr) {   // arriving in a room: the morgue starts by the door you came in, facing the beds
             int first = lr < 0; lr = g_room; fprintf(stderr, "[vr] room: %s\n", g_room ? "morgue" : "office");
             if (g_room == 1) { g_seat[0] = -0.1f; g_seat[1] = 0; g_seat[2] = -0.45f; g_turn = 0; }
-            else { g_seat[0] = -0.55f; g_seat[1] = 0; g_seat[2] = -1.62f; g_turn = (float)(M_PI / 2); }
+            else { g_seat[0] = -1.55f; g_seat[1] = 0; g_seat[2] = -1.62f; g_turn = (float)(M_PI / 2); }
             if (!first) { g_world_from_stage = m4_yaw(g_turn, g_seat[0], g_seat[1], g_seat[2]); g_arrive = 1; }
         } }
     {   static int le = -1; if (g_exam_now != le) { le = g_exam_now; if (g_exam_now) fprintf(stderr, "[vr] examining the %s\n", g_exam_now == 1 ? "body" : "personal effects"); } }
