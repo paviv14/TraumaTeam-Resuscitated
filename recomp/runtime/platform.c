@@ -267,6 +267,7 @@ void platform_poll(void) {
     g_input.home = KEY(ESCAPE) || KEY(H);
     g_input.one = KEY(1);  g_input.two = KEY(2);
     g_input.c = KEY(C) || KEY(Q);  g_input.z = KEY(E) || KEY(F);   // Nunchuk buttons
+    g_input.roll_l = KEY(J);  g_input.roll_r = KEY(L);              // twist the Remote
     g_input.push = KEY(R) || KEY(TAB) || g_wheel_push > 0; if (g_wheel_push > 0) g_wheel_push--;
     g_input.pull = KEY(V) || g_wheel_pull > 0; if (g_wheel_pull > 0) g_wheel_pull--;
     g_input.swing = KEY(G) || g_input.mmb;

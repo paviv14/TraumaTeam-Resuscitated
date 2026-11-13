@@ -11,6 +11,7 @@ typedef struct {
     float nx, ny; int has_analog;                                         // Nunchuk stick (analog, pad)
     int push, pull;           // move the Remote toward / away from the screen (wheel, R / V, right-stick click)
     int swing;                // swing the Remote (and Nunchuk) down hard: CPR compressions (middle mouse, G, left-stick click)
+    int roll_l, roll_r;       // twist the Remote left / right about its pointing axis (J / L): bandages, turning tools
 } Input;
 extern Input g_input;
 

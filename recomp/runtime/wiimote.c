@@ -22,6 +22,7 @@
 // Push the Remote toward the screen (endoscope etc.): mouse wheel up / R / Tab, or the right-stick click;
 // pull it back: mouse wheel down / V.
 // Swing both down hard (CPR compressions): middle mouse button / G, or the left-stick click.
+// Twist the Remote left / right (bandages, turning tools): hold J / L.
 //
 // TTPC_INPUT scripts presses for headless tests: "600+10:A;900+5:A,B;1200+60:right"
 //   = from the game's 600th controller read (~ game frame) hold A for 10 reads, etc. Names: A B 1 2 plus minus home up down left right C Z.
@@ -39,6 +40,7 @@ enum {
     BTN_2 = 0x0100, BTN_1 = 0x0200, BTN_B = 0x0400, BTN_A = 0x0800, BTN_MINUS = 0x1000,
     BTN_Z = 0x2000, BTN_C = 0x4000, BTN_HOME = 0x8000,
     PUSH_FLAG = 0x40000000, PULL_FLAG = 0x20000000, SWING_FLAG = 0x10000000,   // internal: push / pull gestures (not KPAD button bits)
+    ROLL_L_FLAG = 0x08000000, ROLL_R_FLAG = 0x04000000,                        // internal: twist the Remote left / right
 };
 
 static u32 g_hold, g_prev, g_trig, g_rel, g_host_hold;
@@ -56,7 +58,7 @@ int wiimote_script_active(void) { return g_nscript && g_reads < script_end + 30;
 static u32 name_mask(const char *s, int n) {
     static const struct { const char *n; u32 m; } t[] = {
         {"A",BTN_A},{"B",BTN_B},{"1",BTN_1},{"2",BTN_2},{"plus",BTN_PLUS},{"minus",BTN_MINUS},{"home",BTN_HOME},
-        {"up",BTN_UP},{"down",BTN_DOWN},{"left",BTN_LEFT},{"right",BTN_RIGHT},{"C",BTN_C},{"Z",BTN_Z},{"push",PUSH_FLAG},{"pull",PULL_FLAG},{"swing",SWING_FLAG} };
+        {"up",BTN_UP},{"down",BTN_DOWN},{"left",BTN_LEFT},{"right",BTN_RIGHT},{"C",BTN_C},{"Z",BTN_Z},{"push",PUSH_FLAG},{"pull",PULL_FLAG},{"swing",SWING_FLAG},{"rolll",ROLL_L_FLAG},{"rollr",ROLL_R_FLAG} };
     for (unsigned k = 0; k < sizeof t / sizeof *t; k++) if ((int)strlen(t[k].n) == n && !strncmp(s, t[k].n, n)) return t[k].m;
     fprintf(stderr, "[wiimote] unknown button '%.*s' in TTPC_INPUT\n", n, s);
     return 0;
@@ -129,6 +131,7 @@ void wiimote_frame(void) {
     if (in->push) h |= PUSH_FLAG;
     if (in->pull) h |= PULL_FLAG;
     if (in->swing) h |= SWING_FLAG;
+    if (in->roll_l) h |= ROLL_L_FLAG;   if (in->roll_r) h |= ROLL_R_FLAG;
     { static int got;   // while a TTPC_INPUT script is still driving a menu (e.g. --mission), ignore the real controls
       if (!got) { got = 1; for (int k = 0; k < g_nscript; k++) if (g_script[k].from + g_script[k].len > script_end) script_end = g_script[k].from + g_script[k].len; }
       if (g_reads < script_end + 30) h = 0; }
@@ -182,6 +185,19 @@ static float swing_motion(int held) {
     float y = Y[g_swing_t++];
     if (g_swing_t >= (int)(sizeof Y / sizeof Y[0])) { g_swing_t = held ? 0 : -1; }
     return y;
+}
+
+// "Twist": turn the Remote about its pointing axis (bandages are wound by turning it round and round; some tools
+// turn with it). Held, it keeps turning (about one turn a second); the angle stays where it is while A or B is
+// held and goes back to level once both are let go.
+static float roll_motion(int dir, u32 hold) {
+    static float a;
+    if (dir) a += dir * 0.105f;   // radians per read
+    else if (!(hold & (BTN_A | BTN_B))) a *= 0.7f;
+    if (fabsf(a) < 1e-3f) a = 0;
+    while (a > (float)M_PI) a -= 2 * (float)M_PI;
+    while (a < -(float)M_PI) a += 2 * (float)M_PI;
+    return a;
 }
 
 static void wf(u32 a, float f) { u32 v; memcpy(&v, &f, 4); W32(a, v); }
@@ -240,23 +256,26 @@ void f_8025F830(CPU *c) {
     }
     float acc_z; push_motion((h & PUSH_FLAG) ? 1 : (h & PULL_FLAG) ? -1 : 0, h, &acc_z);
     float acc_y = swing_motion((h & SWING_FLAG) != 0);
-    h &= ~(PUSH_FLAG | PULL_FLAG | SWING_FLAG);
+    float roll = roll_motion((h & ROLL_L_FLAG) ? -1 : (h & ROLL_R_FLAG) ? 1 : 0, h);
+    h &= ~(PUSH_FLAG | PULL_FLAG | SWING_FLAG | ROLL_L_FLAG | ROLL_R_FLAG);
     g_prev = g_hold; g_hold = h; g_trig = g_hold & ~g_prev; g_rel = g_prev & ~g_hold;
     if (dbg && (g_trig || g_reads % 600 == 0)) fprintf(stderr, "[pad] read %llu vi %llu hold %04X trig %04X\n", (unsigned long long)g_reads, (unsigned long long)g_vi, g_hold, g_trig);
     for (u32 k = 0; k < 0xB0; k += 4) W32(buf + k, 0);
     W32(buf + 0x00, g_hold); W32(buf + 0x04, g_trig); W32(buf + 0x08, g_rel);
     {   // held level, pointing at the TV (plus any push motion along z)
-        static float last_z, last_y = -1.f;
-        wf(buf + 0x0C, 0.f); wf(buf + 0x10, acc_y); wf(buf + 0x14, acc_z);
-        wf(buf + 0x18, sqrtf(acc_y * acc_y + acc_z * acc_z)); wf(buf + 0x1C, fabsf(acc_z - last_z) + fabsf(acc_y - last_y)); last_z = acc_z; last_y = acc_y;
+        // twisted by roll about the pointing axis: gravity (and the swing) turn between y and x
+        static float last_x, last_z, last_y = -1.f;
+        float cr = cosf(roll), sr = sinf(roll), ax = -acc_y * sr, ay = acc_y * cr;
+        wf(buf + 0x0C, ax); wf(buf + 0x10, ay); wf(buf + 0x14, acc_z);
+        wf(buf + 0x18, sqrtf(ax * ax + ay * ay + acc_z * acc_z)); wf(buf + 0x1C, fabsf(ax - last_x) + fabsf(acc_z - last_z) + fabsf(ay - last_y)); last_x = ax; last_z = acc_z; last_y = ay;
     }
     wf(buf + 0x20, g_px); wf(buf + 0x24, g_py);
     float vx = g_px - g_ppx, vy = g_py - g_ppy;
     wf(buf + 0x28, vx); wf(buf + 0x2C, vy); wf(buf + 0x30, sqrtf(vx * vx + vy * vy));
-    wf(buf + 0x34, 1.f); wf(buf + 0x38, 0.f);       // horizon: no roll
+    wf(buf + 0x34, cosf(roll)); wf(buf + 0x38, sinf(roll));   // horizon: the twist
     wf(buf + 0x48, g_dist);                          // distance to the sensor bar (m)
     wf(buf + 0x4C, g_dist - g_dist_prev); wf(buf + 0x50, fabsf(g_dist - g_dist_prev));
-    wf(buf + 0x54, 1.f); wf(buf + 0x58, 0.f);       // acc_vertical
+    wf(buf + 0x54, cosf(roll)); wf(buf + 0x58, sinf(roll));   // acc_vertical
     W8(buf + 0x5C, 1);                               // dev_type: Wii Remote + Nunchuk
     W8(buf + 0x5D, 0);                               // wpad_err: OK
     W8(buf + 0x5E, g_point_valid ? 2 : 0);           // pointer seen (2 = both sensor bar dots)
