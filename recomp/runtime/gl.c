@@ -852,7 +852,6 @@ void gpu_present(int x0, int y0, int w, int h) {
     glClearColor_(0, 0, 0, 1); glColorMask_(1, 1, 1, 1); glClear_(GL_COLOR_BUFFER_BIT);
     glBlitFramebuffer_(0, 0, lw, lh, g_pic_x, wh - g_pic_y - vh, g_pic_x + vw, wh - g_pic_y, GL_COLOR_BUFFER_BIT, g_disp_sharp ? GL_NEAREST : GL_LINEAR);
     }
-    side_vignette(ww, wh);
     glEnable_(GL_SCISSOR_TEST);
     if (g_tq_active) { glEndQuery_(0x88BF); g_tq_active = 0; }
     u64 ts = host_now_ns();
