@@ -81,6 +81,7 @@ static void parse_script(void) {
     }
 }
 
+volatile int g_replay_reached;   // set by the VR layer when a TTPC_REPLAY_UNTIL milestone is reached
 // Input recording / replay. A recording lists, per controller read where anything changed:
 //   <read> <buttons hex> <pointer x> <pointer y> <pointer valid> <stick x> <stick y>
 // TTPC_RECORD=file writes one (Play.bat records every session into recordings/);
@@ -212,6 +213,15 @@ void f_8025F830(CPU *c) {
         if (ev->stick) { g_sx = ev->sx; g_sy = ev->sy; }
         if (ev->has_ptr) { g_ppx = g_px; g_ppy = g_py; g_px = ev->px; g_py = ev->py; g_point_valid = 1; }
     }
+    {   // TTPC_REPLAY_UNTIL=morgue: the replay only brings the game to that point (fast, with TTPC_SPEED), then you take over
+        static const char *until = (const char *)1;
+        if (until == (const char *)1) until = getenv("TTPC_REPLAY_UNTIL");
+        if (g_nrep && until && *until && (g_replay_reached || g_irep >= g_nrep)) {
+            void host_set_speed(double s); host_set_speed(1.0);
+            fprintf(stderr, "[input] replay handed over at read %llu (%s): your controls now\n", (unsigned long long)g_reads, g_replay_reached ? until : "end of recording");
+            g_nrep = 0; until = NULL;
+        }
+    }
     if (g_nrep) {   // replay: the recorded state at or before this read
         while (g_irep < g_nrep && g_rep[g_irep].read <= g_reads) {
             const RecEv *e = &g_rep[g_irep++];
@@ -259,3 +269,4 @@ void f_8025F830(CPU *c) {
     if (err) W32(err, 0);
     c->r[3] = 1;
 }
+

@@ -18,6 +18,7 @@ void rt_logfn(CPU *c, u32 addr) {
         static int on = -1; if (on < 0) on = getenv("TTPC_AUTTRACE") && *getenv("TTPC_AUTTRACE") != '0';
         if ((addr >= 0x8012E000u && addr < 0x80132800u) || (addr >= 0x80028000u && addr < 0x8002F000u) || addr == 0x80076CF0u) {
             if (!on) return;
+            if (addr == 0x8002E600u || addr == 0x8002A500u) return;   // per-instruction script VM steps: far too frequent
             static u32 seen[512][4]; static int ns; int k;
             for (k = 0; k < ns; k++) if (seen[k][0] == addr) break;
             if (k == ns && ns < 512) { seen[ns][0] = addr; ns++; seen[k][1] = ~0u; }

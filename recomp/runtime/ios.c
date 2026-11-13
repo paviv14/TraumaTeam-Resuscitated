@@ -39,6 +39,8 @@ static u64 now_ns(void) { return host_now_ns(); }
 static Pending g_pend[64]; static int g_npend;   // request being handled (for requests completed later)
 static void complete_later(u32 req, u32 cb, s32 result);
 const char *g_nand_root = "nand";  // host folder standing in for the Wii's internal storage
+// TTPC_NAND=<folder> uses another folder (a replay brings the save it was recorded with)
+__attribute__((constructor)) static void nand_root_env(void) { const char *e = getenv("TTPC_NAND"); if (e && *e) g_nand_root = e; }
 
 // The system menu creates a title's data directory before the game first runs; games assume it exists.
 void ios_init(void) {

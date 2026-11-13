@@ -108,6 +108,7 @@ typedef struct { float base[4], emis[3]; GLuint tex, etex; int blend, mask; floa
 typedef struct { GLuint vao; int n; int mat; int grp; int room; int lm; } Prim;   // lm: lit from the room's lightmap (else its vertex colours)
 static GLuint g_lm_tex[2]; static GLint u_lm, u_use_lm;   // grp: 1 door, 3 mouse (moved at draw time); room: 0 office, 1 morgue
 static int g_room;                         // which room is shown
+extern volatile int g_replay_reached; static int g_replay_morgue_t;   // TTPC_REPLAY_UNTIL=morgue (wiimote.c)
 static int g_exam_now, g_morgue_now, g_click_t, g_pending_bed = -1, g_exit_t; static float g_click_px[2]; static float g_exam_fade;
 typedef struct Ray Ray;
 static int mdl_hit(int k, const Ray *r, float *sx, float *sy, float *dist); static int bed_hit(int k, const Ray *r, float *dist);
@@ -1691,6 +1692,7 @@ void vr_init(void) {
 
 // After the game frame is in game_tex (w x h). Returns 1 if the desktop window was drawn by VR (preview).
 int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
+    if (g_replay_morgue_t > 0 && --g_replay_morgue_t == 0) g_replay_reached = 1;
     if (!g_active) { g_vr_desk_seen = 0; return 0; }
     g_game_tex = game_tex; g_gw = w; g_gh = h; g_x0f = x0f; g_x1f = x1f;
     // desktop up? (seen this frame, or within the last few: some frames skip the wallpaper during fades)
@@ -1730,7 +1732,7 @@ int vr_frame(unsigned game_tex, int w, int h, float x0f, float x1f) {
     g_room = (g_morgue_now || g_exam_now) ? 1 : 0;
     {   static int force = -1; if (force < 0) force = getenv("TTPC_VR_ROOM") ? atoi(getenv("TTPC_VR_ROOM")) : 0; if (force) g_room = force; }   // tests: show a room
     {   static int lr = -1; if (g_room != lr) {   // arriving in a room: the morgue starts by the door you came in, facing the beds
-            int first = lr < 0; lr = g_room; fprintf(stderr, "[vr] room: %s\n", g_room ? "morgue" : "office");
+            int first = lr < 0; lr = g_room; fprintf(stderr, "[vr] room: %s\n", g_room ? "morgue" : "office"); if (g_room == 1) { unsigned long long wiimote_reads(void); g_replay_morgue_t = 120; fprintf(stderr, "[vr] morgue reached at controller read %llu\n", wiimote_reads()); }
             if (g_room == 1) { g_seat[0] = -0.1f; g_seat[1] = 0; g_seat[2] = -0.45f; g_turn = 0; }
             else { g_seat[0] = -1.55f; g_seat[1] = 0; g_seat[2] = -1.62f; g_turn = (float)(M_PI / 2); }
             if (!first) { g_world_from_stage = m4_yaw(g_turn, g_seat[0], g_seat[1], g_seat[2]); g_arrive = 1; }

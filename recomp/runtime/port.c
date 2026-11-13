@@ -7,11 +7,14 @@
 // TTPC_SPEED=N runs the guest's clocks (retrace, timers, audio DMA, time base) N times faster than
 // real time - for automated tests, where the game should simply run as fast as the host allows.
 static uint64_t raw_now_ns(void);
+static double g_speed_req = -1;
+void host_set_speed(double s) { if (s > 0) g_speed_req = s; }   // e.g. back to real time when a fast-forwarded replay ends
 uint64_t host_now_ns(void) {
-    static double speed = -1; static uint64_t t0;
-    if (speed < 0) { const char *e = getenv("TTPC_SPEED"); speed = e ? atof(e) : 1.0; if (speed <= 0) speed = 1.0; t0 = raw_now_ns(); }
+    static double speed = -1; static uint64_t t0, g0;
+    if (speed < 0) { const char *e = getenv("TTPC_SPEED"); speed = e ? atof(e) : 1.0; if (speed <= 0) speed = 1.0; g0 = t0 = raw_now_ns(); }
     uint64_t t = raw_now_ns();
-    return speed == 1.0 ? t : t0 + (uint64_t)((double)(t - t0) * speed);
+    if (g_speed_req > 0 && g_speed_req != speed) { g0 = g0 + (uint64_t)((double)(t - t0) * speed); t0 = t; speed = g_speed_req; }   // keep guest time continuous
+    return g0 + (uint64_t)((double)(t - t0) * speed);
 }
 
 #ifdef _WIN32
