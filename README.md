@@ -1,11 +1,34 @@
-# TraumaTeamRE
+# Trauma Team Resuscitated
 
-Reverse-engineering and modding toolkit for **Trauma Team** (Atlus, Wii, 2010, USA `SUOE01`).
+An **unofficial** native PC port of **Trauma Team** (Atlus, Wii, 2010, USA `SUOE01`) by static
+recompilation, plus a reverse-engineering and modding toolkit for its scripts and messages.
 
-Long-term goal: a PC recompilation with 4K rendering and quality-of-life improvements.
-Current stage: the game's script and dialogue layer is fully readable **and editable**, and the
-whole game recompiles to a native PC binary that boots through low-level system init
-(see [docs/RECOMP.md](docs/RECOMP.md)).
+> Not affiliated with or endorsed by Atlus or Sega. **No game data is included** - not the disc, not its
+> files, not code generated from it. You need your own copy of the game: the port is built from your
+> disc's `main.dol` and loads everything else from your disc at run time.
+
+The whole game recompiles to a native Windows/Linux program with an OpenGL renderer (any resolution,
+up to 4K and beyond), native audio, keyboard / mouse / gamepad controls and an options menu; the
+script and dialogue layer is fully readable **and editable**. Details and history:
+[docs/RECOMP.md](docs/RECOMP.md). A VR mode is in development.
+
+## Building the PC port
+
+You need: your Trauma Team (USA) disc extracted (Dolphin: right-click the game > Properties >
+Filesystem > Extract Entire Disc), Python 3.9+, gcc (Linux) or mingw-w64 (Windows build), SDL2, and
+[decomp-toolkit](https://github.com/encounter/decomp-toolkit)'s symbols for `main.dol`
+(`dtk dol split` -> `config/symbols.txt`).
+
+```
+python -m recomp.lift <disc>/DATA/sys/main.dol <dtk>/config/symbols.txt generated   # your disc's code -> C
+cd recomp
+make -f build.mk -j                     # Linux: ../build/ttpc
+make -f build.mk -j TARGET=windows      # Windows: ../build-win/ttpc.exe (needs third_party/, see docs/RECOMP.md)
+```
+
+Run it next to your extracted disc (it looks for `disc/DATA`, `../disc/DATA`, ...; or set `TTPC_DISC`).
+The generated code and the program you build contain the game's code: keep them to yourself.
+
 
 ## What works
 
