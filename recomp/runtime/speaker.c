@@ -137,3 +137,13 @@ static void spk_volume_check(CPU *c) {
     if (!v) W8(addr, 88);
 }
 void f_802558A0(CPU *c) { spk_volume_check(c); c->r[3] = R8(c->r[13] + 4294949991u); }
+
+// Diagnostics: which output lines the game's sounds ask for (bit 0 = TV; any higher bit = a Wii Remote's speaker)
+void orig_802EF410(CPU *c); void orig_80302EA0(CPU *c);
+static void log_line(const char *what, u32 line, u32 lr) {
+    static u32 seen[32][2]; static int n;
+    for (int i = 0; i < n; i++) if (seen[i][0] == line && seen[i][1] == lr) return;
+    if (n < 32) { seen[n][0] = line; seen[n][1] = lr; n++; fprintf(stderr, "[speaker] %s output line %X (from %08X)\n", what, line, lr); }
+}
+void f_802EF410(CPU *c) { log_line("new channel", c->r[7], c->lr); orig_802EF410(c); }
+void f_80302EA0(CPU *c) { log_line("voice", c->r[4], c->lr); orig_80302EA0(c); }
