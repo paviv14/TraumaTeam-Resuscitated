@@ -7,7 +7,7 @@
   </defs>
   <!-- outline of a plus: arms 1/3 of the width, rounded joins -->
   <path d="M372 96 H652 V372 H928 V652 H652 V928 H372 V652 H96 V372 H372 Z"
-        fill="none" stroke="url(#g)" stroke-width="84" stroke-linejoin="round"/>
+        fill="#ffffff" stroke="url(#g)" stroke-width="84" stroke-linejoin="round"/>
   <path d="M372 96 H652 V372 H928 V652 H652 V928 H372 V652 H96 V372 H372 Z"
         fill="none" stroke="#8d0a07" stroke-opacity="0.35" stroke-width="10" stroke-linejoin="round" transform="translate(0 0)"/>
 </svg>
