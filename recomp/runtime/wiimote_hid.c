@@ -111,6 +111,16 @@ static unsigned __stdcall speaker_thread(void *a) {
     }
     return 0;
 }
+int whid_speaker_raw(const u8 *adpcm, int n) {   // an already-encoded packet (the game's own encoder)
+    if (!g_connected) return 0;
+    if (!g_spk_on) { speaker_init(); fprintf(stderr, "[wiimote] speaker on\n"); }
+    if (!g_sp_thread) { g_sp_thread = 1; _beginthreadex(NULL, 0, speaker_thread, NULL, 0, NULL); }
+    if (g_spw - g_spr >= SPQ) return 1;
+    u8 *r = g_spq[g_spw % SPQ]; memset(r, 0, 22);
+    r[0] = 0x18; r[1] = (u8)(n << 3); memcpy(r + 2, adpcm, n > 20 ? 20 : n);
+    g_spw++;
+    return 1;
+}
 int whid_speaker(const s16 *pcm, int n) {
     if (!g_connected) return 0;
     if (!g_spk_on) { speaker_init(); g_pred = 0; g_step = 127; fprintf(stderr, "[wiimote] speaker on\n"); }
@@ -280,6 +290,7 @@ void whid_rumble(int on) {
 #else
 int whid_poll(WiiState *out) { (void)out; return 0; }
 int whid_speaker(const s16 *pcm, int n) { (void)pcm; (void)n; return 0; }
+int whid_speaker_raw(const u8 *adpcm, int n) { (void)adpcm; (void)n; return 0; }
 void whid_rumble(int on) { (void)on; }
 #endif
 

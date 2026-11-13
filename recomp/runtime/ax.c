@@ -21,6 +21,8 @@
 
 static s32 g_main[3][NS];              // L, R, S
 static s32 g_aux[3][3][NS];            // aux A/B/C x L, R, S
+#define NWM 18                         // Wii Remote speaker samples per frame (6 kHz)
+static s32 g_wm[4][NWM];               // the four Remotes' speaker mixes
 
 // PB word offsets (u16 units) - AXPBWii
 enum {
@@ -34,6 +36,7 @@ enum {
     PB_RATIO = 83, PB_FRAC = 85, PB_LAST = 86,
     PB_LOOP_PS = 90, PB_LOOP_YN1 = 91, PB_LOOP_YN2 = 92,
     PB_LPF = 93,                       // enabled, yn1, a0, b0
+    PB_REMOTE = 107, PB_REMOTE_MIXCTL = 108, PB_REMOTE_MIXER = 109,   // after the biquad (10 words): Wii Remote speaker mix, 4 x (main, delta, aux, delta)
     PB_WORDS = 160                     // 0x140 bytes (checked against live blocks: stereo stream, 22.05 kHz ADPCM)
 };
 
@@ -143,6 +146,19 @@ static void process_voice(PB *p) {
         }
         if (ramp) p->w[vw] = (u16)cv;
     }
+    // the Wii Remote speakers (6 kHz): the voice taken down to 18 samples, at each Remote's volume
+    if (p->w[PB_REMOTE]) {
+        { static int lines; if (lines < 10) { lines++; fprintf(stderr, "[ax] voice %08X plays on the Wii Remote speaker (volumes %04X %04X %04X %04X, ctl %04X)\n", p->addr,
+              p->w[PB_REMOTE_MIXER], p->w[PB_REMOTE_MIXER + 4], p->w[PB_REMOTE_MIXER + 8], p->w[PB_REMOTE_MIXER + 12], p->w[PB_REMOTE_MIXCTL]); } }
+        for (int r = 0; r < 4; r++) {
+            s32 cv = p->w[PB_REMOTE_MIXER + 4 * r]; if (!cv) continue;
+            for (int k = 0; k < NWM; k++) {
+                int a = k * NS / NWM, b = (k + 1) * NS / NWM; s32 sum = 0;
+                for (int i = a; i < b; i++) sum += in[i];
+                g_wm[r][k] += (sum / (b - a) * cv) >> 15;
+            }
+        }
+    }
 }
 
 // Words the DSP writes back into a PB after processing.
@@ -205,7 +221,7 @@ void ax_run_list(u32 addr, u32 size) {
     while (a < end && guard++ < 64) {
         u16 cmd = rd16(a); a += 2;
         switch (cmd) {
-        case 0x00: memset(g_main, 0, sizeof g_main); memset(g_aux, 0, sizeof g_aux); a += 4; break;
+        case 0x00: memset(g_main, 0, sizeof g_main); memset(g_aux, 0, sizeof g_aux); memset(g_wm, 0, sizeof g_wm); a += 4; break;
         case 0x01: case 0x02: case 0x03: {
             u32 src = rd32(a); a += 4;
             for (int i = 0; i < NS; i++) {
@@ -226,7 +242,11 @@ void ax_run_list(u32 addr, u32 size) {
         case 0x0A: a += 8; break;                  // compressor: not modelled
         case 0x0B: { u16 vol = rd16(a); u32 s = rd32(a + 2), lr = rd32(a + 6); a += 10; output(vol, s, lr); break; }
         case 0x0C: { u16 vol = rd16(a); u32 s = rd32(a + 2), lr = rd32(a + 6); a += 10; output(vol, s, lr); break; }
-        case 0x0D: a += 16; break;                 // Wii Remote speaker output: not yet
+        case 0x0D: {                               // Wii Remote speaker output: 18 s16 per Remote, for AXRmt
+            for (int r = 0; r < 4; r++) { u32 o = rd32(a + 4 * r);
+                if (o) for (int k = 0; k < NWM; k++) wr16(o + 2 * k, (u16)clamp16(g_wm[r][k])); }
+            a += 16; break;
+        }
         case 0x0E: return;
         default:
             if (log_once++ < 5) fprintf(stderr, "[ax] unknown command %04X in list %08X\n", cmd, addr);

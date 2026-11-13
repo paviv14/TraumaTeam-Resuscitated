@@ -96,4 +96,28 @@ void f_802542A0(CPU *c) {
 }
 // WPADCanSendStreamData(chan) -> bool; WPADSendStreamData(chan, data, len) -> 0 (the alarm above sends instead)
 void f_80255A70(CPU *c) { c->r[3] = c->r[3] == 0 && g_spk_enabled; }
-void f_80255B00(CPU *c) { c->r[3] = c->r[3] == 0 ? 0 : (u32)-1; }
+// The game's sound library (NW4R, voices mixed for the Remote by AX) encodes 6 kHz 4-bit Yamaha ADPCM itself and
+// sends it here 20 bytes (40 samples) at a time: forward the packet as it is to a real Remote, or decode it for
+// the PC (speakers + rumble + DualSense) - the same destinations as the alarm above.
+int whid_speaker_raw(const u8 *adpcm, int n);
+void f_80255B00(CPU *c) {
+    u32 chan = c->r[3], data = c->r[4]; int len = (int)c->r[5];
+    if (chan != 0 || !mode()) { c->r[3] = chan ? (u32)-1 : 0; return; }
+    if (len > 20) len = 20; if (len < 0) len = 0;
+    u8 b[20]; for (int i = 0; i < len; i++) b[i] = R8(data + i);
+    static int lines; if (lines < 3) { lines++; fprintf(stderr, "[speaker] stream data from the sound library (%d bytes) -> %s\n", len, mode() == 1 && wiimote_native() ? "Wii Remote" : "PC"); }
+    if (!(mode() == 1 && wiimote_native() && whid_speaker_raw(b, len))) {
+        static const int DIFF[16] = { 1, 3, 5, 7, 9, 11, 13, 15, -1, -3, -5, -7, -9, -11, -13, -15 };
+        static const int SCALE[8] = { 230, 230, 230, 230, 307, 409, 512, 614 };
+        static int pred, step = 127;
+        s16 pcm[40]; float e = 0; int n = 0;
+        for (int i = 0; i < len; i++) for (int h = 0; h < 2; h++) {
+            int code = h ? b[i] & 15 : b[i] >> 4;
+            pred += step * DIFF[code] / 8; if (pred > 32767) pred = 32767; if (pred < -32768) pred = -32768;
+            step = step * SCALE[code & 7] >> 8; if (step < 127) step = 127; if (step > 24576) step = 24576;
+            pcm[n++] = (s16)pred; e += (float)pred * pred;
+        }
+        ring_push(pcm, n); platform_speaker_pcm(pcm, n); platform_speaker_level(n ? sqrtf(e / n) / 8000.f : 0);
+    }
+    c->r[3] = 0;
+}
