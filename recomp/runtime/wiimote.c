@@ -22,7 +22,7 @@
 // Push the Remote toward the screen (endoscope etc.): mouse wheel up / R / Tab, or the right-stick click;
 // pull it back: mouse wheel down / V.
 // Swing both down hard (CPR compressions): middle mouse button / G, or the left-stick click.
-// Twist the Remote left / right (bandages, turning tools): hold J / L.
+// Twist the Remote (bandages, turning tools): hold A and move the pointer in circles (or hold J / L).
 //
 // TTPC_INPUT scripts presses for headless tests: "600+10:A;900+5:A,B;1200+60:right"
 //   = from the game's 600th controller read (~ game frame) hold A for 10 reads, etc. Names: A B 1 2 plus minus home up down left right C Z.
@@ -190,10 +190,28 @@ static float swing_motion(int held) {
 // "Twist": turn the Remote about its pointing axis (bandages are wound by turning it round and round; some tools
 // turn with it). Held, it keeps turning (about one turn a second); the angle stays where it is while A or B is
 // held and goes back to level once both are let go.
-static float roll_motion(int dir, u32 hold) {
+// Circling the pointer while A is held twists the Remote too: the direction the pointer moves in turns by a full
+// turn per circle, and the Remote turns with it (clockwise on screen = twist right). Only a steady circle counts,
+// so straight strokes and zig-zags (incisions, sutures) leave the Remote level.
+static float circle_motion(float px, float py, int valid, u32 hold) {
+    static float lx, ly, head, rate; static int have;
+    float vx = px - lx, vy = py - ly, sp = sqrtf(vx * vx + vy * vy), turn = 0;
+    if (valid && (hold & BTN_A) && sp > 0.004f) {
+        float hd = atan2f(vy, vx);
+        if (have) { float d = hd - head; while (d > (float)M_PI) d -= 2 * (float)M_PI; while (d < -(float)M_PI) d += 2 * (float)M_PI;
+            rate += (d - rate) * 0.3f;
+            if (fabsf(rate) > 0.035f && fabsf(d) < 1.2f && d * rate > 0) turn = d; }
+        head = hd; have = 1;
+    } else if (!(hold & BTN_A)) { have = 0; rate = 0; }
+    else if (sp <= 0.004f) rate *= 0.8f;   // paused: keep the heading, let the rhythm fade
+    lx = px; ly = py;
+    return turn;
+}
+static float roll_motion(int dir, u32 hold, float turn) {
     static float a;
+    a += turn;
     if (dir) a += dir * 0.105f;   // radians per read
-    else if (!(hold & (BTN_A | BTN_B))) a *= 0.7f;
+    else if (!turn && !(hold & (BTN_A | BTN_B))) a *= 0.7f;
     if (fabsf(a) < 1e-3f) a = 0;
     while (a > (float)M_PI) a -= 2 * (float)M_PI;
     while (a < -(float)M_PI) a += 2 * (float)M_PI;
@@ -256,7 +274,7 @@ void f_8025F830(CPU *c) {
     }
     float acc_z; push_motion((h & PUSH_FLAG) ? 1 : (h & PULL_FLAG) ? -1 : 0, h, &acc_z);
     float acc_y = swing_motion((h & SWING_FLAG) != 0);
-    float roll = roll_motion((h & ROLL_L_FLAG) ? -1 : (h & ROLL_R_FLAG) ? 1 : 0, h);
+    float roll = roll_motion((h & ROLL_L_FLAG) ? -1 : (h & ROLL_R_FLAG) ? 1 : 0, h, circle_motion(g_px, g_py, g_point_valid, h));
     h &= ~(PUSH_FLAG | PULL_FLAG | SWING_FLAG | ROLL_L_FLAG | ROLL_R_FLAG);
     g_prev = g_hold; g_hold = h; g_trig = g_hold & ~g_prev; g_rel = g_prev & ~g_hold;
     if (dbg && (g_trig || g_reads % 600 == 0)) fprintf(stderr, "[pad] read %llu vi %llu hold %04X trig %04X\n", (unsigned long long)g_reads, (unsigned long long)g_vi, g_hold, g_trig);
