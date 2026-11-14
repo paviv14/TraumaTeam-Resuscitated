@@ -33,7 +33,13 @@ static void walk(const u8 *fst, u32 n, const char *names, u32 *i, u32 end, const
         const u8 *e = fst + 12 * *i;
         char p[512]; snprintf(p, sizeof p, "%s/%s", dir, names + (be32(e) & 0xFFFFFF));
         if (e[0]) { u32 next = be32(e + 8); (*i)++; walk(fst, n, names, i, next, p); }
-        else { add((u64)be32(e + 4) << 2, be32(e + 8), p); (*i)++; }
+        else {
+            add((u64)be32(e + 4) << 2, be32(e + 8), p);
+            // tutorial text: the game is told it is longer, room for the PC wording (tuttext.c)
+            int tut_is_text(const char *path), tut_slack(void);
+            if (tut_is_text(p)) { u32 sz = be32(e + 8) + tut_slack(); u8 *w = (u8 *)e + 8; w[0] = sz >> 24; w[1] = sz >> 16; w[2] = sz >> 8; w[3] = sz; }
+            (*i)++;
+        }
     }
 }
 
@@ -90,6 +96,23 @@ static int cmp_off(const void *a, const void *b) { u64 x = ((const DiscFile *)a)
 // Read into a host buffer. Returns 1 (drive success) or 2 (a file is missing).
 static int read_host(u64 off, u32 len, u8 *buf) {
     static int sorted; if (!sorted) { sorted = 1; qsort(g_files, g_nfiles, sizeof *g_files, cmp_off); }
+    {   // tutorial text, rewritten for the controller in use (tuttext.c); it is read whole, from its start
+        DiscFile *f = find_file(off); int tut_is_text(const char *path), tut_slack(void); u32 tut_rewrite(const u8 *in, u32 n, u8 *out, u32 cap);
+        if (f && off == f->off && tut_is_text(f->path) && f->size < 65536) {
+            u8 *src = malloc(f->size); u32 cap = (u32)f->size + tut_slack(); u8 *dst = malloc(cap);
+            pthread_mutex_lock(&g_io); FILE *h = open_file(f); size_t got = 0;
+            if (h) { fseek(h, 0, SEEK_SET); got = fread(src, 1, f->size, h); }
+            pthread_mutex_unlock(&g_io);
+            if (got == f->size) {
+                u32 nn = tut_rewrite(src, (u32)f->size, dst, cap);
+                const u8 *use = nn ? dst : src; u32 ul = nn ? nn : (u32)f->size;
+                memset(buf, 0, len); memcpy(buf, use, ul < len ? ul : len);
+                if (g_log && !f->logged) { f->logged = 1; fprintf(stderr, "[disc] %s (%s)\n", f->path, nn ? "PC wording" : "as is"); }
+                free(src); free(dst); return 1;
+            }
+            free(src); free(dst);
+        }
+    }
     while (len) {
         DiscFile *f = find_file(off);
         if (!f) { static int np; if (np++ < 5) fprintf(stderr, "[disc] read %llX: past the end of a file (padding) - zeros\n", (unsigned long long)off);

@@ -337,6 +337,7 @@ static const char *short_key(int sc) {
     if (!strncmp(k, "Keypad ", 7)) { snprintf(b, sizeof b, "Num%s", k + 7); return b; }
     snprintf(b, sizeof b, "%s", k); return b;
 }
+const char *bind_key_label(int b) { return short_key(g_bind[b].key > 0 ? g_bind[b].key : g_bind[b].key2); }
 static void pad_tok(PromptTok *o, int *n, int max, int p) {
     char nm[8];
     if (p < 0) { tok(o, n, max, 1, "-"); return; }
@@ -385,7 +386,7 @@ int prompt_tokens(int set, const char *a, PromptTok *o, int max) {
         const char *w = a + 4;   // "", "_lr", "_ud"
         if (kb) dir_keys(o, &n, max, B_UP, B_LEFT, B_DOWN, B_RIGHT, w); else tok(o, &n, max, 0, a); }
     else if (IS("swing")) { if (kb) tok(o, &n, max, 0, "mouse_m"); else pad_tok(o, &n, max, g_bind[B_SWING].pad); }
-    else if (IS("twist") || IS("twistn")) {   // twist the Remote / the Nunchuk: the wheel, or the twist buttons
+    else if (IS("twist") || IS("twistn") || IS("circle")) {   // twist the Remote / the Nunchuk: the wheel, or the twist buttons
         if (kb) { if (IS("twistn")) { tok(o, &n, max, 1, "Ctrl"); tok(o, &n, max, 2, "+"); } tok(o, &n, max, 0, "wheel"); }
         else { if (IS("twistn")) { pad_tok(o, &n, max, g_bind[B_Z].pad); tok(o, &n, max, 2, "+"); }
                pad_tok(o, &n, max, g_bind[B_TW_L].pad); tok(o, &n, max, 2, "/"); pad_tok(o, &n, max, g_bind[B_TW_R].pad); } }
@@ -576,5 +577,6 @@ void platform_speaker_level(float level) { (void)level; }
 int platform_speaker_pcm(const s16 *pcm, int n) { (void)pcm; (void)n; return 0; }
 void platform_audio_stats(char *buf, int n) { if (n) buf[0] = 0; }
 int platform_last_dev(void) { return 0; }
+const char *bind_key_label(int b) { (void)b; return "W"; }
 int prompt_tokens(int set, const char *act, PromptTok *out, int max) { (void)set; (void)act; (void)out; (void)max; return 0; }
 #endif
