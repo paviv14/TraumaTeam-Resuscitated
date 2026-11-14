@@ -16,6 +16,7 @@
 // uploads a few finished images per frame and evicts textures not used for a while.
 #include "cpu.h"
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
@@ -94,18 +95,38 @@ const char *texpack_path(int id) { return id >= 0 && id < g_nrepl ? g_repl[id].p
 int texpack_is_prompt(int id) { return id >= 0 && id < g_nrepl && g_repl[id].set != 0; }
 void texpack_set_prompts(int set) { g_pset = set >= 0 && set < NPSET ? set : 0; }
 int texpack_prompt_count(int set) { return set > 0 && set < NPSET ? g_pset_n[set] : 0; }
+// Live prompts: prompts/base/ holds the pictures with blank button slots (the Wii Remote painted out), the same
+// files for every set; prompts/slots.txt says where each slot is and which Wii action it shows; the buttons are
+// drawn in when the picture loads, from the player's current bindings (prompt_compose).
+typedef struct { u64 hash; float x0, y0, x1, y1; char act[16]; } Slot;
+static Slot *g_slots; static int g_nslots;
+static unsigned g_bind_sig;   // changes with the bindings: part of a composed picture's cache name
+static void load_slots(const char *base) {
+    char p[600]; snprintf(p, sizeof p, "%s/slots.txt", base);
+    FILE *f = fopen(p, "r"); if (!f) return;
+    char line[256];
+    while (fgets(line, sizeof line, f)) {
+        Slot sl = { 0 }; char hs[32];
+        if (line[0] == '#' || sscanf(line, "%31s %f %f %f %f %15s", hs, &sl.x0, &sl.y0, &sl.x1, &sl.y1, sl.act) != 6) continue;
+        sl.hash = strtoull(hs, NULL, 16);
+        g_slots = realloc(g_slots, sizeof *g_slots * (size_t)(g_nslots + 1)); g_slots[g_nslots++] = sl;
+    }
+    fclose(f);
+    fprintf(stderr, "[prompts] %d button slots\n", g_nslots);
+}
 static void scan_prompts(void) {
     const char *base = getenv("TTPC_PROMPTS"); if (!base) base = "prompts";
+    load_slots(base);
     for (int s = 1; s < NPSET; s++) {
-        char d[600]; snprintf(d, sizeof d, "%s/%s", base, PSET_NAME[s]);
+        char d[600]; snprintf(d, sizeof d, "%s/base", base);
         int from = g_nrepl; scan(d, 0);
         for (int i = from; i < g_nrepl; i++) {
             g_repl[i].set = s;
             if (g_pset_n[s] == g_pset_cap[s]) { g_pset_cap[s] = g_pset_cap[s] ? g_pset_cap[s] * 2 : 64; g_pset_map[s] = realloc(g_pset_map[s], sizeof *g_pset_map[s] * g_pset_cap[s]); }
             g_pset_map[s][g_pset_n[s]].hash = g_repl[i].hash; g_pset_map[s][g_pset_n[s]].id = i; g_pset_n[s]++;
         }
-        if (g_pset_n[s]) fprintf(stderr, "[prompts] %d button prompts for %s\n", g_pset_n[s], PSET_NAME[s]);
     }
+    if (g_pset_n[1]) fprintf(stderr, "[prompts] %d pictures with live button prompts\n", g_pset_n[1]);
 }
 int texpack_find(u64 hash) {   // replacement id, or -1
     if (g_pset) for (int i = 0; i < g_pset_n[g_pset]; i++) if (g_pset_map[g_pset][i].hash == hash) return g_pset_map[g_pset][i].id;
@@ -167,7 +188,7 @@ void texpack_free_image(TPImage *im) { if (!im) return; for (int l = 0; l < im->
 
 // disk cache: "TTC1", u32 w, h, levels, compressed, limit, i64 source size, source mtime, then each level: u32 size + data
 static void cache_path(const Repl *r, int var, char *p, size_t n) {
-    if (r->set) snprintf(p, n, "%s/%016llX_%d_%d%s_p%d.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u", r->set);
+    if (r->set) snprintf(p, n, "%s/%016llX_%d_%d%s_p%d_%08X.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u", r->set, g_bind_sig);
     else snprintf(p, n, "%s/%016llX_%d_%d%s.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u");
 }
 static TPImage *cache_read(const Repl *r, int var) {
@@ -201,6 +222,102 @@ static u8 *variant_of(const u8 *rgba, int w, int h, int var) {   // 1: (R,R,R,G)
         o[4 * i] = o[4 * i + 1] = o[4 * i + 2] = c; o[4 * i + 3] = a; }
     return o;
 }
+
+// ---------------------------------------------------------------- live button prompts
+#include "font_atlas.h"
+typedef struct { int w, h; u8 *px; } Glyph;
+static Glyph *glyph_get(int set, const char *name) {   // prompts/glyphs/<style>/<name>.png, kept once loaded
+    static struct { char key[48]; Glyph g; } cache[160]; static int n; static pthread_mutex_t m = PTHREAD_MUTEX_INITIALIZER;
+    static const char *STY[] = { "", "keyboard", "xbox", "ps4", "ps5" };
+    char key[48]; snprintf(key, sizeof key, "%s/%s", STY[set], name);
+    pthread_mutex_lock(&m);
+    for (int i = 0; i < n; i++) if (!strcmp(cache[i].key, key)) { pthread_mutex_unlock(&m); return cache[i].g.px ? &cache[i].g : NULL; }
+    const char *base = getenv("TTPC_PROMPTS"); if (!base) base = "prompts";
+    char p[700]; snprintf(p, sizeof p, "%s/glyphs/%s.png", base, key);
+    int c; Glyph g = { 0 }; g.px = stbi_load(p, &g.w, &g.h, &c, 4);
+    if (!g.px && set != 1 && strcmp(STY[set], "xbox")) { snprintf(p, sizeof p, "%s/glyphs/xbox/%s.png", base, name); g.px = stbi_load(p, &g.w, &g.h, &c, 4); }
+    if (n < 160) { snprintf(cache[n].key, sizeof cache[n].key, "%s", key); cache[n].g = g; n++; }
+    pthread_mutex_unlock(&m);
+    return g.px ? &cache[n - 1].g : NULL;
+}
+static void blend_px(u8 *d, const float *c) {   // c: straight-alpha rgba 0..255
+    float a = c[3] / 255.f, da = d[3] / 255.f, oa = a + da * (1 - a);
+    for (int k = 0; k < 3; k++) d[k] = (u8)(oa > 0 ? (c[k] * a + d[k] * da * (1 - a)) / oa + 0.5f : 0);
+    d[3] = (u8)(oa * 255 + 0.5f);
+}
+static void draw_glyph(u8 *img, int W, int H, const Glyph *g, float x, float y, float w, float h) {   // bilinear, stretched
+    for (int py = (int)y; py < (int)(y + h + 1); py++) for (int px = (int)x; px < (int)(x + w + 1); px++) {
+        if (px < 0 || py < 0 || px >= W || py >= H) continue;
+        float u = (px + 0.5f - x) / w * g->w - 0.5f, v = (py + 0.5f - y) / h * g->h - 0.5f;
+        if (u < -0.5f || v < -0.5f || u > g->w - 0.5f || v > g->h - 0.5f) continue;
+        int u0 = (int)floorf(u), v0 = (int)floorf(v); float fu = u - u0, fv = v - v0; float c[4] = { 0 }, wsum = 0;
+        for (int j = 0; j < 2; j++) for (int i = 0; i < 2; i++) {
+            int uu = u0 + i, vv = v0 + j; if (uu < 0 || vv < 0 || uu >= g->w || vv >= g->h) continue;
+            float wt = (i ? fu : 1 - fu) * (j ? fv : 1 - fv); const u8 *s = g->px + 4 * (vv * g->w + uu);
+            float al = s[3] / 255.f * wt; for (int k = 0; k < 3; k++) c[k] += s[k] * al; c[3] += al; wsum += wt; }
+        if (c[3] <= 0) continue;
+        for (int k = 0; k < 3; k++) c[k] /= c[3]; c[3] = c[3] / (wsum > 0 ? wsum : 1) * 255;
+        blend_px(img + 4 * (py * W + px), c);
+    }
+}
+static float text_w(const char *s, float px) { float k = px / FONT_LINE, w = 0; for (; *s; s++) { int c = (unsigned char)*s; if (c < 32 || c > 126) c = '?'; w += g_font_glyph[c - 32][5] * k; } return w; }
+static void draw_text(u8 *img, int W, int H, const char *s, float x, float y, float px, const u8 *rgb) {   // y = top of the line
+    float k = px / FONT_LINE;
+    for (; *s; s++) { int c = (unsigned char)*s; if (c < 32 || c > 126) c = '?';
+        const short *g = g_font_glyph[c - 32];
+        for (int j = 0; j < (int)(g[3] * k) + 1; j++) for (int i = 0; i < (int)(g[2] * k) + 1; i++) {
+            int X = (int)(x + g[4] * k) + i, Y = (int)y + j; if (X < 0 || Y < 0 || X >= W || Y >= H) continue;
+            float fx = i / k, fy = j / k; int sx = g[0] + (int)fx, sy = g[1] + (int)fy;
+            if (fx >= g[2] || fy >= g[3]) continue;
+            float cov = g_font_px[sy * FONT_W + sx]; if (cov <= 0) continue;
+            float col[4] = { rgb[0], rgb[1], rgb[2], cov }; blend_px(img + 4 * (Y * W + X), col);
+        }
+        x += g[5] * k; }
+}
+// the slots of one picture, drawn from the bindings (prompt_tokens, platform.c)
+static void prompt_compose(u64 hash, int set, u8 *img, int W, int H) {
+    for (int si = 0; si < g_nslots; si++) {
+        Slot *sl = &g_slots[si]; if (sl->hash != hash) continue;
+        PromptTok tk[8]; int n = prompt_tokens(set, sl->act, tk, 8); if (n <= 0) continue;
+        float rx = sl->x0 * W, ry = sl->y0 * H, rw = (sl->x1 - sl->x0) * W, rh = (sl->y1 - sl->y0) * H;
+        float gh = rh, ws[8], tot;
+        for (int pass = 0; pass < 2; pass++) {   // widths at height gh; shrink to fit the slot's width
+            tot = 0;
+            for (int i = 0; i < n; i++) {
+                if (tk[i].kind == 1) { Glyph *kg = glyph_get(set == 1 ? 1 : set, "key");
+                    float tw = text_w(tk[i].name, gh * 0.42f) + gh * 0.42f; float mn = kg ? gh * kg->w / kg->h : gh * 0.8f; ws[i] = tw > mn ? tw : mn; }
+                else if (tk[i].kind == 2) ws[i] = text_w(tk[i].name, gh * 0.6f) + gh * 0.08f;
+                else { Glyph *g = glyph_get(set, tk[i].name); ws[i] = g ? gh * g->w / g->h : gh * 0.8f; }
+                tot += ws[i];
+            }
+            if (tot <= rw * 1.0f) break;
+            gh *= rw / tot;
+        }
+        float x = rx + (rw - tot) / 2, y = ry + (rh - gh) / 2;
+        static const u8 white[3] = { 236, 236, 236 }, ink[3] = { 28, 28, 30 };
+        for (int i = 0; i < n; i++) {
+            if (tk[i].kind == 2) draw_text(img, W, H, tk[i].name, x + gh * 0.04f, y + gh * 0.18f, gh * 0.6f, white);
+            else {
+                Glyph *g = glyph_get(set, tk[i].kind == 1 ? "key" : tk[i].name);
+                if (!g && tk[i].kind == 1) g = glyph_get(1, "key");
+                if (g) draw_glyph(img, W, H, g, x, y, ws[i], gh);
+                if (tk[i].kind == 1) { float ts = gh * 0.42f; draw_text(img, W, H, tk[i].name, x + (ws[i] - text_w(tk[i].name, ts)) / 2, y + gh * 0.27f, ts, ink); }
+            }
+            x += ws[i];
+        }
+    }
+}
+// bindings or device changed: composed pictures are made again (gl.c drops its copies: gpu_prompts_flush)
+void texpack_prompts_changed(unsigned sig) {
+    if (sig == g_bind_sig) return;
+    g_bind_sig = sig;
+    pthread_mutex_lock(&g_tm);
+    for (int i = 0; i < g_nrepl; i++) if (g_repl[i].set) for (int v = 0; v < 3; v++) {
+        if (g_repl[i].state[v] == 2) { texpack_free_image(g_repl[i].img[v]); g_repl[i].img[v] = NULL; }
+        if (g_repl[i].state[v] != 1) g_repl[i].state[v] = 0;
+    }
+    pthread_mutex_unlock(&g_tm);
+}
 u64 host_now_ns(void);
 static void work(int id, int var) {
     Repl *r = &g_repl[id];
@@ -213,6 +330,7 @@ static void work(int id, int var) {
     while ((w > g_tp_limit || h > g_tp_limit) && w > 1 && h > 1) {   // size limit: halve (keeps the aspect ratio)
         int nw = w / 2, nh = h / 2; u8 *s2 = malloc((size_t)nw * nh * 4); box_half(rgba, w, h, s2); free(rgba); rgba = s2; w = nw; h = nh;
     }
+    if (r->set && !var) prompt_compose(r->hash, r->set, rgba, w, h);
     if (var) {   // dual-palette pair: make both halves now, cache the other one for later
         int other = var == 1 ? 2 : 1;
         TPImage *o = build_image(variant_of(rgba, w, h, other), w, h, g_tp_compress); cache_write(r, other, o);

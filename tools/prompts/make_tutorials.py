@@ -54,18 +54,21 @@ def fix_for(name):
 
 
 # ---------------------------------------------------------------------------------------------- finding things
-def find_plates(a):
-    """Grey button plates (A, B, +, -) inside dark speech bubbles: [(x, y, w, h, kind)] in original pixels."""
+def find_plates(a, small=False):
+    """Grey button plates (A, B, +, -) inside dark speech bubbles: [(x, y, w, h, kind)] in original pixels.
+    small: the game's own little on-screen prompts captured in the screenshot (plates 7-13 px tall)."""
     mx = a.max(2); mn = a.min(2)
-    g = (mx > 150) & (mx - mn < 28); dark = mx < 50
+    g = (mx > (95 if small else 150)) & (mx - mn < 28); dark = mx < (40 if small else 50)
     lab, _ = ndimage.label(g); out = []
     for i, s in enumerate(ndimage.find_objects(lab)):
         ph = s[0].stop - s[0].start; pw = s[1].stop - s[1].start
-        if not (14 <= ph <= 30 and 10 <= pw <= 26 and ph > pw * 1.05): continue
+        if small:
+            if not (7 <= ph <= 13 and 5 <= pw <= 12 and ph > pw * 1.05): continue
+        elif not (14 <= ph <= 30 and 10 <= pw <= 26 and ph > pw * 1.05): continue
         reg = ndimage.binary_fill_holes(lab[s] == i + 1)
         if reg.mean() < 0.8: continue
         inner = dark[s] & reg
-        if inner.sum() < 6: continue
+        if inner.sum() < (3 if small else 6): continue
         y0, x0 = max(0, s[0].start - 3), max(0, s[1].start - 3)
         ring = dark[y0:s[0].stop + 3, x0:s[1].stop + 3].copy()
         ring[s[0].start - y0:s[0].stop - y0, s[1].start - x0:s[1].stop - x0] = False
@@ -198,8 +201,10 @@ def draw_pad(w, h, style, pressed):
     d = ImageDraw.Draw(im); W, H = im.size; dk = (95, 95, 105, 255); lw = max(2, S)
     ps = style in ("ps4", "ps5")
     # sticks and d-pad (PlayStation: d-pad up left, sticks low; Xbox: left stick up left, d-pad low)
+    arrows = []
     def stick(cx, cy, lit=False):
         r = H * 0.11; d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=LIT if lit else (205, 205, 212, 255), outline=dk, width=lw)
+        if lit: arrows.append((cx, cy, r))
     def dpad(cx, cy):
         k = H * 0.075; lit = "dpad" in pressed
         for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
@@ -224,6 +229,14 @@ def draw_pad(w, h, style, pressed):
         else:
             from make_prompts import font
             f = font(fr * 1.3); bb = d.textbbox((0, 0), t, font=f); d.text((cx - (bb[0] + bb[2]) / 2, cy - (bb[1] + bb[3]) / 2), t, font=f, fill=ink)
+    # a moving stick: four arrows around it, drawn past the pad's outline so they read as "move this"
+    for cx, cy, r in arrows:
+        a0, a1 = r * 1.35, r * 2.05
+        for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+            tip = (cx + dx * a1, cy + dy * a1); px, py = -dy, dx
+            base = (cx + dx * a0, cy + dy * a0)
+            d.polygon([tip, (base[0] + px * r * 0.45, base[1] + py * r * 0.45), (base[0] - px * r * 0.45, base[1] - py * r * 0.45)],
+                      fill=LIT, outline=(30, 90, 140, 255))
     # left trigger (Wii Z), drawn on the top edge
     d.rounded_rectangle([W * 0.12, H * 0.02, W * 0.30, H * 0.12], radius=H * 0.04, fill=LIT if "Z" in pressed else (200, 200, 208, 255), outline=dk, width=lw)
     # menu / view (Wii + / -)
@@ -254,6 +267,14 @@ def device_image(style, pressed, S, kind="remote"):
     if style == "keyboard":
         if kind == "nunchuk" and "Z" not in pressed and "C" not in pressed: w, h = 58, 40; return draw_wasd(int(w * S), int(h * S)), w, h
         if kind == "nunchuk" or "Z" in pressed: w, h = 26, 26; return draw_key(int(w * S), int(h * S), "E"), w, h
+        if "pointer" in pressed:      # moving the mouse: arrows on four sides
+            w, h = 40, 46; W, H = int(w * S), int(h * S); im = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            mw, mh = int(24 * S), int(36 * S); im.alpha_composite(draw_mouse(mw, mh, set()), ((W - mw) // 2, (H - mh) // 2))
+            d = ImageDraw.Draw(im); r = 3.2 * S; cx, cy = W / 2, H / 2
+            for dx, dy, ext in ((0, -1, H / 2), (0, 1, H / 2), (-1, 0, W / 2), (1, 0, W / 2)):
+                tip = (cx + dx * (ext - 1), cy + dy * (ext - 1)); bx, by = cx + dx * (ext - 1 - r * 1.6), cy + dy * (ext - 1 - r * 1.6)
+                d.polygon([tip, (bx - dy * r, by + dx * r), (bx + dy * r, by - dx * r)], fill=LIT, outline=(30, 90, 140, 255))
+            return im, w, h
         w, h = 26, 40; return draw_mouse(int(w * S), int(h * S), pressed), w, h
     w, h = 60, 40; return draw_pad(int(w * S), int(h * S), style, pressed), w, h
 

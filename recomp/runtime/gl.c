@@ -360,6 +360,12 @@ static void repl_frame(void) {   // once per presented frame: upload allowance, 
 void gpu_texpack_stats(char *b, int n) {
     snprintf(b, (size_t)n, "texture pack %lld MB on GPU, %d waiting", g_rt_bytes >> 20, g_texpack_count ? texpack_pending() : 0);
 }
+void gpu_prompts_flush(void) {   // the bindings changed: the composed prompt pictures are made again
+    if (!g_rt) return;
+    for (int i = 0; i < g_nrt; i++) if (texpack_is_prompt(i / 3)) {
+        if (g_rt[i].tex) { glDeleteTextures_(1, &g_rt[i].tex); g_rt_bytes -= g_rt[i].bytes; }
+        memset(&g_rt[i], 0, sizeof g_rt[i]); }
+}
 void gpu_texpack_flush(void) {   // options menu: pack switched off/on
     if (!g_rt) return;
     for (int i = 0; i < g_nrt; i++) if (g_rt[i].tex) { glDeleteTextures_(1, &g_rt[i].tex); g_rt[i].tex = 0; }
@@ -1107,6 +1113,7 @@ int gpu_get_scale(void) { return 1; }
 void gpu_set_scale(int scale) { (void)scale; }
 int gpu_overlay_begin(int *w, int *h, float dim) { (void)w; (void)h; (void)dim; return 0; }
 void gpu_overlay_rect(float x, float y, float w, float h, const float rgba[4]) { (void)x; (void)y; (void)w; (void)h; (void)rgba; }
+void gpu_prompts_flush(void) {}
 float gpu_overlay_text(float x, float y, float px, const char *s, const float rgba[4]) { (void)x; (void)y; (void)px; (void)s; (void)rgba; return 0; }
 float gpu_overlay_text_width(float px, const char *s) { (void)px; (void)s; return 0; }
 void gpu_overlay_end(void) {}

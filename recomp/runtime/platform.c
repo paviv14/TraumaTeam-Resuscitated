@@ -323,6 +323,86 @@ void platform_set_title(const char *t) { if (g_win) SDL_SetWindowTitle(g_win, t)
 // Button prompts: which set of help pictures the game shows (texpack.c prompt sets). Settings: Automatic (the
 // device used last), Wii Remote (the original pictures), Keyboard & mouse, Controller; the controller's style is
 // asked from SDL (PS4 / PS5 / everything else Xbox) unless the settings fix it.
+
+// ---------------------------------------------------------------- live button prompts: Wii action -> glyphs
+static void tok(PromptTok *o, int *n, int max, int kind, const char *name) { if (*n < max) { o[*n].kind = kind; snprintf(o[*n].name, sizeof o[*n].name, "%s", name); (*n)++; } }
+static const char *short_key(int sc) {
+    static char b[24]; if (sc <= 0) return "?";
+    const char *k = SDL_GetScancodeName((SDL_Scancode)sc); if (!k || !*k) return "?";
+    static const char *map[][2] = { { "Left Shift", "Shift" }, { "Right Shift", "Shift" }, { "Left Ctrl", "Ctrl" }, { "Right Ctrl", "Ctrl" },
+        { "Left Alt", "Alt" }, { "Right Alt", "Alt" }, { "Return", "Enter" }, { "Escape", "Esc" }, { "Backspace", "Bksp" },
+        { "CapsLock", "Caps" }, { "Delete", "Del" }, { "Insert", "Ins" }, { "PageUp", "PgUp" }, { "PageDown", "PgDn" },
+        { "Up", "\x5e" }, { "Down", "v" }, { "Left", "<" }, { "Right", ">" }, { "Left GUI", "Win" }, { "Right GUI", "Win" } };
+    for (size_t i = 0; i < sizeof map / sizeof map[0]; i++) if (!strcmp(k, map[i][0])) return map[i][1];
+    if (!strncmp(k, "Keypad ", 7)) { snprintf(b, sizeof b, "Num%s", k + 7); return b; }
+    snprintf(b, sizeof b, "%s", k); return b;
+}
+static void pad_tok(PromptTok *o, int *n, int max, int p) {
+    char nm[8];
+    if (p < 0) { tok(o, n, max, 1, "-"); return; }
+    if (p == PAD_LT) snprintf(nm, sizeof nm, "lt"); else if (p == PAD_RT) snprintf(nm, sizeof nm, "rt"); else snprintf(nm, sizeof nm, "b%d", p);
+    tok(o, n, max, 0, nm);
+}
+static void key_tok(PromptTok *o, int *n, int max, int b) { tok(o, n, max, 1, short_key(g_bind[b].key > 0 ? g_bind[b].key : g_bind[b].key2)); }
+// four direction keys: the WASD / arrow-key pictures when they are those keys, else the key names
+static void dir_keys(PromptTok *o, int *n, int max, int up, int lf, int dn, int rt, const char *which) {
+    int k[4] = { g_bind[up].key, g_bind[lf].key, g_bind[dn].key, g_bind[rt].key }, b[4] = { up, lf, dn, rt };
+    if (k[0] == SDL_SCANCODE_W && k[1] == SDL_SCANCODE_A && k[2] == SDL_SCANCODE_S && k[3] == SDL_SCANCODE_D && !*which) { tok(o, n, max, 0, "wasd"); return; }
+    if (k[0] == SDL_SCANCODE_UP && k[1] == SDL_SCANCODE_LEFT && k[2] == SDL_SCANCODE_DOWN && k[3] == SDL_SCANCODE_RIGHT) {
+        char nm[16]; snprintf(nm, sizeof nm, "arrows%s", which); tok(o, n, max, 0, nm); return; }
+    int lo = 0, hi = 4; if (!strcmp(which, "_lr")) { b[0] = lf; b[1] = rt; hi = 2; } else if (!strcmp(which, "_ud")) { b[1] = dn; hi = 2; }
+    char join[24] = ""; int single = 1;
+    for (int i = lo; i < hi; i++) { const char *s = short_key(g_bind[b[i]].key); if (strlen(s) != 1) single = 0; else strncat(join, s, 1); }
+    if (single) { tok(o, n, max, 1, join); return; }
+    for (int i = lo; i < hi; i++) key_tok(o, n, max, b[i]);
+}
+int prompt_tokens(int set, const char *a, PromptTok *o, int max) {
+    int n = 0, kb = set == 1;
+#define IS(x) (!strcmp(a, x))
+    if (IS("A")) { if (kb) tok(o, &n, max, 0, "mouse_l"); else pad_tok(o, &n, max, g_bind[B_A].pad); }
+    else if (IS("B")) { if (kb) tok(o, &n, max, 0, "mouse_r"); else pad_tok(o, &n, max, g_bind[B_B].pad); }
+    else if (IS("AB")) {   // grab: left + right click; on a pad A + the B half (RT)
+        if (kb) { tok(o, &n, max, 0, "mouse_l"); tok(o, &n, max, 2, "+"); tok(o, &n, max, 0, "mouse_r"); }
+        else { pad_tok(o, &n, max, g_bind[B_A].pad); tok(o, &n, max, 2, "+"); pad_tok(o, &n, max, g_bind[B_GRAB].pad); } }
+    else if (IS("ZB")) {   // defibrillator: Z + B
+        if (kb) { key_tok(o, &n, max, B_Z); tok(o, &n, max, 2, "+"); tok(o, &n, max, 0, "mouse_r"); }
+        else { pad_tok(o, &n, max, g_bind[B_Z].pad); tok(o, &n, max, 2, "+"); pad_tok(o, &n, max, g_bind[B_GRAB].pad); } }
+    else if (IS("Z")) { if (kb) key_tok(o, &n, max, B_Z); else pad_tok(o, &n, max, g_bind[B_Z].pad); }
+    else if (IS("C")) { if (kb) key_tok(o, &n, max, B_C); else pad_tok(o, &n, max, g_bind[B_C].pad); }
+    else if (IS("plus")) { if (kb) key_tok(o, &n, max, B_PLUS); else pad_tok(o, &n, max, g_bind[B_PLUS].pad); }
+    else if (IS("minus")) { if (kb) key_tok(o, &n, max, B_MINUS); else pad_tok(o, &n, max, g_bind[B_MINUS].pad); }
+    else if (IS("home")) { if (kb) key_tok(o, &n, max, B_HOME); else pad_tok(o, &n, max, g_bind[B_HOME].pad); }
+    else if (IS("one")) { if (kb) key_tok(o, &n, max, B_ONE); else pad_tok(o, &n, max, g_bind[B_ONE].pad); }
+    else if (IS("two")) { if (kb) key_tok(o, &n, max, B_TWO); else pad_tok(o, &n, max, g_bind[B_TWO].pad); }
+    else if (IS("stick")) {   // the Nunchuk stick: the four keys, or the left stick
+        if (kb) dir_keys(o, &n, max, B_ST_UP, B_ST_LEFT, B_ST_DOWN, B_ST_RIGHT, "");
+        else tok(o, &n, max, 0, "ls"); }
+    else if (IS("pointer")) tok(o, &n, max, 0, kb ? "mouse_move" : "rs");
+    else if (IS("pointA")) {   // point, then press A
+        tok(o, &n, max, 0, kb ? "mouse_move" : "rs"); tok(o, &n, max, 2, "+");
+        if (kb) tok(o, &n, max, 0, "mouse_l"); else pad_tok(o, &n, max, g_bind[B_A].pad); }
+    else if (IS("dpad") || IS("dpad_lr") || IS("dpad_ud")) {
+        const char *w = a + 4;   // "", "_lr", "_ud"
+        if (kb) dir_keys(o, &n, max, B_UP, B_LEFT, B_DOWN, B_RIGHT, w); else tok(o, &n, max, 0, a); }
+    else if (IS("swing")) { if (kb) tok(o, &n, max, 0, "mouse_m"); else pad_tok(o, &n, max, g_bind[B_SWING].pad); }
+    else if (IS("twist") || IS("twistn")) {   // twist the Remote / the Nunchuk: the wheel, or the twist buttons
+        if (kb) { if (IS("twistn")) { tok(o, &n, max, 1, "Ctrl"); tok(o, &n, max, 2, "+"); } tok(o, &n, max, 0, "wheel"); }
+        else { if (IS("twistn")) { pad_tok(o, &n, max, g_bind[B_Z].pad); tok(o, &n, max, 2, "+"); }
+               pad_tok(o, &n, max, g_bind[B_TW_L].pad); tok(o, &n, max, 2, "/"); pad_tok(o, &n, max, g_bind[B_TW_R].pad); } }
+    else if (IS("paddles")) { if (kb) { key_tok(o, &n, max, B_ST_UP); tok(o, &n, max, 2, "+"); tok(o, &n, max, 0, "wheel"); } else { pad_tok(o, &n, max, 7); tok(o, &n, max, 2, "+"); pad_tok(o, &n, max, 8); } }
+    else if (IS("fwd") || IS("back")) { if (kb) tok(o, &n, max, 0, "wheel"); else tok(o, &n, max, 0, "rs"); }
+    else if (IS("circle")) {   // bandage: hold A and circle the pointer
+        if (kb) { tok(o, &n, max, 0, "mouse_l"); tok(o, &n, max, 2, "+"); tok(o, &n, max, 0, "mouse_move"); }
+        else { pad_tok(o, &n, max, g_bind[B_A].pad); tok(o, &n, max, 2, "+"); tok(o, &n, max, 0, "rs"); } }
+#undef IS
+    return n;
+}
+static unsigned bind_signature(void) {
+    unsigned h = 2166136261u;
+    for (int i = 0; i < NBIND; i++) { int v[3] = { g_bind[i].key, g_bind[i].key2, g_bind[i].pad };
+        for (int k = 0; k < 3; k++) { h ^= (unsigned)v[k]; h *= 16777619u; } }
+    return h;
+}
 int g_prompt_set;   // 0 Wii Remote pictures, else another controller's (gl.c hides the 3D Remote then)
 void prompts_update(int force) {
     static int cur = -1;
@@ -343,6 +423,8 @@ void prompts_update(int force) {
         set = 1 + style;   // 2 xbox, 3 ps4, 4 ps5
     }
     if (set && !texpack_prompt_count(set)) set = set == 4 && texpack_prompt_count(3) ? 3 : 0;   // a missing set: fall back
+    unsigned sig = bind_signature(); static unsigned cur_sig;
+    if (sig != cur_sig) { cur_sig = sig; texpack_prompts_changed(sig); void gpu_prompts_flush(void); gpu_prompts_flush(); force = 1; }
     if (set == cur && !force) return;
     cur = set; g_prompt_set = set;
     texpack_set_prompts(set);
@@ -493,4 +575,6 @@ void platform_rumble(int on) { void whid_rumble(int on); whid_rumble(on); }
 void platform_speaker_level(float level) { (void)level; }
 int platform_speaker_pcm(const s16 *pcm, int n) { (void)pcm; (void)n; return 0; }
 void platform_audio_stats(char *buf, int n) { if (n) buf[0] = 0; }
+int platform_last_dev(void) { return 0; }
+int prompt_tokens(int set, const char *act, PromptTok *out, int max) { (void)set; (void)act; (void)out; (void)max; return 0; }
 #endif

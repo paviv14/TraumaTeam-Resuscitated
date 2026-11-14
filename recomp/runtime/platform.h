@@ -40,6 +40,12 @@ enum { B_A, B_B, B_Z, B_C, B_ONE, B_TWO, B_PLUS, B_MINUS, B_HOME, B_UP, B_DOWN, 
 typedef struct { const char *id, *name; int key, key2, pad, dkey, dkey2, dpad; } Bind;
 extern Bind g_bind[NBIND];
 const char *bind_pad_name(int pad);
+// live button prompts: the glyphs that show a Wii action (A, B, AB, Z, C, stick, pointer, plus, minus, home, one,
+// two, dpad, swing, twist, twistn, paddles, fwd, back, circle) on prompt set 1 keyboard, 2-4 pad styles.
+// kind 0 a glyph file (name), 1 a keycap with a label, 2 joining text ("+", "/")
+typedef struct { int kind; char name[24]; } PromptTok;
+int prompt_tokens(int set, const char *act, PromptTok *out, int max);
+void texpack_prompts_changed(unsigned sig);
 void settings_load(void);
 void settings_save(void);
 void settings_apply(void);
