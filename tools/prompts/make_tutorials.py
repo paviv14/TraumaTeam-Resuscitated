@@ -20,6 +20,38 @@ from make_prompts import draw_symbol, SYMBOL
 
 STYLES = ("keyboard", "xbox", "ps4", "ps5")
 
+# Pages the automatic search gets wrong (a Remote at an angle, on a light background, above its bubble, or a
+# Nunchuk): the device boxes by hand, in original pixels: (x0, y0, x1, y1, cable x or None, "remote" / "nunchuk").
+# A Nunchuk's bubble plate is a Z.
+FIX = {   # keyed by texture id (several pages share a name)
+    "04480567FBE05EFA": [(218, 50, 268, 100, None, "remote")],                  # em scissors_01
+    "0CBD1AB53138C709": [(228, 110, 282, 176, 269, "remote")],                  # au clothes02
+    "166E6FD5D8B77F55": [(32, 100, 64, 162, 47, "nunchuk"), (236, 98, 286, 157, 262, "remote")],   # su countershock_04
+    "A9C0F54DDDE3D008": [(32, 100, 64, 162, 47, "nunchuk"), (236, 98, 286, 157, 262, "remote")],   # em countershock_04
+    "50EC0FF04558A8FE": [(238, 104, 274, 222, None, "remote")],                 # or bone3_02
+    "66C9F197D7CDB05C": [(222, 110, 280, 174, 264, "remote")],                  # em forceps_01
+    "7B2A2199EABA9361": [(222, 110, 280, 174, 264, "remote")],                  # em forceps_02
+    "8D87F73484814D65": [(34, 115, 90, 177, 45, "remote")],                     # or bone1_01
+    "9051BAEEB70E458D": [(148, 110, 204, 174, 164, "remote")],                  # au pcanalyze02
+    "A986B8DFC57CD439": [(95, 115, 150, 177, 110, "remote")],                   # em removetray_01
+    "BED4FB7477433BE9": [(95, 115, 150, 180, 106, "remote")],                   # em removetray_02
+    "C7CC7E164EE029C8": [(226, 50, 266, 102, None, "remote")],                  # em scissors_02
+    "CCA800CF57B30C41": [(225, 110, 276, 170, 262, "remote")],                  # em press_bandage1_03
+    "D4CE597DE55E1337": [(232, 48, 265, 97, None, "remote")],                   # em scissors_03
+    "F245E3624D72B241": [(228, 113, 279, 167, 265, "remote")],                  # or stapler_02
+}
+# plates the search misses (the Nunchuk's Z): (x, y, w, h, kind)
+FIX_PLATES = {
+    "9051BAEEB70E458D": [(157, 72, 19, 25, "A"), (190, 72, 19, 25, "B")],
+    "04480567FBE05EFA": [(235, 122, 11, 15, "A"), (257, 122, 11, 15, "B")],
+    "C7CC7E164EE029C8": [(236, 122, 11, 15, "A"), (258, 122, 10, 15, "B")],
+    "D4CE597DE55E1337": [(236, 122, 11, 15, "A"), (258, 122, 10, 15, "B")],
+    "166E6FD5D8B77F55": [(38, 49, 16, 19, "Z"), (255, 47, 14, 19, "B")],
+    "A9C0F54DDDE3D008": [(39, 49, 15, 19, "Z"), (256, 47, 14, 19, "B")],
+}
+def fix_for(name):
+    return FIX.get(name[3:19])
+
 
 # ---------------------------------------------------------------------------------------------- finding things
 def find_plates(a):
@@ -166,15 +198,16 @@ def draw_pad(w, h, style, pressed):
     d = ImageDraw.Draw(im); W, H = im.size; dk = (95, 95, 105, 255); lw = max(2, S)
     ps = style in ("ps4", "ps5")
     # sticks and d-pad (PlayStation: d-pad up left, sticks low; Xbox: left stick up left, d-pad low)
-    def stick(cx, cy):
-        r = H * 0.11; d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(205, 205, 212, 255), outline=dk, width=lw)
+    def stick(cx, cy, lit=False):
+        r = H * 0.11; d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=LIT if lit else (205, 205, 212, 255), outline=dk, width=lw)
     def dpad(cx, cy):
         k = H * 0.075; lit = "dpad" in pressed
         for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
             d.rectangle([cx + dx * k * 1.1 - k * 0.55, cy + dy * k * 1.1 - k * 0.55, cx + dx * k * 1.1 + k * 0.55, cy + dy * k * 1.1 + k * 0.55], fill=LIT if lit else (180, 180, 188, 255), outline=dk)
         d.rectangle([cx - k * 0.55, cy - k * 0.55, cx + k * 0.55, cy + k * 0.55], fill=(180, 180, 188, 255))
-    if ps: dpad(W * 0.24, H * 0.36); stick(W * 0.36, H * 0.66); stick(W * 0.64, H * 0.66)
-    else: stick(W * 0.24, H * 0.36); dpad(W * 0.36, H * 0.66); stick(W * 0.64, H * 0.66)
+    ls, rs = "stick" in pressed, "pointer" in pressed
+    if ps: dpad(W * 0.24, H * 0.36); stick(W * 0.36, H * 0.66, ls); stick(W * 0.64, H * 0.66, rs)
+    else: stick(W * 0.24, H * 0.36, ls); dpad(W * 0.36, H * 0.66); stick(W * 0.64, H * 0.66, rs)
     # face buttons: south = A (Wii A), east = B (Wii B)
     fx, fy, fr = W * 0.76, H * 0.36, H * 0.068
     pos = {"S": (fx, fy + fr * 1.9), "E": (fx + fr * 1.9, fy), "W": (fx - fr * 1.9, fy), "N": (fx, fy - fr * 1.9)}
@@ -191,17 +224,55 @@ def draw_pad(w, h, style, pressed):
         else:
             from make_prompts import font
             f = font(fr * 1.3); bb = d.textbbox((0, 0), t, font=f); d.text((cx - (bb[0] + bb[2]) / 2, cy - (bb[1] + bb[3]) / 2), t, font=f, fill=ink)
+    # left trigger (Wii Z), drawn on the top edge
+    d.rounded_rectangle([W * 0.12, H * 0.02, W * 0.30, H * 0.12], radius=H * 0.04, fill=LIT if "Z" in pressed else (200, 200, 208, 255), outline=dk, width=lw)
     # menu / view (Wii + / -)
     for k, cx in (("minus", W * 0.42), ("plus", W * 0.58)):
         lit = k in pressed; d.rounded_rectangle([cx - W * 0.03, H * 0.33, cx + W * 0.03, H * 0.39], radius=H * 0.02, fill=LIT if lit else (170, 170, 178, 255), outline=dk)
     return im.resize((w, h), Image.LANCZOS)
 
 
+def draw_key(w, h, label):
+    S = 4
+    def body(d, W, H, fill, outline=None, width=1):
+        d.rounded_rectangle([W * 0.04, H * 0.04, W * 0.96, H * 0.96], radius=W * 0.18, fill=fill, outline=outline, width=width)
+    im = plastic((w, h), body, S); d = ImageDraw.Draw(im); W, H = im.size
+    from make_prompts import font
+    f = font(H * 0.5); bb = d.textbbox((0, 0), label, font=f)
+    d.text((W / 2 - (bb[0] + bb[2]) / 2, H / 2 - (bb[1] + bb[3]) / 2), label, font=f, fill=LIT)
+    return im.resize((w, h), Image.LANCZOS)
+
+
+def draw_wasd(w, h):
+    im = Image.new("RGBA", (w, h), (0, 0, 0, 0)); k = int(min(w / 3.2, h / 2.15)); g = max(1, k // 10)
+    for lab, cx, cy in (("W", w / 2, k / 2), ("A", w / 2 - k - g, k * 1.5 + g), ("S", w / 2, k * 1.5 + g), ("D", w / 2 + k + g, k * 1.5 + g)):
+        key = draw_key(k, k, lab); im.alpha_composite(key, (int(cx - k / 2), int(cy - k / 2)))
+    return im
+
+
+def device_image(style, pressed, S, kind="remote"):
+    if style == "keyboard":
+        if kind == "nunchuk" and "Z" not in pressed and "C" not in pressed: w, h = 58, 40; return draw_wasd(int(w * S), int(h * S)), w, h
+        if kind == "nunchuk" or "Z" in pressed: w, h = 26, 26; return draw_key(int(w * S), int(h * S), "E"), w, h
+        w, h = 26, 40; return draw_mouse(int(w * S), int(h * S), pressed), w, h
+    w, h = 60, 40; return draw_pad(int(w * S), int(h * S), style, pressed), w, h
+
+
+def paste_device(im, dev, x, y, S):
+    shadow = Image.new("RGBA", dev.size, (0, 0, 0, 0)); shadow.putalpha(dev.getchannel("A").point(lambda v: v * 0.45))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(S * 1.5))
+    im.alpha_composite(shadow, (x + int(S * 1.5), y + int(S * 2))); im.alpha_composite(dev, (x, y))
+
+
 # ---------------------------------------------------------------------------------------------- one picture
-def make(orig_img, up_img, style):
+def make(orig_img, up_img, style, name=""):
     a = np.array(orig_img.convert("RGB")).astype(int)
     plates = find_plates(a)
-    if not plates: return None
+    fix = fix_for(name)
+    if not plates and not fix: return make_generic(a, up_img, style, name)
+    if fix:
+        if name[3:19] in FIX_PLATES: plates = FIX_PLATES[name[3:19]]
+        return make_fixed(a, up_img, style, plates, fix)
     mask = find_remote(a, plates)
     up = np.array(up_img.convert("RGB")); S = up.shape[1] / a.shape[1]
     out = up.copy()
@@ -217,20 +288,171 @@ def make(orig_img, up_img, style):
     if mask.any():
         ys, xs = np.nonzero(mask); top = ys.min(); cx = np.median(xs[ys < top + 20])
     else: top = pb + 12
-    if style == "keyboard":
-        w, h = 26, 40
-        dev = draw_mouse(int(w * S), int(h * S), pressed)
-    else:
-        w, h = 60, 40
-        dev = draw_pad(int(w * S), int(h * S), style, pressed)
+    dev, w, h = device_image(style, pressed, S)
     x = int((cx - w / 2) * S); x = max(int(6 * S), min(x, im.width - dev.width - int(6 * S)))
     y = int((top + 1) * S); y = min(y, im.height - dev.height - int(6 * S))
-    shadow = Image.new("RGBA", dev.size, (0, 0, 0, 0)); shadow.putalpha(dev.getchannel("A").point(lambda v: v * 0.45))
-    shadow = shadow.filter(ImageFilter.GaussianBlur(S * 1.5))
-    im.alpha_composite(shadow, (x + int(S * 1.5), y + int(S * 2))); im.alpha_composite(dev, (x, y))
-    # the plates: new symbols
+    paste_device(im, dev, x, y, S)
+    redraw_plates(im, a, plates, style, S)
+    return im.convert("RGB")
+
+
+def make_fixed(a, up_img, style, plates, fix):
+    """A page from the FIX table: paint out the given boxes (rounded) and cables, draw each device there."""
+    up = np.array(up_img.convert("RGB")); S = up.shape[1] / a.shape[1]; H, W = a.shape[:2]
+    mx = a.max(2); mn = a.min(2)
+    small = np.zeros((H, W), bool)
+    for (x0, y0, x1, y1, cab, kind) in fix:
+        small[y0:y1, x0:x1] = True
+        # the rest of the Remote below the box and its cable: light, colourless pixels down to the frame
+        reg = np.zeros((H, W), bool); reg[y1 - 2:H - 7, max(0, x0 - 6):min(W, x1 + 6)] = True
+        light = reg & (mx > 120) & (mx - mn < 34)
+        lab, _ = ndimage.label(light | small)
+        ids = set(lab[small].ravel()) - {0}
+        small |= np.isin(lab, list(ids)) & reg
+        if cab is not None: small[y1:H - 8, cab - 2:cab + 3] = True
+    small = ndimage.binary_dilation(small, iterations=1)
+    m = (cv2.resize(small.astype(np.uint8) * 255, (up.shape[1], up.shape[0]), interpolation=cv2.INTER_LINEAR) > 40)
+    m = (ndimage.binary_dilation(m, iterations=int(S * 1.5)) * 255).astype(np.uint8)
+    out = cv2.inpaint(up, m, int(S * 3), cv2.INPAINT_TELEA)
+    im = Image.fromarray(out).convert("RGBA")
+    # Z plates belong to a Nunchuk: the plate nearest above each Nunchuk box
+    pl = [list(p) for p in plates]
+    for (x0, y0, x1, y1, cab, kind) in fix:
+        near = [p for p in pl if abs(p[0] + p[2] / 2 - (x0 + x1) / 2) < 60]
+        pressed = {p[4] for p in near} or {"A"}
+        if kind == "nunchuk": pressed = {"Z"}
+        dev, w, h = device_image(style, pressed, S, kind)
+        cx = (x0 + x1) / 2
+        x = int((cx - w / 2) * S); x = max(int(6 * S), min(x, im.width - dev.width - int(6 * S)))
+        y = int(y0 * S); y = min(y, im.height - dev.height - int(6 * S))
+        paste_device(im, dev, x, y, S)
+    redraw_plates(im, a, [tuple(p) for p in pl], style, S)
+    return im.convert("RGB")
+
+
+# ---------------------------------------------------------------------------------------------- pages without a found plate
+def find_devices(a):
+    """Remotes / Nunchuks standing in the picture (a light body whose cable or body reaches the bottom):
+    [(mask, top, centre x, kind)]; kind "remote" or "nunchuk" (a Nunchuk narrows towards its cable)."""
+    mx = a.max(2); mn = a.min(2); H, W = mx.shape
+    light = (mx > 150) & (mx - mn < 28)
+    light[:6] = light[-6:] = False; light[:, :6] = light[:, -6:] = False
+    body = ndimage.binary_opening(light, iterations=2)
+    lab, n = ndimage.label(body); out = []
+    grey = (mx > 55) & (mx - mn < 24)
+    for i, s in enumerate(ndimage.find_objects(lab)):
+        h = s[0].stop - s[0].start; w = s[1].stop - s[1].start; r = lab[s] == i + 1
+        if h < 22 or w < 9 or w > 48 or r.sum() < 160 or r.mean() < 0.45: continue
+        if h > H * 0.75 or (w <= 14 and h > 120): continue            # a divider between two pictures
+        if s[0].start < 45: continue                                   # light picture parts reaching from the top
+        x0, x1 = max(0, s[1].start - 4), min(W, s[1].stop + 4)
+        col = light[s[0].stop:H - 6, x0:x1].any(1)
+        if not (s[0].stop >= H - 14 or (len(col) > 0 and col.mean() > 0.85)): continue
+        m = np.zeros((H, W), bool); m[s] |= r
+        reg = np.zeros((H, W), bool); reg[s[0].start:H - 6, x0:x1] = True
+        l2, _ = ndimage.label(((light | grey) & reg) | m); ids = set(l2[m].ravel()) - {0}
+        m |= np.isin(l2, list(ids)) & reg
+        near = ndimage.binary_dilation(m, iterations=4) & ~m
+        m |= near & (mx < 95) & (mx - mn < 30)
+        # shape: widths along the body
+        rows = [r[y].sum() for y in range(h)]
+        wmax = max(rows); low = np.mean(rows[int(h * 0.75):]) if h > 8 else wmax
+        kind = "remote"
+        # the stick's blue direction arrows drawn around a Nunchuk
+        ring = ndimage.binary_dilation(m, iterations=10) & ~m
+        blue = (a[..., 2] > 200) & (a[..., 0] < 110) & (a[..., 2] - a[..., 0] > 110)
+        if (ring & blue).sum() > 60: kind = "nunchuk"
+        out.append((m, s[0].start, (s[1].start + s[1].stop) / 2, kind))
+    return out
+
+
+def bubble_above(a, top, cx):
+    """The speech bubble over a device (if any): its plates [(x, y, w, h, kind)] and whether it says OFF."""
+    mx = a.max(2); mn = a.min(2); H, W = mx.shape
+    y0 = max(0, top - 60); x0 = max(0, int(cx) - 45); x1 = min(W, int(cx) + 45)
+    dark = np.zeros((H, W), bool); dark[y0:top + 2, x0:x1] = mx[y0:top + 2, x0:x1] < 45
+    lab, n = ndimage.label(ndimage.binary_closing(dark, iterations=1))
+    best = None
+    for i, s in enumerate(ndimage.find_objects(lab)):
+        r = lab[s] == i + 1
+        if r.sum() < 120: continue
+        if best is None or r.sum() > best[1]: best = (s, r.sum(), i + 1)
+    if not best: return [], False
+    s, _, li = best
+    inside = ndimage.binary_fill_holes(lab[s] == li) & ~(lab[s] == li)
+    sub = a[s]; smx = sub.max(2); smn = sub.min(2)
+    g = inside & (smx > 140) & (smx - smn < 30)
+    # plate pieces (the symbol can cut a plate in two): merge pieces whose columns overlap
+    gl, gn = ndimage.label(g); boxes = []
+    for t in ndimage.find_objects(gl):
+        if (t[0].stop - t[0].start) * (t[1].stop - t[1].start) < 12: continue
+        boxes.append([t[0].start, t[0].stop, t[1].start, t[1].stop])
+    merged = True
+    while merged:
+        merged = False
+        for i in range(len(boxes)):
+            for j in range(i + 1, len(boxes)):
+                A, B = boxes[i], boxes[j]
+                ov = min(A[3], B[3]) - max(A[2], B[2])
+                if ov > 0.5 * min(A[3] - A[2], B[3] - B[2]):
+                    boxes[i] = [min(A[0], B[0]), max(A[1], B[1]), min(A[2], B[2]), max(A[3], B[3])]; del boxes[j]; merged = True; break
+            if merged: break
+    plates = []
+    for y0_, y1_, x0_, x1_ in boxes:
+        ph = y1_ - y0_; pw = x1_ - x0_
+        if 11 <= ph <= 30 and 8 <= pw <= 26 and ph >= pw * 0.8:
+            inner = (smx[y0_:y1_, x0_:x1_] < 60); inner[:2] = False; inner[-2:] = False; inner[:, :2] = False; inner[:, -2:] = False
+            kind = classify2(inner)
+            plates.append((s[1].start + x0_, s[0].start + y0_, pw, ph, kind))
+    off = not plates and (inside & (smx > 200)).sum() > 15 and inside.sum() < 400
+    return plates, off
+
+
+def classify2(inner):
+    ys, xs = np.nonzero(inner)
+    if len(ys) == 0: return "A"
+    y0, y1, x0, x1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+    box = inner[y0:y1, x0:x1]
+    top = box[:max(1, (y1 - y0) // 6)].mean(0); bot = box[-max(1, (y1 - y0) // 6):].mean(0)
+    if box.mean() < 0.5 and (top > 0.5).mean() > 0.6 and (bot > 0.5).mean() > 0.6: return "Z"
+    if box.mean() < 0.25: return "plus"
+    bh, bw = box.shape; c = max(1, bw // 5)
+    corners = np.mean([box[:c, :c].mean(), box[:c, -c:].mean(), box[-c:, :c].mean(), box[-c:, -c:].mean()])
+    return "B" if corners > 0.6 else "A"
+
+
+NOT_NUNCHUK = {"8D7532A344FC1530", "BDD33F7F4C75D745", "B14D5EA4E9D6FBC1"}   # blue things near a Remote
+
+
+def make_generic(a, up_img, style, name=""):
+    devs = find_devices(a)
+    if name[3:19] in NOT_NUNCHUK: devs = [(m, t, c, "remote") for m, t, c, k in devs]
+    if not devs: return None
+    up = np.array(up_img.convert("RGB")); S = up.shape[1] / a.shape[1]
+    allm = np.zeros(a.shape[:2], bool)
+    for m, *_ in devs: allm |= m
+    big = cv2.resize(allm.astype(np.uint8) * 255, (up.shape[1], up.shape[0]), interpolation=cv2.INTER_LINEAR) > 40
+    big = ndimage.binary_dilation(big, iterations=int(S * 2.5) + 2)
+    out = cv2.inpaint(up, big.astype(np.uint8) * 255, int(S * 3), cv2.INPAINT_TELEA)
+    im = Image.fromarray(out).convert("RGBA")
+    for m, top, cx, kind in devs:
+        plates, off = bubble_above(a, top, cx)
+        pressed = {p[4] for p in plates}
+        if "Z" in pressed or "C" in pressed: kind = "nunchuk"
+        elif pressed & {"A", "B"}: kind = "remote"
+        if off: pressed = set()
+        elif not pressed: pressed = {"stick"} if kind == "nunchuk" else {"pointer"}
+        dev, w, h = device_image(style, pressed, S, kind)
+        x = int((cx - w / 2) * S); x = max(int(6 * S), min(x, im.width - dev.width - int(6 * S)))
+        y = int((top + 1) * S); y = min(y, im.height - dev.height - int(6 * S))
+        paste_device(im, dev, x, y, S)
+        redraw_plates(im, a, plates, style, S)
+    return im.convert("RGB")
+
+
+def redraw_plates(im, a, plates, style, S):
     for (px, py, pw, ph, kind) in plates:
-        key = {"A": "A", "B": "B", "plus": "plus", "minus": "minus"}[kind]
+        key = {"A": "A", "B": "B", "plus": "plus", "minus": "minus", "Z": "Z", "C": "C"}[kind]
         sym = SYMBOL[style].get(key)
         if not sym: continue
         plate = tuple(int(v) for v in np.median(a[py + 1:py + ph - 1, px + 1:px + pw - 1][(a[py + 1:py + ph - 1, px + 1:px + pw - 1].max(2) > 150)], axis=0)) + (255,)
@@ -239,7 +461,6 @@ def make(orig_img, up_img, style):
         im.alpha_composite(pl, (X0, Y0))
         g, _ = draw_symbol(sym[0], sym[1], round((pw - 3) * S), round((ph - 3) * S), (24, 24, 24, 255))
         im.alpha_composite(g, (round((px + 1.5) * S), round((py + 1.5) * S)))
-    return im.convert("RGB")
 
 
 def main():
@@ -255,7 +476,7 @@ def main():
         if not os.path.exists(upf): continue
         o = Image.open(f); u = Image.open(upf)
         for st in STYLES:
-            r = make(o, u, st)
+            r = make(o, u, st, name[:-4])
             if r is None: break
             os.makedirs(os.path.join(a.out, st), exist_ok=True)
             r.save(os.path.join(a.out, st, name[:-4] + ".jpg"), quality=90)
