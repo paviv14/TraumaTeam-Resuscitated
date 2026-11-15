@@ -546,16 +546,20 @@ void platform_poll(void) {
         g_input.b |= PP(B_B) || (rt && (pa || lt));        // Grab (RT) is only the B half of A+RT (grab) and LT+RT (defibrillator)
         g_input.z |= lt;
         int lb = PP(B_TW_L), rb = PP(B_TW_R);
-        int twist_pad = op && (!endo || lt);                // twist buttons; in the endoscope only while Z is held (else C)
+        // chapter select (its episode grid drawn just now, video.c): LB / RB switch the character, like the D-pad
+        extern u64 g_chapter_ns; u64 host_now_ns(void);
+        int chapter = g_chapter_ns && host_now_ns() - g_chapter_ns < 250000000ull;
+        if (chapter) { g_input.left |= lb; g_input.right |= rb; }
+        int twist_pad = op && !chapter && (!endo || lt);                // twist buttons; in the endoscope only while Z is held (else C)
         if (twist_pad) { g_input.roll_l |= lb; g_input.roll_r |= rb; }
-        g_input.c |= PP(B_C) && !(twist_pad && g_bind[B_C].pad == g_bind[B_TW_L].pad);
+        g_input.c |= PP(B_C) && !((twist_pad || chapter) && g_bind[B_C].pad == g_bind[B_TW_L].pad);
         g_input.up |= PP(B_UP); g_input.down |= PP(B_DOWN); g_input.left |= PP(B_LEFT); g_input.right |= PP(B_RIGHT);
         g_input.one |= PP(B_ONE); g_input.two |= PP(B_TWO);
         g_input.swing |= PP(B_SWING);                       // strike / CPR
         g_input.push |= PP(B_PUSH) || (PB(LEFTSTICK) && PB(RIGHTSTICK));   // the paddles: both sticks pressed
         g_input.pull |= PP(B_PULL);
         g_input.plus |= PP(B_PLUS); g_input.minus |= PP(B_MINUS); g_input.home |= PP(B_HOME);
-        int center = PP(B_CENTER) && !(twist_pad && g_bind[B_CENTER].pad == g_bind[B_TW_R].pad);
+        int center = PP(B_CENTER) && !((twist_pad || chapter) && g_bind[B_CENTER].pad == g_bind[B_TW_R].pad);
         float lx = axis(SDL_CONTROLLER_AXIS_LEFTX), ly = -axis(SDL_CONTROLLER_AXIS_LEFTY);
         float rx = axis(SDL_CONTROLLER_AXIS_RIGHTX), ry = axis(SDL_CONTROLLER_AXIS_RIGHTY);
         if (pa && (lx || ly)) { rx += lx; ry -= ly; lx = ly = 0; }   // dragging: both sticks move the pointer, the Nunchuk stick rests
