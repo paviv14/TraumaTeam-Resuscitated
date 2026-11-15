@@ -432,7 +432,7 @@ static TexEntry *tex_decode(const Tex *t, u32 img0, u32 tlutreg) {
 // ---------------------------------------------------------------- per-draw pipeline state
 // Everything the pixel loop (or the GPU) needs, decoded from BP registers once per draw call.
 static Setup S;
-u64 g_chapter_ns;   // when the chapter select's episode grid was last drawn (platform.c)
+u64 g_chapter_ns, g_nunchuk_ns;   // when the chapter select's episode grid was last drawn (platform.c)
 
 // Trauma Team stores its 2D art as CI4/CI8 images with TWO IA8 palettes: the same texels are bound to
 // two texture maps, palette A giving red (intensity) + green (alpha), palette B blue + alpha, and the
@@ -554,6 +554,11 @@ static void setup_draw(void) {
         extern u64 g_chapter_ns; u64 host_now_ns(void);
         for (int m = 0; m < 8; m++) { TexEntry *e = S.tex[m].e; if (!e || !e->partner || e->w != 312 || e->h != 256) continue;
             if (texpack_pair_key(e->hash, e->partner) == 0x1F1C39467219A210ull || texpack_pair_key(e->partner, e->hash) == 0x1F1C39467219A210ull) { g_chapter_ns = host_now_ns(); break; } }
+    }
+    {   // the "controlled with the Nunchuk Style" notice at start (gl.c adds a line about the PC's controls)
+        extern u64 g_nunchuk_ns; u64 host_now_ns(void); const u64 K = 0xA16CEF33C25FAA1Eull;
+        for (int m = 0; m < 8; m++) { TexEntry *e = S.tex[m].e; if (!e || e->w != 640 || e->h != 480) continue;
+            if (e->hash == K || (e->partner && (texpack_pair_key(e->hash, e->partner) == K || texpack_pair_key(e->partner, e->hash) == K))) { g_nunchuk_ns = host_now_ns(); break; } }
     }
     u32 ac = bp[0xF3];
     S.ac_r0 = ac & 255; S.ac_r1 = (ac >> 8) & 255; S.ac_c0 = (ac >> 16) & 7; S.ac_c1 = (ac >> 19) & 7; S.ac_op = (ac >> 22) & 3;

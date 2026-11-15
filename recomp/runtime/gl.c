@@ -824,6 +824,7 @@ static void gpu_timer_frame(void) {
     else g_tq_active = 0;
 }
 static void side_vignette(int ww, int wh);
+static void nunchuk_note(int ww, int wh);
 void gpu_present(int x0, int y0, int w, int h) {
     int ww, wh; SDL_GL_GetDrawableSize(g_sdl_window, &ww, &wh);
     view_rect(ww, wh);
@@ -865,6 +866,7 @@ void gpu_present(int x0, int y0, int w, int h) {
     glBindFramebuffer_(GL_DRAW_FRAMEBUFFER, 0);
     glClearColor_(0, 0, 0, 1); glColorMask_(1, 1, 1, 1); glClear_(GL_COLOR_BUFFER_BIT);
     glBlitFramebuffer_(0, 0, lw, lh, g_pic_x, wh - g_pic_y - vh, g_pic_x + vw, wh - g_pic_y, GL_COLOR_BUFFER_BIT, g_disp_sharp ? GL_NEAREST : GL_LINEAR);
+    nunchuk_note(ww, wh);
     }
     glEnable_(GL_SCISSOR_TEST);
     if (g_tq_active) { glEndQuery_(0x88BF); g_tq_active = 0; }
@@ -970,6 +972,30 @@ static void side_vignette(int ww, int wh) {
         float c[4] = { 0, 0, 0, a };
         ov_quad(0, g_pic_x + L * t0, y0, g_pic_x + L * t1, y1, 0, 0, 0, 0, c);
         ov_quad(0, g_pic_x + g_pic_w - L * t1, y0, g_pic_x + g_pic_w - L * t0, y1, 0, 0, 0, 0, c);
+    }
+    ov_flush();
+    glDisable_(GL_BLEND); glUseProgram_(g_prog); glBindVertexArray_(g_vao); glBindBuffer_(GL_ARRAY_BUFFER, g_vbo);
+}
+// The start-up notice says the game is played with the Wii Remote and Nunchuk; on PC a footnote is added under it.
+extern u64 g_nunchuk_ns; u64 host_now_ns(void);
+static void nunchuk_note(int ww, int wh) {
+    static float k; static u64 since;
+    u64 now = host_now_ns(); int on = g_nunchuk_ns && now - g_nunchuk_ns < 200000000ull;
+    if (on && !since) since = now; if (!on) since = 0;
+    float target = on && now - since > 700000000ull ? 1.f : 0.f;   // after the notice has faded in
+    k += (target - k) * (target > k ? 0.08f : 0.3f); if (k < 0.01f) { k = 0; return; }
+    if (!overlay_init()) return;
+    static const char *L[] = { "...or a mouse and keyboard. Or a controller.", "The Nunchuk has been informed.", "It's taking it well." };
+    glBindFramebuffer_(GL_FRAMEBUFFER, 0); glViewport_(0, 0, ww, wh); glDisable_(GL_SCISSOR_TEST); glDisable_(GL_DEPTH_TEST);
+    glEnable_(GL_BLEND); glBlendEquation_(GL_FUNC_ADD); glBlendFunc_(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glUseProgram_(g_oprog); glBindVertexArray_(g_ovao);
+    GLfloat sc[2] = { (float)ww, (float)wh }; glUniform2fv_(g_ou_screen, 1, sc);
+    g_omode = -1; g_nov = 0;
+    float px = g_view_h * 0.036f, cx = g_view_x + g_view_w * 0.66f, y = g_view_y + g_view_h * 0.565f;
+    for (int i = 0; i < 3; i++) {
+        float s = i == 0 ? px : px * 0.86f; const float c[4] = { 0.47f, 0.48f, 0.5f, k * (i == 0 ? 1.f : 0.85f) };
+        gpu_overlay_text(cx - gpu_overlay_text_width(s, L[i]) / 2, y, s, L[i], c);
+        y += i == 0 ? px * 1.6f : s * 1.25f;
     }
     ov_flush();
     glDisable_(GL_BLEND); glUseProgram_(g_prog); glBindVertexArray_(g_vao); glBindBuffer_(GL_ARRAY_BUFFER, g_vbo);

@@ -1,0 +1,65 @@
+name: Bug report
+description: Something looks wrong, sounds wrong, crashes, or a control doesn't work.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Every report helps - small visual glitches included.
+
+        **Fastest way:** when something goes wrong, press **F9** in the game (it saves a picture of the moment),
+        then run **Report a bug** in the game's folder. It puts a zip on your Desktop - drag it into the box at the end.
+
+        Please don't attach files from the game disc, and don't link to downloads of the game.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you saw or heard, and what you expected instead.
+      placeholder: "In the endoscopy tutorial the light doesn't move when I hold R3..."
+    validations:
+      required: true
+  - type: input
+    id: where
+    attributes:
+      label: Where in the game?
+      description: Character, episode / chapter and roughly when (a menu, a cutscene, a step of an operation).
+      placeholder: "Tomoe, chapter 2-1, after the first polyp"
+    validations:
+      required: true
+  - type: dropdown
+    id: controls
+    attributes:
+      label: What were you playing with?
+      multiple: true
+      options:
+        - Keyboard and mouse
+        - Xbox controller
+        - PlayStation controller (DualShock 4 / DualSense)
+        - Other controller (8BitDo, Switch Pro...)
+        - Real Wii Remote
+        - VR headset
+    validations:
+      required: true
+  - type: dropdown
+    id: often
+    attributes:
+      label: Does it happen every time?
+      options:
+        - Every time
+        - Sometimes
+        - Only once so far
+  - type: checkboxes
+    id: setup
+    attributes:
+      label: Setup
+      options:
+        - label: I'm using the texture pack
+        - label: I turned on the keyboard/controller button prompts in the tutorial pictures
+  - type: textarea
+    id: files
+    attributes:
+      label: Report zip, screenshots or a video
+      description: Drag the zip from Report a bug here (it holds the game's logs, your settings and the F9 picture; your Windows user name is removed).
+    validations:
+      required: false

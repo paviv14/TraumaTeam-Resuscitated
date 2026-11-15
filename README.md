@@ -1,26 +1,79 @@
 # Trauma Team Resuscitated
 
-An **unofficial** native PC port of **Trauma Team** (Atlus, Wii, 2010, USA `SUOE01`) by static
-recompilation, plus a reverse-engineering and modding toolkit for its scripts and messages.
+An **unofficial**, free PC port of **Trauma Team** (Atlus, Wii, 2010, USA), made by static
+recompilation: the game's own code turned into a native Windows program. Sharp up to 4K and beyond,
+widescreen and ultrawide, keyboard and mouse, any controller, or a real Wii Remote - and an
+experimental VR mode.
 
-> Not affiliated with or endorsed by Atlus or Sega. **No game data is included** - not the disc, not its
-> files, not code generated from it. You need your own copy of the game: the port is built from your
-> disc's `main.dol` and loads everything else from your disc at run time.
+> Not affiliated with, endorsed by or connected to Atlus, Sega or Nintendo. **No game data is
+> included** - not the disc, not its files, not code made from it. You need your own copy of the game:
+> Setup builds the port on your PC from your disc. It is free and always will be; if someone sold it
+> to you, please ask for a refund.
 
-The whole game recompiles to a native Windows/Linux program with an OpenGL renderer (any resolution,
-up to 4K and beyond), native audio, keyboard / mouse / gamepad controls and an options menu; the
-script and dialogue layer is fully readable **and editable**. Details and history:
-[docs/RECOMP.md](docs/RECOMP.md). A VR mode is in development.
+**Status: beta.** The game is playable on PC, but you will meet bugs - please
+[report them](#reporting-bugs).
 
-## Building the PC port
+## Installing (Windows 10 / 11, 64-bit)
 
-You need: your Trauma Team (USA) disc extracted (Dolphin: right-click the game > Properties >
-Filesystem > Extract Entire Disc), Python 3.9+, gcc (Linux) or mingw-w64 (Windows build), SDL2, and
-[decomp-toolkit](https://github.com/encounter/decomp-toolkit)'s symbols for `main.dol`
-(`dtk dol split` -> `config/symbols.txt`).
+You need:
+
+* **Your own Trauma Team (USA, `SUOE01`) disc image** - `.iso`, `.rvz`, `.wbfs`, `.wia` or `.gcz`, or a
+  folder you extracted with Dolphin. Other regions are not supported yet.
+* A graphics card with OpenGL 3.3 (any from the last ten years), about **8 GB** of free space while
+  installing, and an internet connection for the tools Setup downloads (about 400 MB).
+
+Then:
+
+1. Download this repository: the green **Code** button > **Download ZIP**, or the source zip of the
+   [latest release](../../releases/latest). Unzip it somewhere with a short path, such as `C:\Games\TraumaTeam`.
+2. Double-click **`Setup.bat`**, pick your disc image and press **Install**. Setup checks that the disc
+   is the right one, downloads a compiler, turns the game's code into a PC program and builds it.
+   This takes 10 to 30 minutes, once.
+3. Play with the **Trauma Team Resuscitated** shortcut it makes (or `bin\Resuscitated.exe`).
+
+Optional in Setup: *Show keyboard and controller button prompts in the tutorial pictures
+(Experimental)* redraws the tutorial pictures with your buttons instead of the Wii Remote (one more
+download of about 400 MB, about 5 more minutes).
+
+**Texture pack (optional):** put the pack's files in a folder named `textures` inside `bin`. The game
+picks it up by itself; the first run with it is slower while the textures are prepared.
+
+## Playing
+
+| | Keyboard and mouse | Controller |
+|---|---|---|
+| Pointer | mouse | right stick |
+| A / B | left click / right click | A / B (Cross / Circle) |
+| Nunchuk stick | W A S D | left stick |
+| Options | **F1** | **Back + Start** |
+
+Every motion of the Wii version has its own button, and the on-screen prompts follow the device you
+use. Full list: [docs/CONTROLS.md](docs/CONTROLS.md). All controls can be changed in the options (F1).
+
+* **F11** fullscreen, **F9** saves a picture of the moment (for bug reports), **F1** options:
+  resolution, widescreen / ultrawide, controls, texture pack, sound.
+* A real **Wii Remote** (with Nunchuk) paired to Windows over Bluetooth works with pointing, motion,
+  rumble and its speaker; it needs a sensor bar, as on a Wii.
+
+## Reporting bugs
+
+Bug reports are very welcome - visual glitches, wrong sounds, controls that feel off, crashes, all of it.
+
+1. When something goes wrong, press **F9** in the game.
+2. Run **`Report a bug.bat`** in the game folder. It puts a zip with the game's logs, your settings and
+   that picture on your Desktop (your Windows user name is removed) and opens the
+   [bug report form](../../issues/new?template=bug_report.yml).
+3. Say what happened and where, and drag the zip in.
+
+Please don't attach files from the game disc or link to downloads of the game.
+
+## Building it yourself (developers)
+
+Setup does all of this on Windows. By hand you need your extracted disc, Python 3.9+, gcc (Linux) or
+mingw-w64, and SDL2:
 
 ```
-python -m recomp.lift <disc>/DATA/sys/main.dol <dtk>/config/symbols.txt generated   # your disc's code -> C
+python -m recomp.lift <disc>/DATA/sys/main.dol data/symbols.txt generated   # your disc's code -> C
 cd recomp
 make -f build.mk -j                     # Linux: ../build/ttpc
 make -f build.mk -j TARGET=windows      # Windows: ../build-win/Resuscitated.exe (needs third_party/, see docs/RECOMP.md)
@@ -28,7 +81,11 @@ make -f build.mk -j TARGET=windows      # Windows: ../build-win/Resuscitated.exe
 
 Run it next to your extracted disc (it looks for `disc/DATA`, `../disc/DATA`, ...; or set `TTPC_DISC`).
 The generated code and the program you build contain the game's code: keep them to yourself.
+How the recompiler works, status and history: [docs/RECOMP.md](docs/RECOMP.md).
 
+# Modding toolkit
+
+The script and dialogue layer is fully readable **and editable**.
 
 ## What works
 

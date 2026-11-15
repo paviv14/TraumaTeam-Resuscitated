@@ -339,7 +339,8 @@ void disclaimer_run(void) {
         "Nothing here is sold: no one is paid and no money is made from it.",
         "It contains no game data. It runs only from your own copy of the game.", "",
         "It is free and always will be.",
-        "If someone sold it to you, please ask for a refund.", 0 };
+        "If someone sold it to you, please ask for a refund.", "",
+        "Found a bug? Please tell us: run 'Report a bug' in the game's folder.", 0 };
     Uint32 t0 = SDL_GetTicks();
     for (;;) {
         int go = 0; SDL_Event e;
