@@ -191,8 +191,8 @@ void texpack_free_image(TPImage *im) { if (!im) return; for (int l = 0; l < im->
 
 // disk cache: "TTC1", u32 w, h, levels, compressed, limit, i64 source size, source mtime, then each level: u32 size + data
 static void cache_path(const Repl *r, int var, char *p, size_t n) {
-    if (r->set) snprintf(p, n, "%s/%016llX_%d_%d%s_p%d_%08X_v3.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u", r->set, g_bind_sig);
-    else snprintf(p, n, "%s/%016llX_%d_%d%s.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u");
+    if (r->set) snprintf(p, n, "%s/%016llX_%d_%d%s_p%d_%08X_v4.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u", r->set, g_bind_sig);
+    else snprintf(p, n, "%s/%016llX_%d_%d%s_e.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u");
 }
 static TPImage *cache_read(const Repl *r, int var) {
     char p[700]; cache_path(r, var, p, sizeof p);
@@ -323,6 +323,27 @@ void texpack_prompts_changed(unsigned sig) {
     pthread_mutex_unlock(&g_tm);
 }
 u64 host_now_ns(void);
+// Upscalers darken the colour of a sprite's soft edge (its see-through pixels are black, and the edge blends towards
+// them): drawn over something light, the edge showed as a grey line (the comic bubbles' tails). The colour of every
+// partly see-through pixel near the opaque part is taken from its nearest opaque neighbours instead; its alpha stays.
+static void bleed_edges(u8 *px, int w, int h) {
+    size_t n = (size_t)w * h; u8 *done = malloc(n), *nd = malloc(n); int any = 0;
+    for (size_t i = 0; i < n; i++) { done[i] = px[4 * i + 3] >= 240; any |= !done[i]; }
+    if (any) for (int pass = 0; pass < 6; pass++) {
+        int changed = 0; memcpy(nd, done, n);
+        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) {
+            size_t i = (size_t)y * w + x; if (done[i]) continue;
+            int r = 0, g = 0, b = 0, c = 0;
+            for (int dy = -1; dy <= 1; dy++) for (int dx = -1; dx <= 1; dx++) {
+                int X = x + dx, Y = y + dy; if ((dx | dy) == 0 || X < 0 || Y < 0 || X >= w || Y >= h) continue;
+                size_t j = (size_t)Y * w + X; if (!done[j]) continue;
+                r += px[4 * j]; g += px[4 * j + 1]; b += px[4 * j + 2]; c++; }
+            if (c) { px[4 * i] = (u8)(r / c); px[4 * i + 1] = (u8)(g / c); px[4 * i + 2] = (u8)(b / c); nd[i] = 1; changed = 1; }
+        }
+        memcpy(done, nd, n); if (!changed) break;
+    }
+    free(done); free(nd);
+}
 static void work(int id, int var) {
     Repl *r = &g_repl[id];
     static int tlog = -1; if (tlog < 0) tlog = getenv("TTPC_TEXLOG") != NULL;
@@ -336,6 +357,7 @@ static void work(int id, int var) {
     }
     // (a dual-palette pair is one RGBA picture split in two, (R,G) and (B,A), and put back together by the game,
     // so the buttons are drawn onto the whole picture before it is split)
+    bleed_edges(rgba, w, h);
     if (r->set) prompt_compose(r->hash, r->set, rgba, w, h);
     if (var) {   // dual-palette pair: make both halves now, cache the other one for later
         int other = var == 1 ? 2 : 1;

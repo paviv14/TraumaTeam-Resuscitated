@@ -701,7 +701,7 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
                  hy1 - hy0 >= 24.f && hy1 - hy0 <= 200.f && (hy0 <= 2.f || hy1 >= 476.f) && !tile_w &&
                  comic_steady(s, mn, mx, hy0, hy1)) {
             touch_l = mn <= 1.f; touch_r = !touch_l && mx >= 639.f; edge_l = mn + g_M; edge_r = mx + g_M;
-            mskip = 1.5f; }
+            mskip = 4.f; }
         else if (flat && g_cfg.wide_fill && (tile_w > 0 || (mx - mn <= 120.f && hy1 - hy0 >= 96.f))) {
             touch_l = mn <= 0.5f && mn + g_M > 0.5f; touch_r = mx >= 639.5f && mx + g_M < g_NW - 0.5f; edge_l = mn + g_M; edge_r = mx + g_M; }
     }
@@ -735,10 +735,10 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
         int m = n; float M = (float)g_M;
         for (int i = 0; i + 2 < n; i += 3) {
             // mirror about the layer's own outer edge, just enough to reach the screen edge
-            // (mskip: a comic panel's own edge column is dark - mirrored at the edge it made a 2-pixel slit, so the
-            // mirror starts that far in and the copy is moved out to meet the panel)
-            if (touch_l) m += mirror_side(&buf[i], &buf[m], edge_l + mskip, 2 * edge_l + mskip, edge_l + mskip * 0.5f, half);
-            if (touch_r) m += mirror_side(&buf[i], &buf[m], 2 * edge_r - g_NW - mskip, edge_r - mskip, edge_r - mskip * 0.5f, half);
+            // (mskip: a comic panel's outer few columns are its dark / see-through border - mirrored at the edge they made a
+            // slit, so the mirror is taken about a line that far inside the panel and the copy covers the border)
+            if (touch_l) m += mirror_side(&buf[i], &buf[m], edge_l + mskip, 2 * (edge_l + mskip), edge_l + mskip, half);
+            if (touch_r) m += mirror_side(&buf[i], &buf[m], 2 * (edge_r - mskip) - g_NW, edge_r - mskip, edge_r - mskip, half);
         }
         n = m;
     }
