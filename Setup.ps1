@@ -1,7 +1,7 @@
 # Trauma Team Resuscitated - Setup
 # Builds the game for this PC from YOUR OWN copy of Trauma Team (USA, extracted with Dolphin), then makes the
 # button-prompt pictures from it. Nothing of the game is downloaded: only free tools (Python via uv, the
-# w64devkit C compiler, SDL2, the OpenXR loader) and, if you choose, the LaMa picture-repair model.
+# w64devkit C compiler, SDL2) and, if you choose, the LaMa picture-repair model.
 # Run Setup.bat (it starts this script). Everything it downloads stays in the "tools-cache" folder here.
 
 param([string]$Disc = '', [string]$Tutorials = '', [switch]$NoPause)   # the setup window passes these
@@ -120,22 +120,7 @@ if (-not (Test-Path $SdlDll) -or (Get-Item $SdlDll).VersionInfo.FileMinorPart -l
     foreach ($d in 'include', 'lib', 'bin') { Copy-Item -Recurse -Force (Join-Path $src.FullName $d) $Sdl }
     Remove-Item -Recurse -Force $z, $t
 }
-$Xr = Join-Path $Tp 'openxr'
-if (-not (Test-Path (Join-Path $Xr 'libopenxr_loader.dll'))) {
-    New-Item -ItemType Directory -Force $Xr | Out-Null
-    Copy-Item -Recurse -Force (Join-Path $Root 'third_party_src\openxr\*') $Xr
-    $z = Join-Path $Cache 'openxr.zip'; $t = Join-Path $Cache 'openxr'
-    Get-File (Latest-Asset 'KhronosGroup/OpenXR-SDK-Source' '^openxr_loader_windows.*\.zip$') $z
-    Expand-Archive -Force $z $t
-    $dll = Get-ChildItem -Recurse $t -Filter 'openxr_loader.dll' | Where-Object { $_.FullName -match '\\x64\\' } | Select-Object -First 1
-    if (-not $dll) { Fail "The OpenXR loader download did not contain openxr_loader.dll." }
-    Copy-Item $dll.FullName (Join-Path $Xr 'libopenxr_loader.dll')
-    Remove-Item -Recurse -Force $z, $t
-}
 $env:PATH = (Join-Path $Dev 'bin') + ';' + $env:PATH
-if (-not (Test-Path (Join-Path $Xr 'libopenxr_loader.dll.a'))) {
-    Push-Location $Xr; & dlltool -d openxr_loader.def -l libopenxr_loader.dll.a; Pop-Location
-}
 
 # ---------------------------------------------------------------- 3. recompile
 Step "3/6 Recompiling the game from your disc (a few minutes)"
@@ -144,7 +129,7 @@ Push-Location $Root
 if ($LASTEXITCODE) { Pop-Location; Fail "Translating main.dol failed." }
 Pop-Location
 Push-Location (Join-Path $Root 'recomp')
-& make -f build.mk TARGET=windows CC=gcc WINDRES=windres "-j$env:NUMBER_OF_PROCESSORS"
+& make -f build.mk TARGET=windows VR=0 CC=gcc WINDRES=windres "-j$env:NUMBER_OF_PROCESSORS"   # VR mode: not in releases yet
 $ok = $LASTEXITCODE -eq 0
 Pop-Location
 $Exe = Join-Path $Root 'build-win\Resuscitated.exe'
@@ -153,7 +138,6 @@ if (-not $ok -or -not (Test-Path $Exe)) { Fail "Building failed - see the messag
 Step "4/6 Putting the game together in the bin folder"
 Copy-Item -Force $Exe $Bin
 Copy-Item -Force (Join-Path $Sdl 'bin\SDL2.dll') $Bin
-Copy-Item -Force (Join-Path $Xr 'libopenxr_loader.dll') $Bin
 foreach ($line in (& objdump -p $Exe | Select-String 'DLL Name: (\S+)')) {   # compiler run-time DLLs the program needs
     $n = $line.Matches[0].Groups[1].Value; $p = Join-Path $Dev "bin\$n"
     if (Test-Path $p) { Copy-Item -Force $p $Bin }

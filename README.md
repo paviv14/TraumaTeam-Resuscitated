@@ -2,8 +2,7 @@
 
 An **unofficial**, free PC port of **Trauma Team** (Atlus, Wii, 2010, USA), made by static
 recompilation: the game's own code turned into a native Windows program. Sharp up to 4K and beyond,
-widescreen and ultrawide, keyboard and mouse, any controller, or a real Wii Remote - and an
-experimental VR mode.
+widescreen and ultrawide, keyboard and mouse, any controller, or a real Wii Remote.
 
 > Not affiliated with, endorsed by or connected to Atlus, Sega or Nintendo. **No game data is
 > included** - not the disc, not its files, not code made from it. You need your own copy of the game:

@@ -15,9 +15,15 @@ SDL_CFLAGS ?= -I$(SDL_DIR)/include -DSDL_MAIN_HANDLED
 SDL_LIBS ?= -L$(SDL_DIR)/lib -lSDL2
 LDFLAGS += -static-libgcc -Wl,--stack,16777216 -mwindows   # a windowed program: no console (logs to ttpc.log)
 WINRES := $(BUILD)/resuscitated_res.o
+VR ?= 1   # VR=0: no VR mode and no OpenXR (the release build Setup makes)
+ifeq ($(VR),1)
 XR_DIR ?= ../third_party/openxr
 RTFLAGS += -I$(XR_DIR)
-LIBS += $(XR_DIR)/libopenxr_loader.dll.a -lopengl32 -lhid -lsetupapi -lwinmm
+LIBS += $(XR_DIR)/libopenxr_loader.dll.a
+else
+RTFLAGS += -DTTPC_NO_VR
+endif
+LIBS += -lopengl32 -lhid -lsetupapi -lwinmm
 else
 CC := gcc
 BUILD ?= ../build

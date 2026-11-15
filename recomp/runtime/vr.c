@@ -28,7 +28,7 @@
 #include "third_party/cgltf.h"
 #include "third_party/stb_image.h"
 
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(TTPC_NO_VR)   // TTPC_NO_VR: release builds (Setup), VR is not ready yet
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <unknwn.h>
@@ -1691,10 +1691,17 @@ int vr_key_frame(void) { return g_active && (g_office_now || g_morgue_now || g_e
 void vr_set_layer(unsigned tex) { g_lay_tex = tex; }   // gl.c: clear the frame to the key colour
 
 // ---------------------------------------------------------------- entry points (called from platform.c / gl.c)
-int vr_wanted(void) { const char *v = getenv("TTPC_VR"); return v && *v && *v != '0'; }
+int vr_wanted(void) {
+#ifdef TTPC_NO_VR
+    return 0;
+#endif
+    const char *v = getenv("TTPC_VR"); return v && *v && *v != '0'; }
 int vr_active(void) { return g_active; }
 
 void vr_init(void) {
+#ifdef TTPC_NO_VR
+    return;
+#endif
     g_preview = getenv("TTPC_VR_PREVIEW") && *getenv("TTPC_VR_PREVIEW") != '0';
     if (!vr_wanted() && !g_preview) return;
     if (!vgl_load()) return;
