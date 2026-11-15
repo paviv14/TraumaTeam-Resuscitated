@@ -74,6 +74,13 @@ for (x, y, w, hh), act in zip([(6, 6, 19, 28), (36, 6, 19, 28), (66, 6, 19, 28),
                               ["minus", "one", "two", "A", "B", "plus", "stick", "C", "Z", "dpad"]):
     slot(h, Wd, Hd, x, y, x + w, y + hh, act)
 
+# 2b. the message window's "next" button: the A letter (next02) over a round button (next03) -> one A slot on the button
+nx = glob.glob(os.path.join(UP, "**", "msw.tpx"), recursive=True)
+if nx:
+    Image.new("RGBA", (96, 96), (0, 0, 0, 0)).save(os.path.join(OUT, "base", "tt_05CA9D9CD0686106_next02_24x24.png"))
+    Image.new("RGBA", (128, 160), (0, 0, 0, 0)).save(os.path.join(OUT, "base", "tt_D32EC6C728A116D0_next03_32x40.png"))
+    slot("D32EC6C728A116D0", 1, 1, 0, 0, 1, 1, "A")
+
 # 3. tutorial pictures --------------------------------------------------------------------------------
 def stem(n):   # tuto_en_snare_01 / snare_03 -> snare
     n = re.sub(r"^tuto_(su|em|en|di|au|or)_", "", n); n = re.sub(r"^(su|em|en|di|au|or)_", "", n)

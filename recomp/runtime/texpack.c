@@ -188,7 +188,7 @@ void texpack_free_image(TPImage *im) { if (!im) return; for (int l = 0; l < im->
 
 // disk cache: "TTC1", u32 w, h, levels, compressed, limit, i64 source size, source mtime, then each level: u32 size + data
 static void cache_path(const Repl *r, int var, char *p, size_t n) {
-    if (r->set) snprintf(p, n, "%s/%016llX_%d_%d%s_p%d_%08X_v2.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u", r->set, g_bind_sig);
+    if (r->set) snprintf(p, n, "%s/%016llX_%d_%d%s_p%d_%08X_v3.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u", r->set, g_bind_sig);
     else snprintf(p, n, "%s/%016llX_%d_%d%s.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u");
 }
 static TPImage *cache_read(const Repl *r, int var) {
@@ -240,15 +240,8 @@ static Glyph *glyph_get(int set, const char *name) {   // prompts/glyphs/<style>
     pthread_mutex_unlock(&m);
     return g.px ? &cache[n - 1].g : NULL;
 }
-static __thread int t_packed;   // composing onto a dual-palette pair: two grey+alpha images, in (R,G) and (B,A)
 static void blend_px(u8 *d, const float *c) {   // c: straight-alpha rgba 0..255
     float a = c[3] / 255.f;
-    if (t_packed) {   // the glyph's brightness goes into both halves
-        float l = 0.299f * c[0] + 0.587f * c[1] + 0.114f * c[2];
-        for (int h = 0; h < 4; h += 2) { float da = d[h + 1] / 255.f, oa = a + da * (1 - a);
-            d[h] = (u8)(oa > 0 ? (l * a + d[h] * da * (1 - a)) / oa + 0.5f : 0); d[h + 1] = (u8)(oa * 255 + 0.5f); }
-        return;
-    }
     float da = d[3] / 255.f, oa = a + da * (1 - a);
     for (int k = 0; k < 3; k++) d[k] = (u8)(oa > 0 ? (c[k] * a + d[k] * da * (1 - a)) / oa + 0.5f : 0);
     d[3] = (u8)(oa * 255 + 0.5f);
@@ -338,7 +331,9 @@ static void work(int id, int var) {
     while ((w > g_tp_limit || h > g_tp_limit) && w > 1 && h > 1) {   // size limit: halve (keeps the aspect ratio)
         int nw = w / 2, nh = h / 2; u8 *s2 = malloc((size_t)nw * nh * 4); box_half(rgba, w, h, s2); free(rgba); rgba = s2; w = nw; h = nh;
     }
-    if (r->set) { t_packed = var != 0; prompt_compose(r->hash, r->set, rgba, w, h); t_packed = 0; }
+    // (a dual-palette pair is one RGBA picture split in two, (R,G) and (B,A), and put back together by the game,
+    // so the buttons are drawn onto the whole picture before it is split)
+    if (r->set) prompt_compose(r->hash, r->set, rgba, w, h);
     if (var) {   // dual-palette pair: make both halves now, cache the other one for later
         int other = var == 1 ? 2 : 1;
         TPImage *o = build_image(variant_of(rgba, w, h, other), w, h, g_tp_compress); cache_write(r, other, o);
