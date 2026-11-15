@@ -1,7 +1,7 @@
 """Erase the Wii Remote / Nunchuk from a tutorial picture with LaMa (big-lama.pt, torchscript) and redraw the
 bubble plates in a controller's symbols.  python tutorial_lama.py <orig dir> <upscaled dir> <out> --only HASH,..."""
 import sys, os, glob
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0, "/tmp")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np, cv2
 from PIL import Image, ImageDraw
 from scipy import ndimage

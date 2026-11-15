@@ -336,8 +336,9 @@ void disclaimer_run(void) {
         "Not affiliated with, endorsed by or connected to Atlus, Sega or Nintendo.",
         "Trauma Team is (c) Atlus. All names and trademarks belong to their owners.", "",
         "Nothing here is sold: no one is paid and no money is made from it.",
-        "It contains no game data. It runs only from your own copy of the game.",
-        "If you paid for this, you were scammed.", 0 };
+        "It contains no game data. It runs only from your own copy of the game.", "",
+        "It is free and always will be.",
+        "If someone sold it to you, please ask for a refund.", 0 };
     Uint32 t0 = SDL_GetTicks();
     for (;;) {
         int go = 0; SDL_Event e;
