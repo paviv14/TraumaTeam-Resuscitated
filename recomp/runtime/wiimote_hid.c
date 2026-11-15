@@ -306,7 +306,14 @@ int whid_pointer(const WiiState *s, float *px, float *py, float *hx, float *hy, 
     if (flip < 0) { const char *e = getenv("TTPC_WII_FLIPY"); flip = e && *e == '1'; }
     float ax, ay, bx, by;
     if (s->ndots >= 2) {
-        ax = s->dot[0][0]; ay = s->dot[0][1]; bx = s->dot[1][0]; by = s->dot[1][1];
+        // the sensor bar's pair: with a reflection seen too, the pair most like last time's (taking the first two
+        // switched between pairs frame to frame - the distance jumped and the endoscope went wild)
+        int bi = 0, bj = 1; float best = 1e9f, lsep = sqrtf(last_dx * last_dx + last_dy * last_dy);
+        for (int i = 0; i < s->ndots; i++) for (int j = i + 1; j < s->ndots; j++) {
+            float dx = s->dot[j][0] - s->dot[i][0], dy = s->dot[j][1] - s->dot[i][1], sp = sqrtf(dx * dx + dy * dy);
+            float sc = fabsf(sp - (have_pair ? lsep : sp)) + 2.f * fabsf(dy);
+            if (sc < best) { best = sc; bi = i; bj = j; } }
+        ax = s->dot[bi][0]; ay = s->dot[bi][1]; bx = s->dot[bj][0]; by = s->dot[bj][1];
         if (ax > bx) { float t = ax; ax = bx; bx = t; t = ay; ay = by; by = t; }
         last_dx = bx - ax; last_dy = by - ay; have_pair = 1;
     } else if (s->ndots == 1 && have_pair) {
@@ -320,6 +327,11 @@ int whid_pointer(const WiiState *s, float *px, float *py, float *hx, float *hy, 
     *px = -rx / 512.f * gain; *py = (flip ? -ry : ry) / 384.f * gain * (4.f / 3.f) * 0.75f;
     *hx = cosf(ang); *hy = sinf(ang);
     float sep = sqrtf(last_dx * last_dx + last_dy * last_dy);
-    *dist = sep > 1 ? 0.2f * 1330.f / sep : 2.f;     // sensor bar dots ~20 cm apart; the camera's focal length ~1330 px
+    float d = sep > 1 ? 0.2f * 1330.f / sep : 2.f;   // sensor bar dots ~20 cm apart; the camera's focal length ~1330 px
+    // smoothed, and still while the Remote is held still: the camera's dots wobble by a pixel or two, which the
+    // endoscope read as pushing and pulling (held still with A + B, it drove back and forth)
+    static float df = -1; if (df < 0) df = d;
+    if (s->ndots >= 2) { float e = d - df; if (fabsf(e) > 0.004f) df += e * 0.35f; }
+    *dist = df;
     return s->ndots >= 2 ? 2 : 1;
 }
