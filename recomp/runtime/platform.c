@@ -450,6 +450,7 @@ void prompts_update(int force) {
 static int g_wheel_push, g_wheel_pull, g_wheel_notch;
 void platform_poll(void) {
     if (!g_window_open) return;
+    { static int shown; if (!shown && g_glctx) { shown = 1; void disclaimer_run(void); disclaimer_run(); } }
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) { fprintf(stderr, "[platform] window closed\n"); exit(0); }

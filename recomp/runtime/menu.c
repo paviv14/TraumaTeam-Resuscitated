@@ -325,7 +325,52 @@ void menu_run(void) {
     // drop input that happened while the menu was open
     SDL_FlushEvents(SDL_FIRSTEVENT, SDL_LASTEVENT);
 }
+// ---------------------------------------------------------------- the notice at start-up
+// Shown once each time the game starts, before the game's own screens: what this is and isn't. Any key, click or
+// controller button continues (after a moment, so it isn't skipped by accident).
+void disclaimer_run(void) {
+    if (!g_gpu || getenv("TTPC_NO_NOTICE")) return;
+    static const char *L[] = {
+        "TRAUMA TEAM RESUSCITATED", "",
+        "An unofficial fan project, made for free.",
+        "Not affiliated with, endorsed by or connected to Atlus, Sega or Nintendo.",
+        "Trauma Team is (c) Atlus. All names and trademarks belong to their owners.", "",
+        "Nothing here is sold: no one is paid and no money is made from it.",
+        "It contains no game data. It runs only from your own copy of the game.",
+        "If you paid for this, you were scammed.", 0 };
+    Uint32 t0 = SDL_GetTicks();
+    for (;;) {
+        int go = 0; SDL_Event e;
+        while (SDL_PollEvent(&e)) {
+            if (e.type == SDL_QUIT) exit(0);
+            if (SDL_GetTicks() - t0 > 1500 && (e.type == SDL_KEYDOWN || e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_CONTROLLERBUTTONDOWN)) go = 1;
+        }
+        if (go) break;
+        int W, H;
+        if (!gpu_overlay_begin(&W, &H, 1.f)) return;
+        const float bg[4] = { 0, 0, 0, 1 }, white[4] = { 1, 1, 1, 1 }, grey[4] = { 0.72f, 0.72f, 0.75f, 1 }, red[4] = { 0.85f, 0.12f, 0.12f, 1 };
+        gpu_overlay_rect(0, 0, (float)W, (float)H, bg);
+        float u = H / 30.f; if (u * 40 > W) u = W / 40.f;
+        int n = 0; while (L[n]) n++;
+        float y = H / 2.f - n * u * 1.4f / 2.f - u;
+        for (int i = 0; i < n; i++) {
+            float px = i == 0 ? u * 1.6f : u * 0.95f; const float *c = i == 0 ? white : grey;
+            if (L[i][0]) gpu_overlay_text((W - gpu_overlay_text_width(px, L[i])) / 2.f, y, px, L[i], c);
+            if (i == 0) gpu_overlay_rect(W / 2.f - u * 6, y + px * 1.15f, u * 12, u * 0.12f, red);
+            y += i == 0 ? u * 2.4f : u * 1.4f;
+        }
+        if (SDL_GetTicks() - t0 > 1500) {
+            const char *p = "Press any button to continue";
+            gpu_overlay_text((W - gpu_overlay_text_width(u * 0.8f, p)) / 2.f, H - u * 3.f, u * 0.8f, p, white);
+        }
+        gpu_overlay_end();
+        SDL_Delay(16);
+    }
+}
+
 #else
+void disclaimer_run(void) {}
 void settings_apply(void) {}
 void menu_run(void) {}
 #endif
+
