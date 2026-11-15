@@ -149,7 +149,12 @@ void wiimote_frame(void) {
     g_twist_step += in->twist;
     {   // the endoscope drives with A + B held on the Wii; here the wheel / right stick does it without them
         extern char g_op_mode[3];
-        if (g_op_mode[0] == 'e' && g_op_mode[1] == 'n' && (in->push || in->pull)) h |= BTN_A | BTN_B;
+        // A + B stay held a moment after the push / pull stops: between mouse-wheel notches the grab was let go, the
+        // Remote's distance snapped back to the middle and the next notch started over - the endoscope stuttered
+        static int hold_ab;
+        int endo = g_op_mode[0] == 'e' && g_op_mode[1] == 'n';
+        if (endo && (in->push || in->pull)) hold_ab = 24; else if (!endo) hold_ab = 0;
+        if (hold_ab > 0) { h |= BTN_A | BTN_B; hold_ab--; }
     }
     { static int got;   // while a TTPC_INPUT script is still driving a menu (e.g. --mission), ignore the real controls
       if (!got) { got = 1; for (int k = 0; k < g_nscript; k++) if (g_script[k].from + g_script[k].len > script_end) script_end = g_script[k].from + g_script[k].len; }

@@ -519,7 +519,9 @@ void platform_poll(void) {
     g_input.twist = 0;
     if (g_wheel_notch) {
         int up = g_wheel_notch > 0;
-        if (endo && !ctrl) { if (up) { g_wheel_push = 5; g_wheel_pull = 0; } else { g_wheel_pull = 5; g_wheel_push = 0; } }
+        // each notch drives a little longer and notches add up (5 frames a notch moved in jerks)
+        if (endo && !ctrl) { if (up) { g_wheel_push = g_wheel_push + 12 > 36 ? 36 : g_wheel_push + 12; g_wheel_pull = 0; }
+                             else { g_wheel_pull = g_wheel_pull + 12 > 36 ? 36 : g_wheel_pull + 12; g_wheel_push = 0; } }
         else if (!endo && up && BK(B_ST_UP)) { g_wheel_push = 8; w_push = 1; }
         else g_input.twist = g_wheel_notch * 0.2618f;   // 15 degrees a notch (up = clockwise)
         g_wheel_notch = 0;
