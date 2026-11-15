@@ -59,20 +59,19 @@ function Find-DolphinTool {
 $Data = $null
 if ($Disc -and (Test-Path -PathType Leaf $Disc)) {
     $dt = Find-DolphinTool
-    # check it first: take out only main.dol and compare (DolphinTool's "header" doesn't show the game ID for every format)
-    $chk = Join-Path $Cache 'disc-check'; if (Test-Path $chk) { Remove-Item -Recurse -Force $chk }
-    & $dt extract -i $Disc -o $chk -s /sys/main.dol --gameonly --quiet 2>&1 | Out-Null
-    $m = Get-ChildItem -Recurse $chk -Filter 'main.dol' -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $m) { Fail "DolphinTool could not read that disc image. Is it a Wii disc image (.iso, .rvz, .wbfs, .wia, .gcz)?" }
-    $ok = (Get-FileHash -Algorithm SHA1 $m.FullName).Hash -eq $DolSha1; Remove-Item -Recurse -Force $chk
-    if (-not $ok) { Fail "That disc image is not Trauma Team (USA) (SUOE01). Only the USA version is supported." }
     $out = Join-Path $Root 'disc'
     if (-not (Disc-Data $out)) {
         Write-Host "   unpacking the disc image (a few minutes)..."
-        & $dt extract -i $Disc -o $out --gameonly --quiet
+        $ErrorActionPreference = 'Continue'   # DolphinTool writes notes to stderr
+        & $dt extract -i $Disc -o $out --gameonly --quiet 2>&1 | ForEach-Object { Write-Host "   $_" }
+        $ErrorActionPreference = 'Stop'
     }
     $dol = Get-ChildItem -Recurse $out -Filter 'main.dol' -ErrorAction SilentlyContinue | Where-Object { $_.Directory.Name -eq 'sys' } | Select-Object -First 1
-    if (-not $dol) { Fail "Unpacking the disc image failed." }
+    if (-not $dol) { Fail "DolphinTool could not unpack that disc image. Is it a Wii disc image (.iso, .rvz, .wbfs, .wia, .gcz)?" }
+    if ((Get-FileHash -Algorithm SHA1 $dol.FullName).Hash -ne $DolSha1) {
+        Remove-Item -Recurse -Force $out
+        Fail "That disc image is not Trauma Team (USA) (SUOE01). Only the USA version is supported."
+    }
     $Data = $dol.Directory.Parent.FullName
 } else { $Data = Disc-Data $Disc }
 $saved = Join-Path $Bin 'disc.txt'
