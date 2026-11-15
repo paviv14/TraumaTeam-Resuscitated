@@ -152,8 +152,13 @@ u32 g_vr_mdl_lo[2], g_vr_mdl_hi[2];   // [0] body, [1] personal effects (physica
 // The Wii Remote models (model/remo/*.brres: the 3D Remote the help shows being swung / twisted): their places in
 // guest memory, so gl.c can leave them out when another controller is in use.
 u32 g_remo_lo[16], g_remo_hi[16];
-static void note_model(u64 off, u32 dst) {
+static void note_model(u64 off, u32 dst, u32 len) {
     DiscFile *f = find_file(off);
+    if (f && !strstr(f->path, "model/remo/")) {   // another file read over a Remote model: that memory is reused
+        u32 lo = dst & 0x1FFFFFFF, hi = lo + len;   // (the blood pool's texture landed there and was hidden as part of the Remote)
+        for (int k = 0; k < 16; k++) if (g_remo_hi[k] && lo < g_remo_hi[k] && g_remo_lo[k] < hi) {
+            fprintf(stderr, "[disc] Remote model at %08X replaced by %s\n", g_remo_lo[k], f->path); g_remo_lo[k] = g_remo_hi[k] = 0; }
+    }
     if (f && strstr(f->path, "model/remo/")) {
         u32 base = (dst & 0x1FFFFFFF) - (u32)(off - f->off); int k, fr = -1;
         for (k = 0; k < 16; k++) { if (g_remo_lo[k] == base) break; if (!g_remo_hi[k] && fr < 0) fr = k; }
@@ -170,7 +175,7 @@ static void note_model(u64 off, u32 dst) {
 int disc_read(u64 off, u32 len, u32 dst) {
     u8 *buf = malloc(len ? len : 1);
     int r = read_host(off, len, buf);
-    if (r == 1) { to_guest(dst, buf, len); note_model(off, dst); }
+    if (r == 1) { to_guest(dst, buf, len); note_model(off, dst, len); }
     free(buf);
     return r;
 }
@@ -207,7 +212,7 @@ DiscJob *disc_read_async(u64 off, u32 len, u32 dst) {
 int disc_job_done(DiscJob *j) { return __atomic_load_n(&j->done, __ATOMIC_ACQUIRE); }
 int disc_job_finish(DiscJob *j) {   // copy into guest memory, free; returns the drive result
     int r = j->result;
-    if (r == 1) { to_guest(j->dst, j->buf, j->len); note_model(j->off, j->dst); }
+    if (r == 1) { to_guest(j->dst, j->buf, j->len); note_model(j->off, j->dst, j->len); }
     free(j->buf); free(j);
     return r;
 }
