@@ -692,7 +692,7 @@ void gpu_draw(const Setup *s, const Out *v, int n) {
         // Anything reaching past the screen's edges - a zoomed background, a close-up character's pieces - is left
         // at its own scale: what lies past the edge already fills the sides, and stretching some pieces of a
         // character but not others drew it in two widths.
-        if (flat && mn <= 0.5f && mx >= 639.5f && mn >= -8.f && mx <= 648.f && ((hy0 <= 8.f && hy1 >= 470.f && hy0 >= -8.f && hy1 <= 540.f) || hy1 - hy0 <= 24.f)) { xs = (float)g_NW / 640.f; xm = 0; }
+        if (flat && mn <= 0.5f && mx >= 639.5f && mn >= -8.f && mx <= 648.f && ((hy0 <= 8.f && hy1 >= 470.f) || hy1 - hy0 <= 24.f)) { xs = (float)g_NW / 640.f; xm = 0; }
         // (a strip to mirror is a border: taller than a pointer or an icon pushed against the edge - those mirrored
         // into the side showed a second, flipped pointer)
         // A comic page's rows of panels (the frame around the office, Naomi's room, the story pages): a strip at the
