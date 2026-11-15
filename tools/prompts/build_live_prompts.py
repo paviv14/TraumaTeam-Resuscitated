@@ -79,7 +79,7 @@ nx = glob.glob(os.path.join(UP, "**", "msw.tpx"), recursive=True)
 if nx:
     Image.new("RGBA", (96, 96), (0, 0, 0, 0)).save(os.path.join(OUT, "base", "tt_05CA9D9CD0686106_next02_24x24.png"))
     Image.new("RGBA", (128, 160), (0, 0, 0, 0)).save(os.path.join(OUT, "base", "tt_D32EC6C728A116D0_next03_32x40.png"))
-    slot("D32EC6C728A116D0", 1, 1, 0, 0, 1, 1, "A")
+    slot("D32EC6C728A116D0", 1, 1, 0, 0, 1, 1, "A"); slot("05CA9D9CD0686106", 1, 1, 0, 0, 0, 0, "none")   # (kept blank)
 
 # 3. tutorial pictures --------------------------------------------------------------------------------
 def stem(n):   # tuto_en_snare_01 / snare_03 -> snare
@@ -117,6 +117,7 @@ def device_act(kind, tx):
     return "pointer"
 
 
+HAND = {"50D92CA933200A4D": [(45, 31, 65, 50, "C")]}   # endoscopy tool palette: the round C button
 n = 0
 for f in sorted(glob.glob(os.path.join(TUT, "*", "*", "tt_*.png"))):
     fn = os.path.basename(f); h = fn[3:19]
@@ -187,6 +188,8 @@ for f in sorted(glob.glob(os.path.join(TUT, "*", "*", "tt_*.png"))):
     if not big and h not in M.FIX:   # Remotes / Nunchuks: their bubble's button, or a new bubble where each stood
         acts = {sl.split()[5] for sl in slots[before:]}
         for m, top, cx, kind in M.find_devices(a):
+            if Ww > 380 and abs(cx - Ww / 2) < 16: continue   # the ">" between the two halves of a before/after picture
+            if "/en/" in f and kind != "nunchuk" and "[8]" in tx and "[3]" not in tx: kind = "nunchuk"   # endoscopy: the tools are on Z
             pls, off = M.bubble_above(a, top, cx)
             cb = bubble_content(top, cx)
             if pls or (cb and cb[2] - cb[0] < (cb[3] - cb[1]) * 1.6):   # a button in the bubble: drawn from the bindings
@@ -201,6 +204,8 @@ for f in sorted(glob.glob(os.path.join(TUT, "*", "*", "tt_*.png"))):
             x0 = max(6, min(Ww - 6 - w, cx - w / 2)); y0 = min(Hh - 8 - hh, top + 4)
             fill(x0 - 5, y0 - 4, x0 + w + 5, y0 + hh + 4, 0.45)
             slot(h, Ww, Hh, x0, y0, x0 + w, y0 + hh, act)
+    for x0, y0, x1, y1, act in HAND.get(h, []):   # buttons the detectors miss
+        fill(x0, y0, x1, y1, 0.5); slot(h, Ww, Hh, x0, y0, x1, y1, act)
     if len(slots) == before: continue          # nothing to show: the game's own picture stays
     b.save(os.path.join(OUT, "base", fn[:-4] + ".jpg"), quality=90); n += 1
 open(os.path.join(OUT, "slots.txt"), "w").write("\n".join(slots) + "\n")

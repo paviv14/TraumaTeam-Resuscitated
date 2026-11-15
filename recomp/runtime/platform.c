@@ -564,7 +564,7 @@ void platform_poll(void) {
         float rx = axis(SDL_CONTROLLER_AXIS_RIGHTX), ry = axis(SDL_CONTROLLER_AXIS_RIGHTY);
         if (pa && (lx || ly)) { rx += lx; ry -= ly; lx = ly = 0; }   // dragging: both sticks move the pointer, the Nunchuk stick rests
         g_input.nx = lx; g_input.ny = ly; g_input.has_analog = lx != 0 || ly != 0;
-        if (endo) {                                         // the endoscope: the right stick drives it (the pointer isn't used)
+        if (endo && !PB(RIGHTSTICK)) {                     // the endoscope: the right stick drives it; R3 held, it aims the light
             if (ry < -0.5f) g_input.push = 1; else if (ry > 0.5f) g_input.pull = 1;
             rx = ry = 0;
         }

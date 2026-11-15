@@ -121,7 +121,10 @@ static void scan_prompts(void) {
         char d[600]; snprintf(d, sizeof d, "%s/base", base);
         int from = g_nrepl; scan(d, 0);
         for (int i = from; i < g_nrepl; i++) {
+            // a picture with no slot left in slots.txt (an older base file still in the folder): not used
+            int has = 0; for (int k = 0; k < g_nslots && !has; k++) has = g_slots[k].hash == g_repl[i].hash;
             g_repl[i].set = s;
+            if (!has) { g_repl[i].hash = 0; continue; }
             if (g_pset_n[s] == g_pset_cap[s]) { g_pset_cap[s] = g_pset_cap[s] ? g_pset_cap[s] * 2 : 64; g_pset_map[s] = realloc(g_pset_map[s], sizeof *g_pset_map[s] * g_pset_cap[s]); }
             g_pset_map[s][g_pset_n[s]].hash = g_repl[i].hash; g_pset_map[s][g_pset_n[s]].id = i; g_pset_n[s]++;
         }

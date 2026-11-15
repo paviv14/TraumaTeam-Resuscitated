@@ -29,6 +29,8 @@ static const char *pad_word(int p, int set) {   // a controller button's name, a
 // whole messages: the two Wii lines -> keyboard & mouse / controller ({GRAB} {SWING} {TWL} {TWR} {KUP}: bindings)
 typedef struct { const char *a, *b, *ka, *kb, *pa, *pb; } Rw;
 static const Rw RW[] = {
+    // endoscopy: the Remote's pointer is the light (the mouse; on a controller the right stick drives, R3 + it aims)
+    { "Tilt [6] on the Nunchuk to", "direct the endoscope.", "Use [6] to steer the endoscope.", "The mouse aims the light.", "Tilt [6] to steer the endoscope.", "Hold {R3}: right stick aims light." },
     { "Grab with [3] and [4], then twist", "the Wii Remote to rotate.", "Grab with [3] and [4], then use", "the mouse wheel to rotate.", "Grab with [3] and {GRAB}, then use", "{TWL} / {TWR} to rotate." },
     { "Auscultation results can be", "heard on the Wii Remote.", NULL, "heard on your speakers.", NULL, "heard on your speakers." },
     { "Twist the Wii Remote to match the", NULL, "Turn the mouse wheel to match the", NULL, "Use {TWL} / {TWR} to match the", NULL },
@@ -60,6 +62,7 @@ static void put(char *o, size_t n, const char *s, int set) {   // expand the bin
             else if (!strcmp(t, "SWING")) w = pad_word(g_bind[B_SWING].pad, set);
             else if (!strcmp(t, "TWL")) w = pad_word(g_bind[B_TW_L].pad, set);
             else if (!strcmp(t, "TWR")) w = pad_word(g_bind[B_TW_R].pad, set);
+            else if (!strcmp(t, "R3")) w = pad_word(8, set);
             else if (!strcmp(t, "KUP")) w = bind_key_label(B_ST_UP);
         }
         if (w) { size_t l = strlen(w); if (k + l >= n) break; memcpy(o + k, w, l); k += l; s += skip; }
