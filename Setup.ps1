@@ -156,9 +156,9 @@ Set-Content -Encoding ASCII $saved $Data
 
 # ---------------------------------------------------------------- 4. button prompts
 Step "5/6 Making the button prompts from your disc"
-Write-Host "   The tutorial pictures show a Wii Remote. Setup can repaint them for keyboard and controllers"
-Write-Host "   (downloads about 1 GB once - a picture-repair AI model - and takes 10-30 minutes)."
-$tut = if ($Tutorials) { $Tutorials -match '^[yY1t]' } else { (Read-Host "   Repaint the tutorial pictures? [Y/n]") -notmatch '^[nN]' }
+Write-Host "   The tutorial pictures show a Wii Remote. Setup can change them to show your keyboard or controller"
+Write-Host "   buttons instead (downloads about 1 GB once - a picture-repair AI model - and takes 10-30 minutes)."
+$tut = if ($Tutorials) { $Tutorials -match '^[yY1t]' } else { (Read-Host "   Show keyboard / controller buttons in the tutorial pictures? [Y/n]") -notmatch '^[nN]' }
 $with = @('--with', 'pillow', '--with', 'numpy', '--with', 'scipy', '--with', 'opencv-python-headless')
 $args2 = @()
 if ($tut) {

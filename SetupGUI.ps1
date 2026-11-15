@@ -49,8 +49,8 @@ $discOk = Label '' 44 232 572 20 (New-Object Drawing.Font('Segoe UI', 9)) $dim
 
 # 2. options
 Label '2.  Options' 24 262 400 22 $uiB | Out-Null
-$tut = New-Object Windows.Forms.CheckBox; $tut.Location = '44,288'; $tut.Size = '572,40'; $tut.Checked = $true
-$tut.Font = $ui; $tut.ForeColor = $fg; $tut.Text = "Repaint the tutorial pictures for keyboard and controllers`n(downloads about 1 GB once; adds 10-30 minutes)"
+$tut = New-Object Windows.Forms.CheckBox; $tut.Location = '44,288'; $tut.Size = '572,44'; $tut.Checked = $true
+$tut.Font = $ui; $tut.ForeColor = $fg; $tut.Text = "Show keyboard and controller buttons in the tutorial pictures`n(instead of the Wii Remote - downloads about 1 GB once, adds 10-30 minutes)"
 $form.Controls.Add($tut)
 
 # progress
