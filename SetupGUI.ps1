@@ -39,11 +39,12 @@ Label ("An unofficial fan project, free and not affiliated with Atlus, Sega or N
        "Setup builds the game on this PC from your own copy of Trauma Team (USA); nothing of the game is downloaded.") 24 104 592 40 $ui $dim | Out-Null
 
 # 1. disc
-Label '1.  Your extracted disc' 24 156 400 22 $uiB | Out-Null
-Label 'Dolphin: right-click the game > Properties > Filesystem > right-click the disc > Extract Entire Disc' 44 178 580 20 (New-Object Drawing.Font('Segoe UI', 8.5)) $dim | Out-Null
-$disc = New-Object Windows.Forms.TextBox; $disc.Location = '44,202'; $disc.Size = '450,26'; $disc.Font = $ui
+Label '1.  Your copy of Trauma Team (USA)' 24 156 400 22 $uiB | Out-Null
+Label 'Your disc image (.iso, .rvz, .wbfs...) - or a folder you extracted it to with Dolphin' 44 178 580 20 (New-Object Drawing.Font('Segoe UI', 8.5)) $dim | Out-Null
+$disc = New-Object Windows.Forms.TextBox; $disc.Location = '44,202'; $disc.Size = '330,26'; $disc.Font = $ui
 $disc.BackColor = $panel; $disc.ForeColor = $fg; $disc.BorderStyle = 'FixedSingle'; $form.Controls.Add($disc)
-$browse = Button 'Browse...' 504 198 112
+$browse = Button 'Disc image...' 384 198 120
+$folder = Button 'Folder...' 512 198 104
 $discOk = Label '' 44 232 572 20 (New-Object Drawing.Font('Segoe UI', 9)) $dim
 
 # 2. options
@@ -71,7 +72,13 @@ function Disc-Data($p) {
     return $null
 }
 function Check-Disc {
-    $d = Disc-Data $disc.Text.Trim()
+    $p = $disc.Text.Trim()
+    if ($p -and (Test-Path -PathType Leaf $p)) {   # a disc image: its game ID is in the first bytes of a plain .iso; others are checked during the install
+        $id = ''; try { $f = [IO.File]::OpenRead($p); $b = New-Object byte[] 6; [void]$f.Read($b, 0, 6); $f.Close(); $id = [Text.Encoding]::ASCII.GetString($b) } catch {}
+        if ($p -match '\.iso$' -and $id -ne 'SUOE01') { $discOk.Text = 'This is not Trauma Team (USA) (game ID SUOE01).'; $discOk.ForeColor = $red; return $false }
+        $discOk.Text = 'Disc image - it will be unpacked during the install.'; $discOk.ForeColor = $green; return $true
+    }
+    $d = Disc-Data $p
     if (-not $d) { $discOk.Text = $(if ($disc.Text) { 'No sys\main.dol in that folder.' } else { 'Pick the folder you extracted the game to.' }); $discOk.ForeColor = $dim; return $false }
     $discOk.Text = 'Checking...'; $form.Refresh()
     if ((Get-FileHash -Algorithm SHA1 (Join-Path $d 'sys\main.dol')).Hash -ne '420143D75336A5F2BC14F9DFBE8A9EC56EFBE8C8') {
@@ -81,7 +88,16 @@ function Check-Disc {
 $saved = Join-Path $Root 'bin\disc.txt'
 if (Test-Path $saved) { $disc.Text = (Get-Content $saved -TotalCount 1).Trim() }
 if (-not $disc.Text) { foreach ($c in @("$Root\disc", "$Root\..\disc", "$Root\..\..\disc")) { if (-not $disc.Text -and (Disc-Data $c)) { $disc.Text = (Resolve-Path $c).Path } } }
+if (-not $disc.Text) {   # a disc image next to this folder, e.g. "Trauma Team (USA).rvz"
+    $img = Get-ChildItem -ErrorAction SilentlyContinue -Path "$Root\*", "$Root\..\*" -Include *.iso, *.rvz, *.wbfs, *.wia, *.gcz |
+           Where-Object { $_.Name -match 'trauma\s*team' } | Select-Object -First 1
+    if ($img) { $disc.Text = $img.FullName }
+}
 $browse.Add_Click({
+    $dlg = New-Object Windows.Forms.OpenFileDialog; $dlg.Title = 'Your Trauma Team (USA) disc image'
+    $dlg.Filter = 'Wii disc images (*.iso;*.rvz;*.wbfs;*.wia;*.gcz)|*.iso;*.rvz;*.wbfs;*.wia;*.gcz|All files|*.*'
+    if ($dlg.ShowDialog() -eq 'OK') { $disc.Text = $dlg.FileName; Check-Disc | Out-Null } })
+$folder.Add_Click({
     $dlg = New-Object Windows.Forms.FolderBrowserDialog; $dlg.Description = 'The folder you extracted Trauma Team (USA) to'
     if ($dlg.ShowDialog() -eq 'OK') { $disc.Text = $dlg.SelectedPath; Check-Disc | Out-Null } })
 $disc.Add_Leave({ Check-Disc | Out-Null })
@@ -90,7 +106,7 @@ $disc.Add_Leave({ Check-Disc | Out-Null })
 $proc = $null; $timer = New-Object Windows.Forms.Timer; $timer.Interval = 400; $seen = 0
 $install.Add_Click({
     if (-not (Check-Disc)) { return }
-    $install.Enabled = $false; $browse.Enabled = $false; $tut.Enabled = $false; $disc.ReadOnly = $true
+    $install.Enabled = $false; $browse.Enabled = $false; $folder.Enabled = $false; $tut.Enabled = $false; $disc.ReadOnly = $true
     $status.Text = 'Starting...'; $box.Text = ''; Set-Content $Log ''
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$(Join-Path $Root 'Setup.ps1')`"", '-NoPause',
            '-Disc', "`"$($disc.Text.Trim())`"", '-Tutorials', $(if ($tut.Checked) { 'yes' } else { 'no' }))
@@ -112,7 +128,7 @@ $timer.Add_Tick({
         } else {
             $status.Text = 'Setup stopped - see the messages below (also in tools-cache\setup.log).'; $status.ForeColor = $red
             foreach ($l in (Read-Shared $ErrLog | Select-Object -Last 15)) { if ($l.Trim()) { $box.AppendText($l.TrimEnd() + "`r`n") } }
-            $install.Text = 'Try again'; $install.Enabled = $true; $browse.Enabled = $true; $tut.Enabled = $true; $disc.ReadOnly = $false
+            $install.Text = 'Try again'; $install.Enabled = $true; $browse.Enabled = $true; $folder.Enabled = $true; $tut.Enabled = $true; $disc.ReadOnly = $false
         }
     } })
 $play.Add_Click({ Start-Process (Join-Path $Root 'bin\Resuscitated.exe') -WorkingDirectory (Join-Path $Root 'bin'); $form.Close() })

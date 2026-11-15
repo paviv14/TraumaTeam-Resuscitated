@@ -40,7 +40,36 @@ function Disc-Data($p) {
     if (Test-Path (Join-Path $p 'DATA\sys\main.dol')) { return (Resolve-Path (Join-Path $p 'DATA')).Path }
     return $null
 }
-$Data = Disc-Data $Disc
+# a disc image (.iso .rvz .wbfs .wia .gcz): unpacked with DolphinTool (Dolphin's own command-line tool; yours if
+# Dolphin is next to this folder or installed, otherwise a copy is downloaded) into the "disc" folder here
+function Find-DolphinTool {
+    $c = @(Get-ChildItem -ErrorAction SilentlyContinue -Path "$Root\..\dolphin*\DolphinTool.exe", "$Root\..\..\dolphin*\DolphinTool.exe",
+           "$env:ProgramFiles\Dolphin*\DolphinTool.exe", "$Cache\dolphintool\*\DolphinTool.exe", "$Cache\dolphintool\*\*\DolphinTool.exe")
+    if ($c.Count) { return $c[0].FullName }
+    Write-Host "   getting DolphinTool (to unpack the disc image)"
+    $meta = Invoke-RestMethod -UseBasicParsing -Uri 'https://registry.npmjs.org/@emmercm/dolphin-tool-win32-x64/latest'
+    $t = Join-Path $Cache 'dolphintool.tgz'; Get-File $meta.dist.tarball $t
+    New-Item -ItemType Directory -Force (Join-Path $Cache 'dolphintool') | Out-Null
+    & tar -xzf $t -C (Join-Path $Cache 'dolphintool'); Remove-Item $t
+    $c = @(Get-ChildItem -Recurse (Join-Path $Cache 'dolphintool') -Filter 'DolphinTool.exe' -ErrorAction SilentlyContinue)
+    if (-not $c.Count) { $c = @(Get-ChildItem -Recurse (Join-Path $Cache 'dolphintool') -Filter 'dolphin-tool*.exe') }
+    if (-not $c.Count) { Fail "Could not get DolphinTool. Extract the disc with Dolphin instead (Properties > Filesystem > Extract Entire Disc)." }
+    return $c[0].FullName
+}
+$Data = $null
+if ($Disc -and (Test-Path -PathType Leaf $Disc)) {
+    $dt = Find-DolphinTool
+    $hdr = (& $dt header -i $Disc 2>&1 | Out-String)
+    if ($hdr -notmatch 'SUOE01') { Fail "That disc image is not Trauma Team (USA) (game ID SUOE01). Only the USA version is supported." }
+    $out = Join-Path $Root 'disc'
+    if (-not (Disc-Data $out)) {
+        Write-Host "   unpacking the disc image (a few minutes)..."
+        & $dt extract -i $Disc -o $out --gameonly --quiet
+    }
+    $dol = Get-ChildItem -Recurse $out -Filter 'main.dol' -ErrorAction SilentlyContinue | Where-Object { $_.Directory.Name -eq 'sys' } | Select-Object -First 1
+    if (-not $dol) { Fail "Unpacking the disc image failed." }
+    $Data = $dol.Directory.Parent.FullName
+} else { $Data = Disc-Data $Disc }
 $saved = Join-Path $Bin 'disc.txt'
 if (-not $Data -and (Test-Path $saved)) { $Data = Disc-Data ((Get-Content $saved -TotalCount 1).Trim()) }
 foreach ($c in @("$Root\disc", "$Root\..\disc", "$Root\..\..\disc")) { if (-not $Data) { $Data = Disc-Data $c } }
