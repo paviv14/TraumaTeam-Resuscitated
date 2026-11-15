@@ -267,10 +267,24 @@ int platform_speaker_pcm(const s16 *pcm, int n) {
     return g_ds_audio != 0;
 }
 static float g_pad_px = 0.5f, g_pad_py = 0.5f;
+// Every connected controller is opened; the one used last is g_pad (a DualSense paired over Bluetooth and an
+// 8BitDo on USB: only the first was read, the other did nothing).
+static SDL_GameController *g_pads[8];
+static int pad_id(SDL_GameController *c) { return c ? SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(c)) : -1; }
 static void pad_open(int index) {
-    if (g_pad || !SDL_IsGameController(index)) return;
-    g_pad = SDL_GameControllerOpen(index);
-    if (g_pad) fprintf(stderr, "[input] controller: %s\n", SDL_GameControllerName(g_pad));
+    if (!SDL_IsGameController(index)) return;
+    int id = SDL_JoystickGetDeviceInstanceID(index);
+    for (int k = 0; k < 8; k++) if (g_pads[k] && pad_id(g_pads[k]) == id) return;
+    for (int k = 0; k < 8; k++) if (!g_pads[k]) {
+        g_pads[k] = SDL_GameControllerOpen(index);
+        if (g_pads[k]) { fprintf(stderr, "[input] controller: %s\n", SDL_GameControllerName(g_pads[k])); if (!g_pad) g_pad = g_pads[k]; }
+        return;
+    }
+}
+static void pad_use(int id) {   // a press or a real move on this controller: it becomes the one read
+    if (pad_id(g_pad) == id) return;
+    for (int k = 0; k < 8; k++) if (g_pads[k] && pad_id(g_pads[k]) == id) {
+        g_pad = g_pads[k]; fprintf(stderr, "[input] using %s\n", SDL_GameControllerName(g_pad)); void prompts_update(int); prompts_update(1); return; }
 }
 static float axis(SDL_GameControllerAxis a) {
     float v = g_pad ? SDL_GameControllerGetAxis(g_pad, a) / 32767.f : 0.f;
@@ -440,10 +454,14 @@ void platform_poll(void) {
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) { fprintf(stderr, "[platform] window closed\n"); exit(0); }
         if (e.type == SDL_CONTROLLERDEVICEADDED) pad_open(e.cdevice.which);
-        if (e.type == SDL_CONTROLLERDEVICEREMOVED && g_pad && e.cdevice.which == SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(g_pad))) {
-            SDL_GameControllerClose(g_pad); g_pad = NULL; g_pointer_pad = 0;
-            for (int i = 0; i < SDL_NumJoysticks(); i++) pad_open(i);
+        if (e.type == SDL_CONTROLLERDEVICEREMOVED) {
+            for (int k = 0; k < 8; k++) if (g_pads[k] && pad_id(g_pads[k]) == e.cdevice.which) {
+                if (g_pad == g_pads[k]) { g_pad = NULL; g_pointer_pad = 0; }
+                SDL_GameControllerClose(g_pads[k]); g_pads[k] = NULL; }
+            if (!g_pad) for (int k = 0; k < 8; k++) if (g_pads[k]) { g_pad = g_pads[k]; break; }
         }
+        if (e.type == SDL_CONTROLLERBUTTONDOWN) pad_use(e.cbutton.which);
+        if (e.type == SDL_CONTROLLERAXISMOTION && (e.caxis.value > 20000 || e.caxis.value < -20000)) pad_use(e.caxis.which);
         if (e.type == SDL_MOUSEMOTION) g_pointer_pad = 0;
         // the device used last (for the button prompts): a press, or a real move, not a twitch
         if (e.type == SDL_KEYDOWN || e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_MOUSEWHEEL) g_last_dev = 1;
