@@ -161,7 +161,7 @@ Set-Content -Encoding ASCII $saved $Data
 # ---------------------------------------------------------------- 4. button prompts
 Step "5/6 Making the button prompts from your disc"
 Write-Host "   The tutorial pictures show a Wii Remote. Setup can change them to show your keyboard or controller"
-Write-Host "   buttons instead (downloads about 1 GB once - a picture-repair AI model - and takes 10-30 minutes)."
+Write-Host "   buttons instead (downloads about 400 MB once - a picture-repair AI model - and takes about 5 minutes)."
 $tut = if ($Tutorials) { $Tutorials -match '^[yY1t]' } else { (Read-Host "   Show keyboard / controller button prompts in the tutorial pictures (experimental)? [Y/n]") -notmatch '^[nN]' }
 $with = @('--with', 'pillow', '--with', 'numpy', '--with', 'scipy', '--with', 'opencv-python-headless')
 $args2 = @()
