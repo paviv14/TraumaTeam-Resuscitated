@@ -59,8 +59,13 @@ function Find-DolphinTool {
 $Data = $null
 if ($Disc -and (Test-Path -PathType Leaf $Disc)) {
     $dt = Find-DolphinTool
-    $hdr = (& $dt header -i $Disc 2>&1 | Out-String)
-    if ($hdr -notmatch 'SUOE01') { Fail "That disc image is not Trauma Team (USA) (game ID SUOE01). Only the USA version is supported." }
+    # check it first: take out only main.dol and compare (DolphinTool's "header" doesn't show the game ID for every format)
+    $chk = Join-Path $Cache 'disc-check'; if (Test-Path $chk) { Remove-Item -Recurse -Force $chk }
+    & $dt extract -i $Disc -o $chk -s /sys/main.dol --gameonly --quiet 2>&1 | Out-Null
+    $m = Get-ChildItem -Recurse $chk -Filter 'main.dol' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $m) { Fail "DolphinTool could not read that disc image. Is it a Wii disc image (.iso, .rvz, .wbfs, .wia, .gcz)?" }
+    $ok = (Get-FileHash -Algorithm SHA1 $m.FullName).Hash -eq $DolSha1; Remove-Item -Recurse -Force $chk
+    if (-not $ok) { Fail "That disc image is not Trauma Team (USA) (SUOE01). Only the USA version is supported." }
     $out = Join-Path $Root 'disc'
     if (-not (Disc-Data $out)) {
         Write-Host "   unpacking the disc image (a few minutes)..."
