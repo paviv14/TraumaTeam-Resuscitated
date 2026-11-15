@@ -26,4 +26,5 @@ for f in sorted(glob.glob(os.path.join(orig, "*", "*", "tt_*.png"))):
         for dm, top, cx, k in M.find_devices(a): m |= ndimage.binary_dilation(dm, iterations=4)
     if m.any() and COPY: continue
     Image.fromarray(L.erase(u, m) if m.any() else u).save(dst, quality=92); n += 1
+    if n % 20 == 0: print("   tutorial pictures: %d done" % n, flush=True)
 print(n, "done,", left, "left")
