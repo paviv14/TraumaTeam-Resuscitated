@@ -61,6 +61,7 @@ void settings_save(void) {
 
 #ifdef TTPC_SDL
 #include <SDL2/SDL.h>
+void platform_pad_event(const SDL_Event *e);
 extern SDL_Window *g_sdl_window;
 void video_reload_textures(void);
 void platform_audio_pause(int pause);
@@ -176,7 +177,7 @@ void menu_run(void) {
     Uint32 capture_t = 0;
     while (!done) {
         SDL_Event e;
-        while (SDL_PollEvent(&e)) {
+        while (SDL_PollEvent(&e)) { platform_pad_event(&e);
             if (e.type == SDL_QUIT) { fprintf(stderr, "[platform] window closed\n"); exit(0); }
             int key = e.type == SDL_KEYDOWN ? e.key.keysym.sym : 0, sc = e.type == SDL_KEYDOWN ? e.key.keysym.scancode : 0;
             int btn = e.type == SDL_CONTROLLERBUTTONDOWN ? e.cbutton.button : -1;
@@ -342,7 +343,7 @@ void disclaimer_run(void) {
     Uint32 t0 = SDL_GetTicks();
     for (;;) {
         int go = 0; SDL_Event e;
-        while (SDL_PollEvent(&e)) {
+        while (SDL_PollEvent(&e)) { platform_pad_event(&e);
             if (e.type == SDL_QUIT) exit(0);
             if (SDL_GetTicks() - t0 > 1500 && (e.type == SDL_KEYDOWN || e.type == SDL_MOUSEBUTTONDOWN || e.type == SDL_CONTROLLERBUTTONDOWN)) go = 1;
         }

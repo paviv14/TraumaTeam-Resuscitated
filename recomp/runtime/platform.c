@@ -447,20 +447,25 @@ void prompts_update(int force) {
     static const char *nm[] = { "Wii Remote (original)", "keyboard & mouse", "Xbox", "PlayStation 4", "PlayStation 5" };
     fprintf(stderr, "[prompts] showing %s buttons\n", nm[set]);
 }
+// Controllers plugged in or out. Every event loop calls this (the game's, the options menu's, the notice at
+// start): a loop that dropped these events left the controllers that were connected at start unopened.
+void platform_pad_event(const SDL_Event *e) {
+    if (e->type == SDL_CONTROLLERDEVICEADDED) pad_open(e->cdevice.which);
+    if (e->type == SDL_CONTROLLERDEVICEREMOVED) {
+        for (int k = 0; k < 8; k++) if (g_pads[k] && pad_id(g_pads[k]) == e->cdevice.which) {
+            if (g_pad == g_pads[k]) { g_pad = NULL; g_pointer_pad = 0; }
+            SDL_GameControllerClose(g_pads[k]); g_pads[k] = NULL; }
+        if (!g_pad) for (int k = 0; k < 8; k++) if (g_pads[k]) { g_pad = g_pads[k]; break; }
+    }
+}
 static int g_wheel_push, g_wheel_pull, g_wheel_notch;
 void platform_poll(void) {
     if (!g_window_open) return;
-    { static int shown; if (!shown && g_glctx) { shown = 1; void disclaimer_run(void); disclaimer_run(); } }
+    { static int shown; if (!shown && g_glctx) { shown = 1; void disclaimer_run(void); disclaimer_run(); for (int i = 0; i < SDL_NumJoysticks(); i++) pad_open(i); } }
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) { fprintf(stderr, "[platform] window closed\n"); exit(0); }
-        if (e.type == SDL_CONTROLLERDEVICEADDED) pad_open(e.cdevice.which);
-        if (e.type == SDL_CONTROLLERDEVICEREMOVED) {
-            for (int k = 0; k < 8; k++) if (g_pads[k] && pad_id(g_pads[k]) == e.cdevice.which) {
-                if (g_pad == g_pads[k]) { g_pad = NULL; g_pointer_pad = 0; }
-                SDL_GameControllerClose(g_pads[k]); g_pads[k] = NULL; }
-            if (!g_pad) for (int k = 0; k < 8; k++) if (g_pads[k]) { g_pad = g_pads[k]; break; }
-        }
+        platform_pad_event(&e);
         if (e.type == SDL_CONTROLLERBUTTONDOWN) pad_use(e.cbutton.which);
         if (e.type == SDL_CONTROLLERAXISMOTION && (e.caxis.value > 20000 || e.caxis.value < -20000)) pad_use(e.caxis.which);
         if (e.type == SDL_MOUSEMOTION) g_pointer_pad = 0;
