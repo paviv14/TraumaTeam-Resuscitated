@@ -108,9 +108,12 @@ if (-not (Test-Path (Join-Path $Dev 'bin\gcc.exe'))) {
 }
 $Tp = Join-Path $Root 'third_party'
 $Sdl = Join-Path $Tp 'SDL2-win'
-if (-not (Test-Path (Join-Path $Sdl 'bin\SDL2.dll'))) {
+$SdlDll = Join-Path $Sdl 'bin\SDL2.dll'
+# 2.32 or newer: older SDL does not know some controllers (an 8BitDo Ultimate 2 did nothing with 2.30)
+if (-not (Test-Path $SdlDll) -or (Get-Item $SdlDll).VersionInfo.FileMinorPart -lt 32) {
+    if (Test-Path $Sdl) { Remove-Item -Recurse -Force $Sdl }
     $z = Join-Path $Cache 'sdl.zip'; $t = Join-Path $Cache 'sdl'
-    Get-File 'https://github.com/libsdl-org/SDL/releases/download/release-2.30.9/SDL2-devel-2.30.9-mingw.zip' $z
+    Get-File 'https://github.com/libsdl-org/SDL/releases/download/release-2.32.10/SDL2-devel-2.32.10-mingw.zip' $z
     Expand-Archive -Force $z $t
     $src = Get-ChildItem -Recurse -Directory $t | Where-Object { $_.Name -eq 'x86_64-w64-mingw32' } | Select-Object -First 1
     New-Item -ItemType Directory -Force $Sdl | Out-Null
