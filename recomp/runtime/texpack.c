@@ -191,8 +191,8 @@ void texpack_free_image(TPImage *im) { if (!im) return; for (int l = 0; l < im->
 
 // disk cache: "TTC1", u32 w, h, levels, compressed, limit, i64 source size, source mtime, then each level: u32 size + data
 static void cache_path(const Repl *r, int var, char *p, size_t n) {
-    if (r->set) snprintf(p, n, "%s/%016llX_%d_%d%s_p%d_%08X_v4.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u", r->set, g_bind_sig);
-    else snprintf(p, n, "%s/%016llX_%d_%d%s_e.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u");
+    if (r->set) snprintf(p, n, "%s/%016llX_%d_%d%s_p%d_%08X_v5.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u", r->set, g_bind_sig);
+    else snprintf(p, n, "%s/%016llX_%d_%d%s_f.ttc", g_cache_dir, (unsigned long long)r->hash, var, g_tp_limit, g_tp_compress ? "" : "u");
 }
 static TPImage *cache_read(const Repl *r, int var) {
     char p[700]; cache_path(r, var, p, sizeof p);
@@ -357,7 +357,7 @@ static void work(int id, int var) {
     }
     // (a dual-palette pair is one RGBA picture split in two, (R,G) and (B,A), and put back together by the game,
     // so the buttons are drawn onto the whole picture before it is split)
-    bleed_edges(rgba, w, h);
+    if (strstr(r->path, "hukidasi")) bleed_edges(rgba, w, h);   // speech-bubble pieces only: elsewhere soft dark edges are meant (outlined labels, see-through plates)
     if (r->set) prompt_compose(r->hash, r->set, rgba, w, h);
     if (var) {   // dual-palette pair: make both halves now, cache the other one for later
         int other = var == 1 ? 2 : 1;
