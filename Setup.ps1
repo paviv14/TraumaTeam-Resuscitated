@@ -4,6 +4,7 @@
 # w64devkit C compiler, SDL2, the OpenXR loader) and, if you choose, the LaMa picture-repair model.
 # Run Setup.bat (it starts this script). Everything it downloads stays in the "tools-cache" folder here.
 
+param([string]$Disc = '', [string]$Tutorials = '', [switch]$NoPause)   # the setup window passes these
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
@@ -15,7 +16,7 @@ New-Item -ItemType Directory -Force $Cache, $Bin | Out-Null
 try { Start-Transcript -Path (Join-Path $Cache 'setup.log') -Force | Out-Null } catch {}
 
 function Step($t) { Write-Host ""; Write-Host "== $t" -ForegroundColor Cyan }
-function Fail($t) { Write-Host ""; Write-Host $t -ForegroundColor Red; Read-Host "Press Enter to close"; exit 1 }
+function Fail($t) { Write-Host ""; Write-Host "ERROR: $t" -ForegroundColor Red; if (-not $NoPause) { Read-Host "Press Enter to close" }; exit 1 }
 function Get-File($url, $out) {
     Write-Host "   downloading $(Split-Path $url -Leaf)"
     Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $out
@@ -32,18 +33,18 @@ Write-Host "An unofficial fan project, free and not affiliated with Atlus, Sega 
 Write-Host "It builds the game from your own copy; nothing here contains the game."
 
 # ---------------------------------------------------------------- 1. your disc
-Step "Finding your extracted disc"
+Step "1/6 Finding your extracted disc"
 function Disc-Data($p) {
     if (-not $p) { return $null }
     if (Test-Path (Join-Path $p 'sys\main.dol')) { return (Resolve-Path $p).Path }
     if (Test-Path (Join-Path $p 'DATA\sys\main.dol')) { return (Resolve-Path (Join-Path $p 'DATA')).Path }
     return $null
 }
-$Data = $null
+$Data = Disc-Data $Disc
 $saved = Join-Path $Bin 'disc.txt'
-if (Test-Path $saved) { $Data = Disc-Data ((Get-Content $saved -TotalCount 1).Trim()) }
+if (-not $Data -and (Test-Path $saved)) { $Data = Disc-Data ((Get-Content $saved -TotalCount 1).Trim()) }
 foreach ($c in @("$Root\disc", "$Root\..\disc", "$Root\..\..\disc")) { if (-not $Data) { $Data = Disc-Data $c } }
-if (-not $Data) {
+if (-not $Data -and -not $NoPause) {
     Write-Host "   Pick the folder you extracted Trauma Team (USA) to."
     Write-Host "   (Dolphin: right-click the game > Properties > Filesystem > right-click the disc > Extract Entire Disc)"
     Add-Type -AssemblyName System.Windows.Forms
@@ -57,7 +58,7 @@ if ($sha -ne $DolSha1) { Fail "That disc's main.dol is not Trauma Team (USA) (SU
 Write-Host "   $Data  (Trauma Team USA - OK)"
 
 # ---------------------------------------------------------------- 2. tools
-Step "Getting the tools (first time only)"
+Step "2/6 Getting the tools (first time only)"
 $Uv = Join-Path $Cache 'uv\uv.exe'
 if (-not (Test-Path $Uv)) {
     $z = Join-Path $Cache 'uv.zip'
@@ -101,7 +102,7 @@ if (-not (Test-Path (Join-Path $Xr 'libopenxr_loader.dll.a'))) {
 }
 
 # ---------------------------------------------------------------- 3. recompile
-Step "Recompiling the game from your disc (a few minutes)"
+Step "3/6 Recompiling the game from your disc (a few minutes)"
 Push-Location $Root
 & $Uv run --no-project --python 3.12 python -m recomp.lift (Join-Path $Data 'sys\main.dol') data\symbols.txt generated
 if ($LASTEXITCODE) { Pop-Location; Fail "Translating main.dol failed." }
@@ -113,7 +114,7 @@ Pop-Location
 $Exe = Join-Path $Root 'build-win\Resuscitated.exe'
 if (-not $ok -or -not (Test-Path $Exe)) { Fail "Building failed - see the messages above." }
 
-Step "Putting the game together in the bin folder"
+Step "4/6 Putting the game together in the bin folder"
 Copy-Item -Force $Exe $Bin
 Copy-Item -Force (Join-Path $Sdl 'bin\SDL2.dll') $Bin
 Copy-Item -Force (Join-Path $Xr 'libopenxr_loader.dll') $Bin
@@ -125,10 +126,10 @@ if (-not (Test-Path (Join-Path $Bin 'nand'))) { Copy-Item -Recurse (Join-Path $R
 Set-Content -Encoding ASCII $saved $Data
 
 # ---------------------------------------------------------------- 4. button prompts
-Step "Making the button prompts from your disc"
+Step "5/6 Making the button prompts from your disc"
 Write-Host "   The tutorial pictures show a Wii Remote. Setup can repaint them for keyboard and controllers"
 Write-Host "   (downloads about 1 GB once - a picture-repair AI model - and takes 10-30 minutes)."
-$tut = (Read-Host "   Repaint the tutorial pictures? [Y/n]") -notmatch '^[nN]'
+$tut = if ($Tutorials) { $Tutorials -match '^[yY1t]' } else { (Read-Host "   Repaint the tutorial pictures? [Y/n]") -notmatch '^[nN]' }
 $with = @('--with', 'pillow', '--with', 'numpy', '--with', 'scipy', '--with', 'opencv-python-headless')
 $args2 = @()
 if ($tut) {
@@ -143,8 +144,8 @@ $ok = $LASTEXITCODE -eq 0
 Pop-Location
 if (-not $ok) { Write-Host "   The button prompts could not be made; the game still works with the original Wii pictures." -ForegroundColor Yellow }
 
-Step "Done"
+Step "6/6 Done"
 Write-Host "   Start the game with bin\Resuscitated.exe (F1 or Options + Share: settings and controls)."
 $s = (New-Object -ComObject WScript.Shell).CreateShortcut((Join-Path $Root 'Trauma Team Resuscitated.lnk'))
 $s.TargetPath = Join-Path $Bin 'Resuscitated.exe'; $s.WorkingDirectory = $Bin; $s.Save()
-Read-Host "Press Enter to close"
+if (-not $NoPause) { Read-Host "Press Enter to close" }
