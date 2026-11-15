@@ -12,6 +12,7 @@ $Cache = Join-Path $Root 'tools-cache'
 $Bin   = Join-Path $Root 'bin'
 $DolSha1 = '420143D75336A5F2BC14F9DFBE8A9EC56EFBE8C8'   # Trauma Team (USA) SUOE01, sys/main.dol
 New-Item -ItemType Directory -Force $Cache, $Bin | Out-Null
+try { Start-Transcript -Path (Join-Path $Cache 'setup.log') -Force | Out-Null } catch {}
 
 function Step($t) { Write-Host ""; Write-Host "== $t" -ForegroundColor Cyan }
 function Fail($t) { Write-Host ""; Write-Host $t -ForegroundColor Red; Read-Host "Press Enter to close"; exit 1 }
