@@ -7,6 +7,7 @@ SDL ?= 1
 
 ifeq ($(TARGET),windows)
 CC := x86_64-w64-mingw32-gcc
+WINDRES ?= x86_64-w64-mingw32-windres
 BUILD ?= ../build-win
 EXE ?= $(BUILD)/Resuscitated.exe
 SDL_DIR ?= ../third_party/SDL2-win
@@ -45,7 +46,7 @@ $(EXE): $(OBJ) $(WINRES)
 
 $(BUILD)/resuscitated_res.o: res/resuscitated.rc res/resuscitated.ico
 	@mkdir -p $(BUILD)
-	x86_64-w64-mingw32-windres -I res res/resuscitated.rc -O coff -o $@
+	$(WINDRES) -I res res/resuscitated.rc -O coff -o $@
 
 $(BUILD)/%.o: ../generated/%.c runtime/cpu.h
 	@mkdir -p $(BUILD)

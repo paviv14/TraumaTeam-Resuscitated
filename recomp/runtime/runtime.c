@@ -310,6 +310,12 @@ static const char *find_disc(const char *exe) {
     const char *slash = strrchr(exe, '/'), *bslash = strrchr(exe, '\\');
     if (bslash && (!slash || bslash > slash)) slash = bslash;
     if (slash && slash - exe < (long)sizeof dir) { memcpy(dir, exe, slash - exe + 1); dir[slash - exe + 1] = 0; }
+    {   // disc.txt next to the program (written by Setup): the folder the disc was extracted to
+        char p[1100]; snprintf(p, sizeof p, "%sdisc.txt", dir); FILE *f = fopen(p, "r");
+        if (f) { char line[1024] = ""; if (fgets(line, sizeof line, f)) { line[strcspn(line, "\r\n")] = 0;
+                     snprintf(p, sizeof p, "%s/sys/main.dol", line); if (line[0] && file_exists(p)) { fclose(f); snprintf(buf, sizeof buf, "%s", line); return buf; } }
+                 fclose(f); }
+    }
     for (int pass = 0; pass < 2; pass++)
         for (unsigned k = 0; k < sizeof rel / sizeof *rel; k++) {
             snprintf(buf, sizeof buf, "%s%s/sys/main.dol", pass ? dir : "", rel[k]);
@@ -375,7 +381,9 @@ static void launcher_setup(void) {
         setvbuf(stderr, NULL, _IONBF, 0);
     }
 #ifdef _OPENMP
+#ifdef _OPENMP
     if (!getenv("OMP_NUM_THREADS")) { int n = omp_get_num_procs(); omp_set_num_threads(n > 8 ? 8 : n); }
+#endif
 #endif
     if (!getenv("TTPC_PERFLOG")) setenv_portable("TTPC_PERFLOG", "1");
     if (!getenv("TTPC_RECORD") && !getenv("TTPC_REPLAY")) {

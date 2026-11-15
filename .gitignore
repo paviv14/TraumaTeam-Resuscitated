@@ -22,3 +22,9 @@ rec_*.txt
 textures_full/
 usersave_u2/
 build-hl/
+
+# Setup downloads and outputs
+tools-cache/
+bin/
+tools/prompts/big-lama.pt
+*.lnk

@@ -66,7 +66,7 @@ for f in glob.glob(os.path.join(ORIG, "**", "tt_*.png"), recursive=True):
     b.save(os.path.join(OUT, "base", fn))
 
 # 2. the in-text icon sheet ---------------------------------------------------------------------------
-f = (glob.glob(os.path.join(ORIG, "**", "button.tpx", "*.png"), recursive=True) or glob.glob("/tmp/tz/tutorial/button.tpx/*.png"))[0]; fn = os.path.basename(f); h = fn[3:19]
+f = (glob.glob(os.path.join(ORIG, "**", "button.tpx", "*.png"), recursive=True))[0]; fn = os.path.basename(f); h = fn[3:19]
 o = Image.open(f); Wd, Hd = o.size; S = 4
 Image.new("RGBA", (Wd * S, Hd * S), (0, 0, 0, 0)).save(os.path.join(OUT, "base", fn))
 for (x, y, w, hh), act in zip([(6, 6, 19, 28), (36, 6, 19, 28), (66, 6, 19, 28), (97, 6, 18, 28), (127, 6, 18, 28), (156, 6, 19, 28),
@@ -189,7 +189,7 @@ for f in sorted(glob.glob(os.path.join(TUT, "*", "*", "tt_*.png"))):
         acts = {sl.split()[5] for sl in slots[before:]}
         for m, top, cx, kind in M.find_devices(a):
             if Ww > 380 and abs(cx - Ww / 2) < 16: continue   # the ">" between the two halves of a before/after picture
-            if "/en/" in f and kind != "nunchuk" and "[8]" in tx and "[3]" not in tx: kind = "nunchuk"   # endoscopy: the tools are on Z
+            if "/en/" in f.replace("\\", "/") and kind != "nunchuk" and "[8]" in tx and "[3]" not in tx: kind = "nunchuk"   # endoscopy: the tools are on Z
             pls, off = M.bubble_above(a, top, cx)
             cb = bubble_content(top, cx)
             if pls or (cb and cb[2] - cb[0] < (cb[3] - cb[1]) * 1.6):   # a button in the bubble: drawn from the bindings
