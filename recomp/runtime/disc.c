@@ -6,11 +6,12 @@
 // Drive read offsets are also in 4-byte units, relative to the game partition.
 char g_op_mode[3];   // what is being played: su or em en au di (from the files it loads)
 #include "cpu.h"
+#include "platform.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { u64 off, size; char path[256]; int logged; } DiscFile;
+typedef struct { u64 off, size; char path[256]; int logged; u32 ent; } DiscFile;   // path: below the disc root, or '!' + a full path (the Japanese disc)
 static DiscFile *g_files; static int g_nfiles;
 static char g_root[512];
 static int g_log = 1;
@@ -24,17 +25,22 @@ static u32 be32(const u8 *p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p
 static void add(u64 off, u64 size, const char *path) {
     g_files = realloc(g_files, (g_nfiles + 1) * sizeof *g_files);
     g_files[g_nfiles].off = off; g_files[g_nfiles].size = size;
-    snprintf(g_files[g_nfiles].path, sizeof g_files[g_nfiles].path, "%s", path); g_nfiles++;
+    snprintf(g_files[g_nfiles].path, sizeof g_files[g_nfiles].path, "%s", path); g_files[g_nfiles].ent = 0; g_nfiles++;
 }
+
+static u32 g_snd_dir[2];   // FST entries of the sound/eng and sound/jpn folders
 
 // Walk the FST, recording the host path of every file (recursive over directory ranges).
 static void walk(const u8 *fst, u32 n, const char *names, u32 *i, u32 end, const char *dir) {
     while (*i < end) {
         const u8 *e = fst + 12 * *i;
         char p[512]; snprintf(p, sizeof p, "%s/%s", dir, names + (be32(e) & 0xFFFFFF));
-        if (e[0]) { u32 next = be32(e + 8); (*i)++; walk(fst, n, names, i, next, p); }
+        if (e[0]) {
+            if (!strcmp(p, "files/sound/eng")) g_snd_dir[0] = *i; else if (!strcmp(p, "files/sound/jpn")) g_snd_dir[1] = *i;
+            u32 next = be32(e + 8); (*i)++; walk(fst, n, names, i, next, p);
+        }
         else {
-            add((u64)be32(e + 4) << 2, be32(e + 8), p);
+            add((u64)be32(e + 4) << 2, be32(e + 8), p); g_files[g_nfiles - 1].ent = *i;
             // tutorial text: the game is told it is longer, room for the PC wording (tuttext.c)
             int tut_is_text(const char *path), tut_slack(void);
             if (tut_is_text(p)) { u32 sz = be32(e + 8) + tut_slack(); u8 *w = (u8 *)e + 8; w[0] = sz >> 24; w[1] = sz >> 16; w[2] = sz >> 8; w[3] = sz; }
@@ -52,6 +58,31 @@ void disc_init(const char *root) {
     if (!fst) { fprintf(stderr, "[disc] no %s - disc access disabled\n", p); return; }
     u32 count = be32(fst + 8);
     u32 i = 1; walk(fst, count, (const char *)fst + 12 * count, &i, count, "files");
+    {   // text and voice language (lang.c)
+        void lang_sysconf(int lang); const char *lang_jp_root(const char *us_root); int lang_jp_size(const char *jp_root, const char *rest, long long *size);
+        lang_sysconf(g_cfg.text_lang ? 0 : 1);
+        int moved = 0; const char *jp = g_cfg.voice_lang ? lang_jp_root(root) : "";
+        if (g_cfg.voice_lang && !*jp) fprintf(stderr, "[lang] Japanese voices: no Japanese disc found (put it in a folder named like the US one plus _jp, e.g. disc_jp) - English voices\n");
+        if (*jp) {
+            u64 end = 0; for (int k = 0; k < g_nfiles; k++) if (g_files[k].off + g_files[k].size > end) end = g_files[k].off + g_files[k].size;
+            end = (end + 0xFFFF) & ~(u64)0xFFFF;
+            for (int k = 0; k < g_nfiles; k++) {
+                DiscFile *df = &g_files[k]; long long sz;
+                if (strncmp(df->path, "files/sound/eng/", 16) || !df->ent || !lang_jp_size(jp, df->path + 16, &sz)) continue;
+                u8 *e = fst + 12 * df->ent; u32 o4 = (u32)(end >> 2), s32v = (u32)sz;
+                e[4] = o4 >> 24; e[5] = o4 >> 16; e[6] = o4 >> 8; e[7] = o4; e[8] = s32v >> 24; e[9] = s32v >> 16; e[10] = s32v >> 8; e[11] = s32v;
+                char full[300]; snprintf(full, sizeof full, "!%s/files/sound/jpn/%s", jp, df->path + 16);
+                snprintf(df->path, sizeof df->path, "%s", full); df->off = end; df->size = (u64)sz;
+                end = (end + (u64)sz + 0x7FFF) & ~(u64)0x7FFF; moved++;
+            }
+            fprintf(stderr, "[lang] Japanese voices from %s (%d files)\n", jp, moved);
+        }
+        if (g_cfg.text_lang && g_snd_dir[0] && g_snd_dir[1]) {   // the game will look in sound/jpn: give the voices that name
+            u8 *a = fst + 12 * g_snd_dir[0], *b = fst + 12 * g_snd_dir[1];
+            for (int k = 1; k < 4; k++) { u8 t = a[k]; a[k] = b[k]; b[k] = t; }
+        }
+        fprintf(stderr, "[lang] text %s, voices %s\n", g_cfg.text_lang ? "Japanese" : "English", moved ? "Japanese" : "English");
+    }
     // system area files at their fixed positions
     long bn; snprintf(p, sizeof p, "%s/sys/boot.bin", root); u8 *boot = read_all(p, &bn);
     add(0, 0x440, "sys/boot.bin"); add(0x440, 0x2000, "sys/bi2.bin"); add(0x2440, 0x40000, "sys/apploader.img");
@@ -79,7 +110,7 @@ static FILE *open_file(DiscFile *f) {   // caller holds g_io
         if (g_open[k].used < slot->used) slot = &g_open[k];
     }
     if (slot->h) fclose(slot->h);
-    char p[800]; snprintf(p, sizeof p, "%s/%s", g_root, f->path);
+    char p[800]; if (f->path[0] == '!') snprintf(p, sizeof p, "%s", f->path + 1); else snprintf(p, sizeof p, "%s/%s", g_root, f->path);
     slot->f = f; slot->h = fopen(p, "rb"); slot->used = ++g_use;
     return slot->h;
 }

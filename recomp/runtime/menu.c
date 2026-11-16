@@ -19,6 +19,7 @@ static struct { const char *key; int *v; int lo, hi; } KEYS[] = {
     { "vsync", &g_cfg.vsync, 0, 1 }, { "texture_pack", &g_cfg.textures, 0, 1 },
     { "volume", &g_cfg.volume, 0, 100 }, { "pointer_speed", &g_cfg.pointer_speed, 1, 5 },
     { "button_prompts", &g_cfg.prompts, 0, 3 }, { "remote_speaker", &g_cfg.speaker, 0, 4 }, { "controller_style", &g_cfg.pad_style, 0, 3 },
+    { "text_language", &g_cfg.text_lang, 0, 1 }, { "voice_language", &g_cfg.voice_lang, 0, 1 },
 };
 #define NKEYS (int)(sizeof KEYS / sizeof KEYS[0])
 
@@ -105,15 +106,16 @@ static void value_text(const Item *it, char *b, size_t n) {
     else if (it->v == &g_cfg.prompts) { static const char *s[] = { "Automatic", "Wii Remote", "Keyboard & mouse", "Controller" }; snprintf(b, n, "%s", s[v]); }
     else if (it->v == &g_cfg.pad_style) { static const char *s[] = { "Automatic", "Xbox", "PlayStation 4", "PlayStation 5" }; snprintf(b, n, "%s", s[v]); }
     else if (it->v == &g_cfg.speaker) { static const char *s[] = { "Automatic", "PC speakers", "Wii Remote", "Both", "Off" }; snprintf(b, n, "%s", s[v]); }
+    else if (it->v == &g_cfg.text_lang || it->v == &g_cfg.voice_lang) snprintf(b, n, v ? "Japanese" : "English");
     else if (it->v == &g_cfg.tex_limit) { static const char *s[] = { "Up to 1024", "Up to 2048", "Full (up to 4096)" }; snprintf(b, n, "%s", s[v]); }
     else snprintf(b, n, v ? "On" : "Off");
 }
 
 // Tabs and their settings. Item.tab says which tab; the Controls tab also lists the remappable buttons.
-enum { T_DISPLAY, T_GRAPHICS, T_AUDIO, T_CONTROLS, T_REMAP, T_DEV, NTAB };
-static const char *TABS[NTAB] = { "Display", "Graphics", "Audio", "Controls", "Remap", "Developer" };
+enum { T_DISPLAY, T_GRAPHICS, T_AUDIO, T_LANG, T_CONTROLS, T_REMAP, T_DEV, NTAB };
+static const char *TABS[NTAB] = { "Display", "Graphics", "Audio", "Language", "Controls", "Remap", "Developer" };
 static const int ITEM_TAB[] = { T_DISPLAY, T_DISPLAY, T_DISPLAY, T_DISPLAY, T_GRAPHICS, T_DISPLAY, T_DISPLAY, T_GRAPHICS, T_AUDIO, T_AUDIO,
-                                T_CONTROLS, T_CONTROLS, T_CONTROLS, T_DEV };
+                                T_CONTROLS, T_CONTROLS, T_CONTROLS, T_LANG, T_LANG, T_DEV };
 static Item ITEMS[] = {
     { "Resolution", "Internal rendering resolution. Higher is sharper and needs a faster GPU.", &g_cfg.scale, 1, 6, 1 },
     { "Display", "Window or borderless fullscreen (F11 also switches).", &g_cfg.fullscreen, 0, 1, 1 },
@@ -128,6 +130,8 @@ static Item ITEMS[] = {
     { "Pointer speed", "How fast the controller's right stick moves the pointer.", &g_cfg.pointer_speed, 1, 5, 1 },
     { "Button prompts", "Which buttons the game's help shows: Automatic follows what you used last (keyboard & mouse or a controller), or always one of them. Wii Remote keeps the original pictures.", &g_cfg.prompts, 0, 3, 1 },
     { "Controller style", "Button names for a controller: Automatic asks the controller what it is; or always Xbox, PlayStation 4 or PlayStation 5.", &g_cfg.pad_style, 0, 3, 1 },
+    { "Text", "Language of all the game's text. The US disc has the Japanese text too. Takes effect when the game is started again.", &g_cfg.text_lang, 0, 1, 1 },
+    { "Voices", "Language of the voices. Japanese needs your Japanese disc (HOSPITAL. 6-nin no Ishi) extracted next to the US one, in a folder named like it plus _jp (e.g. disc_jp). Takes effect when the game is started again.", &g_cfg.voice_lang, 0, 1, 1 },
     { "Developer scene", "Hidden developer tools and cut prototypes left in the game. Enter / A goes there now (unsaved progress is lost).", &g_dev_pick, 0, NDEV - 1, 1 },
 };
 #define NITEMS (int)(sizeof ITEMS / sizeof ITEMS[0])
