@@ -176,3 +176,12 @@ used (`stats`, then grep the `.c` files), edit the CSV, re-run `verify`.
 
 This repository contains **no game data**. `.gitignore` excludes extracted files.
 You need your own copy of the game. Do not distribute files extracted from the disc.
+
+## License
+
+The code in this repository is licensed under the **GNU General Public License v3.0** (see [LICENSE](LICENSE)):
+you can use, change and share it, and anything you share that is built on it must stay open source under the same license.
+
+The license covers this project's own code only. Trauma Team, its code, art, audio and text belong to their
+respective owners and are not part of this project. The bundled third-party libraries (SDL2, stb, cgltf, OpenXR)
+keep their own licenses.
