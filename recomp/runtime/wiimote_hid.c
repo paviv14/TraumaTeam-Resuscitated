@@ -226,7 +226,11 @@ static int try_open(void) {
     for (DWORD i = 0; !found && SetupDiEnumDeviceInterfaces(set, NULL, &hid, i, &ifd); i++) {
         DWORD need = 0; SetupDiGetDeviceInterfaceDetailA(set, &ifd, NULL, 0, &need, NULL);
         SP_DEVICE_INTERFACE_DETAIL_DATA_A *det = malloc(need); det->cbSize = sizeof *det;
-        if (SetupDiGetDeviceInterfaceDetailA(set, &ifd, det, need, NULL, NULL)) {
+        int nintendo = 0;
+        if (SetupDiGetDeviceInterfaceDetailA(set, &ifd, det, need, NULL, NULL)) {   // only Nintendo's (vendor 057E) are opened:
+            for (const char *q = det->DevicePath; *q; q++) if ((q[0] == '0') && q[1] == '5' && q[2] == '7' && (q[3] == 'e' || q[3] == 'E')) nintendo = 1;
+        }                                                                            // opening every HID device took ~80 ms
+        if (nintendo) {
             HANDLE h = CreateFileA(det->DevicePath, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
             if (h == INVALID_HANDLE_VALUE) {   // say so if it's a Remote another program holds (or is blocked from us)
                 DWORD err = GetLastError();
@@ -261,22 +265,31 @@ static int try_open(void) {
     return found;
 }
 
+static unsigned __stdcall scanner(void *arg) {   // looks for a Remote every 3 s while none is connected
+    (void)arg;
+    for (;;) {
+        if (!g_connected && try_open()) {
+            EnterCriticalSection(&g_cs); memset(&g_st, 0, sizeof g_st); LeaveCriticalSection(&g_cs);
+            g_ext_ready = 0; g_spk_on = 0; g_stop = 0;
+            g_connected = 1;
+            setup();
+            _beginthreadex(NULL, 0, reader, NULL, 0, NULL);
+        }
+        Sleep(3000);
+    }
+    return 0;
+}
+
 int whid_poll(WiiState *out) {
     static int enabled = -1; static DWORD last_try;
     if (enabled < 0) { const char *e = getenv("TTPC_WIIMOTE"); enabled = !(e && *e == '0'); }
     if (!enabled) return 0;
     { static int once; if (!once) { once = 1; fprintf(stderr, "[wiimote] looking for a real Wii Remote (Bluetooth HID) every 3 s\n"); } }
     if (!g_cs_init) { InitializeCriticalSection(&g_cs); g_cs_init = 1; }
-    if (!g_connected) {
-        DWORD now = GetTickCount();
-        if (now - last_try < 3000 && last_try) return 0;   // look again every 3 s (pair it any time)
-        last_try = now;
-        if (!try_open()) return 0;
-        memset(&g_st, 0, sizeof g_st); g_ext_ready = 0; g_spk_on = 0;
-        g_connected = 1; g_stop = 0;
-        setup();
-        _beginthreadex(NULL, 0, reader, NULL, 0, NULL);
-    }
+    // looked for on its own thread: the search (Windows' device list) stalled a game frame every 3 s
+    { static int started; if (!started) { started = 1; _beginthreadex(NULL, 0, scanner, NULL, 0, NULL); } }
+    (void)last_try;
+    if (!g_connected) return 0;
     static u64 seen; static int fresh;
     EnterCriticalSection(&g_cs); *out = g_st; fresh = g_seq != seen; seen = g_seq; LeaveCriticalSection(&g_cs);
     (void)fresh;

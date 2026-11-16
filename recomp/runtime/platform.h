@@ -27,7 +27,7 @@ void vr_set_layer(unsigned tex);   // gl.c: this frame's HUD layer (keyed like t
 void vr_input(Input *in);
 
 // Settings (settings.ini, options menu in menu.c)
-typedef struct { int scale, fullscreen, stretch, sharp, vsync, textures, volume, pointer_speed, wide_fill, tex_limit, tex_compress, tex_vram_mb, prompts, pad_style, speaker, text_lang, voice_lang; } Settings;
+typedef struct { int scale, fullscreen, stretch, sharp, vsync, textures, volume, pointer_speed, wide_fill, tex_limit, tex_compress, tex_vram_mb, prompts, pad_style, speaker, text_lang, voice_lang, saw_auto, bandage_auto, swing_a, endo_speed; } Settings;
 void prompts_update(int force);   // platform.c: pick the button-prompt set (settings + the device used last)
 extern Settings g_cfg;
 

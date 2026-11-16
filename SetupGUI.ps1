@@ -24,7 +24,7 @@ function Button($text, $x, $y, $w, $primary = $false) {
 }
 
 $form = New-Object Windows.Forms.Form
-$form.Text = 'Trauma Team Resuscitated - Setup'; $form.ClientSize = '640,520'; $form.BackColor = $bg
+$form.Text = 'Trauma Team Resuscitated - Setup'; $form.ClientSize = '640,600'; $form.BackColor = $bg
 $form.FormBorderStyle = 'FixedSingle'; $form.MaximizeBox = $false; $form.StartPosition = 'CenterScreen'
 $ico = Join-Path $Root 'recomp\res\resuscitated.ico'; if (Test-Path $ico) { $form.Icon = New-Object Drawing.Icon($ico) }
 
@@ -52,17 +52,22 @@ Label '2.  Options' 24 262 400 22 $uiB | Out-Null
 $tut = New-Object Windows.Forms.CheckBox; $tut.Location = '44,288'; $tut.Size = '572,44'; $tut.Checked = $true
 $tut.Font = $ui; $tut.ForeColor = $fg; $tut.Text = "Show keyboard and controller button prompts in the tutorial pictures (Experimental)`n(instead of the Wii Remote - downloads about 400 MB once, adds about 5 minutes)"
 $form.Controls.Add($tut)
+Label 'Japanese voices (optional): your Japanese disc, HOSPITAL. 6-nin no Ishi - image or extracted folder' 44 340 580 20 (New-Object Drawing.Font('Segoe UI', 8.5)) $dim | Out-Null
+$jp = New-Object Windows.Forms.TextBox; $jp.Location = '44,364'; $jp.Size = '330,26'; $jp.Font = $ui
+$jp.BackColor = $panel; $jp.ForeColor = $fg; $jp.BorderStyle = 'FixedSingle'; $form.Controls.Add($jp)
+$jpBrowse = Button 'Disc image...' 384 360 120
+$jpFolder = Button 'Folder...' 512 360 104
 
 # progress
-$status = Label 'Ready.' 24 344 592 22 $uiB
-$bar = New-Object Windows.Forms.ProgressBar; $bar.Location = '24,370'; $bar.Size = '592,10'; $bar.Maximum = 60; $form.Controls.Add($bar)
-$box = New-Object Windows.Forms.TextBox; $box.Location = '24,388'; $box.Size = '592,70'; $box.Multiline = $true; $box.ReadOnly = $true
+$status = Label 'Ready.' 24 424 592 22 $uiB
+$bar = New-Object Windows.Forms.ProgressBar; $bar.Location = '24,450'; $bar.Size = '592,10'; $bar.Maximum = 60; $form.Controls.Add($bar)
+$box = New-Object Windows.Forms.TextBox; $box.Location = '24,468'; $box.Size = '592,70'; $box.Multiline = $true; $box.ReadOnly = $true
 $box.ScrollBars = 'Vertical'; $box.BackColor = $panel; $box.ForeColor = $dim; $box.BorderStyle = 'None'
 $box.Font = New-Object Drawing.Font('Consolas', 8.5); $form.Controls.Add($box)
 
-$install = Button 'Install' 476 470 140 $true
-$play = Button 'Play now' 476 470 140 $true; $play.Visible = $false
-$close = Button 'Close' 326 470 140
+$install = Button 'Install' 476 550 140 $true
+$play = Button 'Play now' 476 550 140 $true; $play.Visible = $false
+$close = Button 'Close' 326 550 140
 
 # ---------------------------------------------------------------- disc folder
 function Disc-Data($p) {
@@ -101,15 +106,25 @@ $folder.Add_Click({
     $dlg = New-Object Windows.Forms.FolderBrowserDialog; $dlg.Description = 'The folder you extracted Trauma Team (USA) to'
     if ($dlg.ShowDialog() -eq 'OK') { $disc.Text = $dlg.SelectedPath; Check-Disc | Out-Null } })
 $disc.Add_Leave({ Check-Disc | Out-Null })
+$jpImg = Get-ChildItem -ErrorAction SilentlyContinue -Path "$Root\*", "$Root\..\*" -Include *.iso, *.rvz, *.wbfs, *.wia, *.gcz | Where-Object { $_.Name -match 'hospital' } | Select-Object -First 1
+if (Test-Path (Join-Path $Root 'bin\disc_jp.txt')) { $jp.Text = (Get-Content (Join-Path $Root 'bin\disc_jp.txt') -TotalCount 1).Trim() } elseif ($jpImg) { $jp.Text = $jpImg.FullName }
+$jpBrowse.Add_Click({
+    $dlg = New-Object Windows.Forms.OpenFileDialog; $dlg.Title = 'Your HOSPITAL. 6-nin no Ishi (Japan) disc image'
+    $dlg.Filter = 'Wii disc images (*.iso;*.rvz;*.wbfs;*.wia;*.gcz)|*.iso;*.rvz;*.wbfs;*.wia;*.gcz|All files|*.*'
+    if ($dlg.ShowDialog() -eq 'OK') { $jp.Text = $dlg.FileName } })
+$jpFolder.Add_Click({
+    $dlg = New-Object Windows.Forms.FolderBrowserDialog; $dlg.Description = 'The folder you extracted HOSPITAL. 6-nin no Ishi (Japan) to'
+    if ($dlg.ShowDialog() -eq 'OK') { $jp.Text = $dlg.SelectedPath } })
 
 # ---------------------------------------------------------------- run Setup.ps1, follow its output
 $proc = $null; $timer = New-Object Windows.Forms.Timer; $timer.Interval = 400; $seen = 0
 $install.Add_Click({
     if (-not (Check-Disc)) { return }
-    $install.Enabled = $false; $browse.Enabled = $false; $folder.Enabled = $false; $tut.Enabled = $false; $disc.ReadOnly = $true
+    $install.Enabled = $false; $browse.Enabled = $false; $folder.Enabled = $false; $tut.Enabled = $false; $jp.ReadOnly = $true; $jpBrowse.Enabled = $false; $jpFolder.Enabled = $false; $disc.ReadOnly = $true
     $status.Text = 'Starting...'; $box.Text = ''; Set-Content $Log ''
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$(Join-Path $Root 'Setup.ps1')`"", '-NoPause',
            '-Disc', "`"$($disc.Text.Trim())`"", '-Tutorials', $(if ($tut.Checked) { 'yes' } else { 'no' }))
+    if ($jp.Text.Trim()) { $a += @('-DiscJp', "`"$($jp.Text.Trim())`"") }
     $script:proc = Start-Process powershell -ArgumentList $a -WindowStyle Hidden -PassThru -RedirectStandardOutput $Log -RedirectStandardError $ErrLog
     $timer.Start() })
 $timer.Add_Tick({
@@ -128,7 +143,7 @@ $timer.Add_Tick({
         } else {
             $status.Text = 'Setup stopped - see the messages below (also in tools-cache\setup.log).'; $status.ForeColor = $red
             foreach ($l in (Read-Shared $ErrLog | Select-Object -Last 15)) { if ($l.Trim()) { $box.AppendText($l.TrimEnd() + "`r`n") } }
-            $install.Text = 'Try again'; $install.Enabled = $true; $browse.Enabled = $true; $folder.Enabled = $true; $tut.Enabled = $true; $disc.ReadOnly = $false
+            $install.Text = 'Try again'; $install.Enabled = $true; $browse.Enabled = $true; $folder.Enabled = $true; $tut.Enabled = $true; $jp.ReadOnly = $false; $jpBrowse.Enabled = $true; $jpFolder.Enabled = $true; $disc.ReadOnly = $false
         }
     } })
 $play.Add_Click({ Start-Process (Join-Path $Root 'bin\Resuscitated.exe') -WorkingDirectory (Join-Path $Root 'bin'); $form.Close() })

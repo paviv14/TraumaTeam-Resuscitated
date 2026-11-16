@@ -4,7 +4,7 @@
 # w64devkit C compiler, SDL2) and, if you choose, the LaMa picture-repair model.
 # Run Setup.bat (it starts this script). Everything it downloads stays in the "tools-cache" folder here.
 
-param([string]$Disc = '', [string]$Tutorials = '', [switch]$NoPause)   # the setup window passes these
+param([string]$Disc = '', [string]$Tutorials = '', [string]$DiscJp = '', [switch]$NoPause)   # the setup window passes these
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $ProgressPreference = 'SilentlyContinue'
@@ -12,6 +12,7 @@ $Root  = $PSScriptRoot
 $Cache = Join-Path $Root 'tools-cache'
 $Bin   = Join-Path $Root 'bin'
 $DolSha1 = '420143D75336A5F2BC14F9DFBE8A9EC56EFBE8C8'   # Trauma Team (USA) SUOE01, sys/main.dol
+$JpSha1  = 'C33B2F40F504F02FF8C3C7CD4D95E4AB0C6FD851'   # HOSPITAL. 6-nin no Ishi (Japan), sys/main.dol
 New-Item -ItemType Directory -Force $Cache, $Bin | Out-Null
 try { Start-Transcript -Path (Join-Path $Cache 'setup.log') -Force | Out-Null } catch {}
 
@@ -144,6 +145,35 @@ foreach ($line in (& objdump -p $Exe | Select-String 'DLL Name: (\S+)')) {   # c
 }
 if (-not (Test-Path (Join-Path $Bin 'nand'))) { Copy-Item -Recurse (Join-Path $Root 'nand') $Bin }
 Set-Content -Encoding ASCII $saved $Data
+
+# optional: Japanese voices from the player's Japanese disc (only its sound\jpn folder is kept, in disc_jp)
+if ($DiscJp) {
+    Write-Host "   Japanese voices: $DiscJp"
+    $jpRoot = Disc-Data $DiscJp
+    if ($jpRoot -and (Get-FileHash -Algorithm SHA1 (Join-Path $jpRoot 'sys\main.dol')).Hash -ne $JpSha1) { $jpRoot = $null }
+    if (-not $jpRoot -and (Test-Path (Join-Path $DiscJp 'files\sound\jpn\sys\00000000\static.brsar'))) { $jpRoot = $DiscJp }   # kept from an earlier install
+    if (-not $jpRoot -and (Test-Path -PathType Leaf $DiscJp)) {
+        $dt = Find-DolphinTool; $tmp = Join-Path $Cache 'disc_jp_unpack'
+        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+        Write-Host "   unpacking the Japanese disc image (a few minutes)..."
+        $ErrorActionPreference = 'Continue'
+        & $dt extract -i $DiscJp -o $tmp --gameonly --quiet 2>&1 | ForEach-Object { Write-Host "   $_" }
+        $ErrorActionPreference = 'Stop'
+        $dol = Get-ChildItem -Recurse $tmp -Filter 'main.dol' -ErrorAction SilentlyContinue | Where-Object { $_.Directory.Name -eq 'sys' } | Select-Object -First 1
+        if ($dol -and (Get-FileHash -Algorithm SHA1 $dol.FullName).Hash -eq $JpSha1) {
+            $dst = Join-Path $Root 'disc_jp\DATA\files\sound'
+            New-Item -ItemType Directory -Force $dst | Out-Null
+            if (Test-Path (Join-Path $dst 'jpn')) { Remove-Item -Recurse -Force (Join-Path $dst 'jpn') }
+            Move-Item (Join-Path $dol.Directory.Parent.FullName 'files\sound\jpn') $dst
+            $jpRoot = Join-Path $Root 'disc_jp\DATA'
+        }
+        if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
+    }
+    if ($jpRoot -and (Test-Path (Join-Path $jpRoot 'files\sound\jpn\sys\00000000\static.brsar'))) {
+        Set-Content -Encoding ASCII (Join-Path $Bin 'disc_jp.txt') $jpRoot
+        Write-Host "   Japanese voices ready - pick them in the game: F1 > Language > Voices."
+    } else { Write-Host "   That is not HOSPITAL. 6-nin no Ishi (Japan) - skipping the Japanese voices." -ForegroundColor Yellow }
+}
 
 # ---------------------------------------------------------------- 4. button prompts
 Step "5/6 Making the button prompts from your disc"

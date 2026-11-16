@@ -188,7 +188,9 @@ void wiimote_frame(void) {
 static float g_dist = 1.5f, g_dist_prev = 1.5f;
 static void push_motion(int dir, u32 hold, float *acc_z) {
     static float v;   // current speed in m per read, eased toward the target
-    static float speed = -1; if (speed < 0) { const char *e = getenv("TTPC_ENDO_SPEED"); speed = e ? (float)atof(e) : 0.5f; if (speed <= 0 || speed > 4) speed = 0.5f; }
+    static const float SPEEDS[4] = { 0.5f, 0.3f, 0.5f, 0.85f };   // options menu: slow / normal / fast
+    const char *e = getenv("TTPC_ENDO_SPEED");
+    float speed = e ? (float)atof(e) : SPEEDS[g_cfg.endo_speed >= 1 && g_cfg.endo_speed <= 3 ? g_cfg.endo_speed : 2]; if (speed <= 0 || speed > 4) speed = 0.5f;
     float target = dir * 0.008f * speed;   // gentler than before (13 Nov: "too aggressive"); TTPC_ENDO_SPEED scales it
     v += (target - v) * 0.35f;
     if (fabsf(v) < 1e-5f) v = 0;
@@ -317,7 +319,16 @@ void f_8025F830(CPU *c) {
     }
     float acc_z; push_motion((h & PUSH_FLAG) ? 1 : (h & PULL_FLAG) ? -1 : 0, h, &acc_z);
     float acc_y = swing_motion((h & SWING_FLAG) != 0);
-    float roll = roll_motion((h & ROLL_L_FLAG) ? -1 : (h & ROLL_R_FLAG) ? 1 : 0, h, circle_motion(g_px, g_py, g_point_valid, h));
+    int roll_dir = (h & ROLL_L_FLAG) ? -1 : (h & ROLL_R_FLAG) ? 1 : 0;
+    if (!g_nrep && !g_nscript) {   // motion assists (options menu, Controls)
+        extern char g_op_mode[3];
+        int ortho = g_op_mode[0] == 'o' && g_op_mode[1] == 'r', op = ortho || (g_op_mode[0] == 's' && g_op_mode[1] == 'u') || (g_op_mode[0] == 'e' && g_op_mode[1] == 'm');
+        static int saw_t;
+        if (g_cfg.saw_auto && ortho && (h & BTN_A) && !roll_dir) { roll_dir = (saw_t / 9) % 2 ? -1 : 1; saw_t++; } else saw_t = 0;   // back and forth, ~3 strokes a second
+        if (g_cfg.bandage_auto && op && (h & BTN_A) && !roll_dir && !(g_cfg.saw_auto && ortho)) roll_dir = 1;          // round and round
+        if (g_cfg.swing_a && (g_swing_t >= 0 || (h & SWING_FLAG))) h |= BTN_A;                                                              // the strike holds A
+    }
+    float roll = roll_motion(roll_dir, h, circle_motion(g_px, g_py, g_point_valid, h));
     h &= ~(PUSH_FLAG | PULL_FLAG | SWING_FLAG | ROLL_L_FLAG | ROLL_R_FLAG);
     g_prev = g_hold; g_hold = h; g_trig = g_hold & ~g_prev; g_rel = g_prev & ~g_hold;
     if (dbg && (g_trig || g_reads % 600 == 0)) fprintf(stderr, "[pad] read %llu vi %llu hold %04X trig %04X\n", (unsigned long long)g_reads, (unsigned long long)g_vi, g_hold, g_trig);

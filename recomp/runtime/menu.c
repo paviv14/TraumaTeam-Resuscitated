@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-Settings g_cfg = { .scale = 2, .fullscreen = 0, .stretch = 0, .sharp = 0, .vsync = 0, .textures = 1, .volume = 100, .pointer_speed = 3, .wide_fill = 1, .tex_limit = 1, .tex_compress = 1, .tex_vram_mb = 3072 };
+Settings g_cfg = { .scale = 2, .fullscreen = 0, .stretch = 0, .sharp = 0, .vsync = 0, .textures = 1, .volume = 100, .pointer_speed = 3, .wide_fill = 1, .tex_limit = 1, .tex_compress = 1, .tex_vram_mb = 3072, .endo_speed = 2 };
 static const char *CFG_PATH = "settings.ini";
 
 static struct { const char *key; int *v; int lo, hi; } KEYS[] = {
@@ -19,6 +19,7 @@ static struct { const char *key; int *v; int lo, hi; } KEYS[] = {
     { "vsync", &g_cfg.vsync, 0, 1 }, { "texture_pack", &g_cfg.textures, 0, 1 },
     { "volume", &g_cfg.volume, 0, 100 }, { "pointer_speed", &g_cfg.pointer_speed, 1, 5 },
     { "button_prompts", &g_cfg.prompts, 0, 3 }, { "remote_speaker", &g_cfg.speaker, 0, 4 }, { "controller_style", &g_cfg.pad_style, 0, 3 },
+    { "saw_automatic", &g_cfg.saw_auto, 0, 1 }, { "bandage_automatic", &g_cfg.bandage_auto, 0, 1 }, { "strike_holds_a", &g_cfg.swing_a, 0, 1 }, { "endoscope_speed", &g_cfg.endo_speed, 1, 3 },
     { "text_language", &g_cfg.text_lang, 0, 1 }, { "voice_language", &g_cfg.voice_lang, 0, 1 },
 };
 #define NKEYS (int)(sizeof KEYS / sizeof KEYS[0])
@@ -106,6 +107,9 @@ static void value_text(const Item *it, char *b, size_t n) {
     else if (it->v == &g_cfg.prompts) { static const char *s[] = { "Automatic", "Wii Remote", "Keyboard & mouse", "Controller" }; snprintf(b, n, "%s", s[v]); }
     else if (it->v == &g_cfg.pad_style) { static const char *s[] = { "Automatic", "Xbox", "PlayStation 4", "PlayStation 5" }; snprintf(b, n, "%s", s[v]); }
     else if (it->v == &g_cfg.speaker) { static const char *s[] = { "Automatic", "PC speakers", "Wii Remote", "Both", "Off" }; snprintf(b, n, "%s", s[v]); }
+    else if (it->v == &g_cfg.saw_auto || it->v == &g_cfg.bandage_auto) snprintf(b, n, v ? "Automatic" : "Manual");
+    else if (it->v == &g_cfg.swing_a) snprintf(b, n, v ? "Holds A for you" : "As the Wii");
+    else if (it->v == &g_cfg.endo_speed) { static const char *s[] = { "", "Slow", "Normal", "Fast" }; snprintf(b, n, "%s", s[v]); }
     else if (it->v == &g_cfg.text_lang || it->v == &g_cfg.voice_lang) snprintf(b, n, v ? "Japanese" : "English");
     else if (it->v == &g_cfg.tex_limit) { static const char *s[] = { "Up to 1024", "Up to 2048", "Full (up to 4096)" }; snprintf(b, n, "%s", s[v]); }
     else snprintf(b, n, v ? "On" : "Off");
@@ -115,7 +119,7 @@ static void value_text(const Item *it, char *b, size_t n) {
 enum { T_DISPLAY, T_GRAPHICS, T_AUDIO, T_LANG, T_CONTROLS, T_REMAP, T_DEV, NTAB };
 static const char *TABS[NTAB] = { "Display", "Graphics", "Audio", "Language", "Controls", "Remap", "Developer" };
 static const int ITEM_TAB[] = { T_DISPLAY, T_DISPLAY, T_DISPLAY, T_DISPLAY, T_GRAPHICS, T_DISPLAY, T_DISPLAY, T_GRAPHICS, T_AUDIO, T_AUDIO,
-                                T_CONTROLS, T_CONTROLS, T_CONTROLS, T_LANG, T_LANG, T_DEV };
+                                T_CONTROLS, T_CONTROLS, T_CONTROLS, T_CONTROLS, T_CONTROLS, T_CONTROLS, T_CONTROLS, T_LANG, T_LANG, T_DEV };
 static Item ITEMS[] = {
     { "Resolution", "Internal rendering resolution. Higher is sharper and needs a faster GPU.", &g_cfg.scale, 1, 6, 1 },
     { "Display", "Window or borderless fullscreen (F11 also switches).", &g_cfg.fullscreen, 0, 1, 1 },
@@ -130,6 +134,10 @@ static Item ITEMS[] = {
     { "Pointer speed", "How fast the controller's right stick moves the pointer.", &g_cfg.pointer_speed, 1, 5, 1 },
     { "Button prompts", "Which buttons the game's help shows: Automatic follows what you used last (keyboard & mouse or a controller), or always one of them. Wii Remote keeps the original pictures.", &g_cfg.prompts, 0, 3, 1 },
     { "Controller style", "Button names for a controller: Automatic asks the controller what it is; or always Xbox, PlayStation 4 or PlayStation 5.", &g_cfg.pad_style, 0, 3, 1 },
+    { "Saw", "Orthopedics saw: Manual turns it back and forth with the mouse wheel / LB-RB; Automatic saws by itself while A (left click) is held.", &g_cfg.saw_auto, 0, 1, 1 },
+    { "Bandage", "Winding a bandage: Manual circles the pointer (or holds the twist keys); Automatic winds it by itself while A is held, during operations and First Response.", &g_cfg.bandage_auto, 0, 1, 1 },
+    { "Strike and CPR", "Some strikes ask you to hold A and swing. As the Wii: hold A yourself; Holds A for you: the swing key / button (middle click, G, Y) holds A while it swings.", &g_cfg.swing_a, 0, 1, 1 },
+    { "Endoscope speed", "How fast the scope moves in and out with the wheel, R / V or the right stick.", &g_cfg.endo_speed, 1, 3, 1 },
     { "Text", "Language of all the game's text. The US disc has the Japanese text too. Takes effect when the game is started again.", &g_cfg.text_lang, 0, 1, 1 },
     { "Voices", "Language of the voices. Japanese needs your Japanese disc (HOSPITAL. 6-nin no Ishi) extracted next to the US one, in a folder named like it plus _jp (e.g. disc_jp). Takes effect when the game is started again.", &g_cfg.voice_lang, 0, 1, 1 },
     { "Developer scene", "Hidden developer tools and cut prototypes left in the game. Enter / A goes there now (unsaved progress is lost).", &g_dev_pick, 0, NDEV - 1, 1 },
