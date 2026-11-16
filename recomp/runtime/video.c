@@ -1153,10 +1153,24 @@ void video_flush(void) {                    // decode every complete command buf
     g_gx_ns += host_now_ns() - t0;
 }
 // Once a second: "Trauma Team - 60 fps | GPU 4.1 ms" in the window title.
+// A frame that took much longer than 1/60 s is logged with where its time went, so stutters can be traced
+// ("[hitch] 46.6 ms: graphics 12.1 (texture uploads 9.0, shader builds 0.3, present 0.4), disc 0.0, game code 34.5").
+extern u64 g_tex_up_ns, g_spec_ns, g_disc_sync_ns, g_present_ns;
+static void hitch_log(u64 gap) {
+    static u64 gx0, up0, sp0, di0, pr0; static int n;
+    u64 gx = g_gx_ns - gx0, up = g_tex_up_ns - up0, sp = g_spec_ns - sp0, di = g_disc_sync_ns - di0, pr = g_present_ns - pr0;
+    gx0 = g_gx_ns; up0 = g_tex_up_ns; sp0 = g_spec_ns; di0 = g_disc_sync_ns; pr0 = g_present_ns;
+    if (gap < 25000000ull || n >= 300) return;
+    n++;
+    double rest = (double)gap - (double)gx - (double)di; if (rest < 0) rest = 0;
+    fprintf(stderr, "[hitch] frame %llu: %.1f ms: graphics %.1f (texture uploads %.1f, shader builds %.1f, present %.1f), disc %.1f, game code %.1f\n",
+            (unsigned long long)g_copies, gap / 1e6, gx / 1e6, up / 1e6, sp / 1e6, pr / 1e6, di / 1e6, rest / 1e6);
+}
 static void perf_title(void) {
     static u64 t_last, frames, gx_last, t_prev, worst;
     u64 now = host_now_ns(); frames++;
     if (t_prev && now - t_prev > worst) worst = now - t_prev;   // longest gap between two frames (hitches)
+    hitch_log(t_prev ? now - t_prev : 0);
     t_prev = now;
     if (!t_last) { t_last = now; gx_last = g_gx_ns; frames = 0; return; }
     if (now - t_last < 1000000000ull) return;

@@ -22,6 +22,8 @@ rec_*.txt
 textures_full/
 usersave_u2/
 build-hl/
+build-linux/
+build-win-novr/
 
 # Setup downloads and outputs
 tools-cache/

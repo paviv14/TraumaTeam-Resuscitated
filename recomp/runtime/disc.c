@@ -203,9 +203,12 @@ static void note_model(u64 off, u32 dst, u32 len) {
 }
 
 // Read `len` bytes at disc byte offset `off` into guest memory at `dst`. Returns 1 (drive success) or 2.
+u64 g_disc_sync_ns;   // time the game waited on synchronous reads (hitch log)
 int disc_read(u64 off, u32 len, u32 dst) {
+    u64 host_now_ns(void); u64 t0 = host_now_ns();
     u8 *buf = malloc(len ? len : 1);
     int r = read_host(off, len, buf);
+    g_disc_sync_ns += host_now_ns() - t0;
     if (r == 1) { to_guest(dst, buf, len); note_model(off, dst, len); }
     free(buf);
     return r;

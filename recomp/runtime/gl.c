@@ -33,6 +33,8 @@ int g_gpu;
     X(void, GenTextures, (GLsizei, GLuint *)) X(void, BindTexture, (GLenum, GLuint)) X(void, ActiveTexture, (GLenum)) \
     X(void, TexImage2D, (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *)) \
     X(void, CompressedTexImage2D, (GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void *)) X(void, DeleteTextures, (GLsizei, const GLuint *)) \
+    X(void, TexSubImage2D, (GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *)) \
+    X(void, CompressedTexSubImage2D, (GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLsizei, const void *)) \
     X(void, TexParameteri, (GLenum, GLenum, GLint)) X(void, GenerateMipmap, (GLenum)) \
     X(void, GenFramebuffers, (GLsizei, GLuint *)) X(void, BindFramebuffer, (GLenum, GLuint)) \
     X(void, FramebufferTexture2D, (GLenum, GLenum, GLenum, GLuint, GLint)) X(GLenum, CheckFramebufferStatus, (GLenum)) \
@@ -314,62 +316,103 @@ int gpu_init(int scale) {
 
 // ---------------------------------------------------------------- textures
 // Texture pack replacements on the GPU, one per (replacement id, variant). Finished images come from
-// the loader threads (texpack.c); at most ~24 MB is uploaded per frame so a scene full of new
-// textures never stalls a frame, and textures unused for a few seconds are dropped when the total
-// goes over the memory budget (they come back from the disk cache when needed again).
-typedef struct { GLuint tex; u32 bytes; u32 last; u8 failed; } RTex;
+// the loader threads (texpack.c). Uploading is spread over frames: a 4096 image is ~21 MB, and copying
+// that in one go stalls the frame it lands in, so each image goes up in bands of rows, a few MB per
+// frame (the original texture shows until the whole image is there). Textures unused for a few seconds
+// are dropped when the total goes over the memory budget (they come back from the disk cache when needed).
+u64 host_now_ns(void);
+typedef struct { GLuint tex; u32 bytes; u32 last; u8 failed; TPImage *pend; int lvl, row; } RTex;
 static RTex *g_rt; static int g_nrt;
 static u32 g_frame_no; static long long g_rt_bytes, g_up_left;
-u64 g_pf_tp_uploads, g_pf_tp_upbytes;
+u64 g_pf_tp_uploads, g_pf_tp_upbytes, g_tex_up_ns;
+#define UP_PER_FRAME (6ll << 20)
+static int g_pend[32], g_npend;
+static int upload_some(RTex *r) {   // next bands of a pending image, within this frame's allowance; 1 when complete
+    TPImage *im = r->pend; if (!im) return 1;
+    u64 t0 = host_now_ns();
+    glBindTexture_(GL_TEXTURE_2D, r->tex);
+    GLenum cf = im->compressed == 2 ? 0x83F1 /* DXT1 */ : 0x83F3 /* DXT5 */;
+    while (r->lvl < im->nlevels && g_up_left > 0) {
+        int w = im->w >> r->lvl, h = im->h >> r->lvl; if (w < 1) w = 1; if (h < 1) h = 1;
+        if (im->compressed) {
+            long long rowb = (long long)((w + 3) / 4) * (im->compressed == 2 ? 8 : 16);   // one row of 4x4 blocks
+            long long nb = g_up_left / rowb; if (nb < 1) nb = 1;
+            int y = r->row, n = (int)(nb * 4); if (y + n > h) n = h - y;
+            glCompressedTexSubImage2D_(GL_TEXTURE_2D, r->lvl, 0, y, w, n, cf, (GLsizei)(((n + 3) / 4) * rowb), im->data[r->lvl] + (size_t)(y / 4) * (size_t)rowb);
+            g_up_left -= ((n + 3) / 4) * rowb; r->row += n;
+        } else {
+            long long rowb = (long long)w * 4, nr = g_up_left / rowb; if (nr < 1) nr = 1;
+            int y = r->row, n = (int)nr; if (y + n > h) n = h - y;
+            glTexSubImage2D_(GL_TEXTURE_2D, r->lvl, 0, y, w, n, GL_RGBA, GL_UNSIGNED_BYTE, im->data[r->lvl] + (size_t)y * (size_t)rowb);
+            g_up_left -= n * rowb; r->row += n;
+        }
+        if (r->row >= h) { r->lvl++; r->row = 0; }
+    }
+    g_tex_up_ns += host_now_ns() - t0;
+    if (r->lvl < im->nlevels) return 0;
+    g_pf_tp_uploads++; g_pf_tp_upbytes += im->bytes;
+    texpack_free_image(im); r->pend = NULL;
+    return 1;
+}
 static GLuint repl_texture(int id, int var) {
     if (!g_rt) { g_nrt = g_texpack_count * 3; g_rt = calloc((size_t)(g_nrt ? g_nrt : 1), sizeof *g_rt); }
     int i = id * 3 + var; if (i < 0 || i >= g_nrt) return 0;
     RTex *r = &g_rt[i];
+    if (r->pend) return 0;   // still going up
     if (r->tex) { r->last = g_frame_no; return r->tex; }
     if (r->failed) return 0;
     int failed;
-    TPImage *im = texpack_get(id, var, &failed, g_up_left > 0);
+    TPImage *im = texpack_get(id, var, &failed, g_up_left > 0 && g_npend < 32);
     if (failed) { r->failed = 1; return 0; }
     if (!im) return 0;
+    u64 t0 = host_now_ns();
     glGenTextures_(1, &r->tex); glBindTexture_(GL_TEXTURE_2D, r->tex);
     int w = im->w, h = im->h;
-    for (int l = 0; l < im->nlevels; l++) {
-        if (im->compressed) glCompressedTexImage2D_(GL_TEXTURE_2D, l, im->compressed == 2 ? 0x83F1 /* DXT1 */ : 0x83F3 /* DXT5 */, w, h, 0, (GLsizei)im->size[l], im->data[l]);
-        else glTexImage2D_(GL_TEXTURE_2D, l, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, im->data[l]);
+    for (int l = 0; l < im->nlevels; l++) {   // storage for every level; the pixels follow in bands
+        glTexImage2D_(GL_TEXTURE_2D, l, im->compressed ? (im->compressed == 2 ? 0x83F1 : 0x83F3) : GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
         w = w > 1 ? w / 2 : 1; h = h > 1 ? h / 2 : 1;
     }
     glTexParameteri_(GL_TEXTURE_2D, 0x813D /* GL_TEXTURE_MAX_LEVEL */, im->nlevels - 1);
+    g_tex_up_ns += host_now_ns() - t0;
     r->bytes = (u32)im->bytes; r->last = g_frame_no; g_rt_bytes += (long long)im->bytes;
-    g_up_left -= (long long)im->bytes; g_pf_tp_uploads++; g_pf_tp_upbytes += im->bytes;
-    texpack_free_image(im);
-    return r->tex;
+    r->pend = im; r->lvl = 0; r->row = 0;
+    if (upload_some(r)) return r->tex;
+    g_pend[g_npend++] = i;
+    return 0;
 }
-static void repl_frame(void) {   // once per presented frame: upload allowance, eviction
+static void repl_frame(void) {   // once per presented frame: upload allowance, pending uploads, eviction
     g_frame_no++;
-    g_up_left = 24ll << 20;
+    g_up_left = UP_PER_FRAME;
+    for (int k = 0; k < g_npend; ) {
+        if (upload_some(&g_rt[g_pend[k]])) g_pend[k] = g_pend[--g_npend]; else k++;
+        if (g_up_left <= 0) break;
+    }
     if (g_rt && g_rt_bytes > g_rt_budget && (g_frame_no & 31) == 0) {
         // drop the least recently used textures (not used for 5+ seconds) until under budget
         for (int pass = 0; pass < 64 && g_rt_bytes > g_rt_budget; pass++) {
             int best = -1; u32 oldest = g_frame_no;
-            for (int i = 0; i < g_nrt; i++) if (g_rt[i].tex && g_rt[i].last < oldest) { oldest = g_rt[i].last; best = i; }
+            for (int i = 0; i < g_nrt; i++) if (g_rt[i].tex && !g_rt[i].pend && g_rt[i].last < oldest) { oldest = g_rt[i].last; best = i; }
             if (best < 0 || g_frame_no - oldest < 300) break;
             glDeleteTextures_(1, &g_rt[best].tex); g_rt[best].tex = 0; g_rt_bytes -= g_rt[best].bytes; g_rt[best].bytes = 0;
         }
     }
+}
+static void repl_drop(RTex *r) {
+    if (r->tex) { glDeleteTextures_(1, &r->tex); g_rt_bytes -= r->bytes; }
+    if (r->pend) { texpack_free_image(r->pend); for (int k = 0; k < g_npend; k++) if (&g_rt[g_pend[k]] == r) { g_pend[k] = g_pend[--g_npend]; break; } }
+    memset(r, 0, sizeof *r);
 }
 void gpu_texpack_stats(char *b, int n) {
     snprintf(b, (size_t)n, "texture pack %lld MB on GPU, %d waiting", g_rt_bytes >> 20, g_texpack_count ? texpack_pending() : 0);
 }
 void gpu_prompts_flush(void) {   // the bindings changed: the composed prompt pictures are made again
     if (!g_rt) return;
-    for (int i = 0; i < g_nrt; i++) if (texpack_is_prompt(i / 3)) {
-        if (g_rt[i].tex) { glDeleteTextures_(1, &g_rt[i].tex); g_rt_bytes -= g_rt[i].bytes; }
-        memset(&g_rt[i], 0, sizeof g_rt[i]); }
+    for (int i = 0; i < g_nrt; i++) if (texpack_is_prompt(i / 3)) repl_drop(&g_rt[i]);
 }
 void gpu_texpack_flush(void) {   // options menu: pack switched off/on
     if (!g_rt) return;
-    for (int i = 0; i < g_nrt; i++) if (g_rt[i].tex) { glDeleteTextures_(1, &g_rt[i].tex); g_rt[i].tex = 0; }
-    memset(g_rt, 0, sizeof *g_rt * (size_t)g_nrt); g_rt_bytes = 0;
+    for (int i = 0; i < g_nrt; i++) repl_drop(&g_rt[i]);
+    g_npend = 0; g_rt_bytes = 0;
 }
 
 static void bind_texture(int unit, const TexV *t) {
@@ -455,7 +498,10 @@ static int spec_ready(Spec *e) {   // finish a program whose build has completed
     return 1;
 }
 // The program for this configuration if it is ready (0: use the uber shader).
-static GLuint spec_program(const int *cfg, FU *fu) {
+u64 g_spec_ns;   // time spent starting and finishing shader builds (hitch log)
+static GLuint spec_program_(const int *cfg, FU *fu);
+static GLuint spec_program(const int *cfg, FU *fu) { u64 t0 = host_now_ns(), b = g_pf_spec_built; int n = g_nspec; GLuint p = spec_program_(cfg, fu); if (g_nspec != n || g_pf_spec_built != b) g_spec_ns += host_now_ns() - t0; return p; }
+static GLuint spec_program_(const int *cfg, FU *fu) {
     if (g_spec_off || !g_spec) return 0;
     u64 h = 1469598103934665603ull;
     for (int i = 0; i < CFG_INTS; i++) { h ^= (u32)cfg[i]; h *= 1099511628211ull; }
@@ -825,7 +871,10 @@ static void gpu_timer_frame(void) {
 }
 static void side_vignette(int ww, int wh);
 static void nunchuk_note(int ww, int wh);
-void gpu_present(int x0, int y0, int w, int h) {
+u64 g_present_ns;   // whole present: final blit, swap, uploads between frames (hitch log)
+static void gpu_present_(int x0, int y0, int w, int h);
+void gpu_present(int x0, int y0, int w, int h) { u64 t0 = host_now_ns(); gpu_present_(x0, y0, w, h); g_present_ns += host_now_ns() - t0; }
+static void gpu_present_(int x0, int y0, int w, int h) {
     int ww, wh; SDL_GL_GetDrawableSize(g_sdl_window, &ww, &wh);
     view_rect(ww, wh);
     int vw = g_pic_w, vh = g_pic_h;
@@ -1149,6 +1198,7 @@ void gpu_overlay_end(void) {}
 void gpu_draw(const Setup *s, const Out *v, int n) { (void)s; (void)v; (void)n; }
 void gpu_clear(int x0, int y0, int w, int h, u32 c, float z, int color, int alpha, int depth) { (void)x0; (void)y0; (void)w; (void)h; (void)c; (void)z; (void)color; (void)alpha; (void)depth; }
 void gpu_present(int x0, int y0, int w, int h) { (void)x0; (void)y0; (void)w; (void)h; }
+u64 g_present_ns, g_tex_up_ns, g_spec_ns;
 int gpu_read_rgb(int x0, int y0, int w, int h, u8 *out) { (void)x0; (void)y0; (void)w; (void)h; (void)out; return 0; }
 int gpu_read_rgb_wide(int x0, int y0, int w, int h, u8 **out) { (void)x0; (void)y0; (void)w; (void)h; (void)out; return 0; }
 void gpu_texpack_stats(char *b, int n) { if (n) b[0] = 0; }

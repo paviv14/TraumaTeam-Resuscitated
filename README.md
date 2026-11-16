@@ -37,6 +37,24 @@ download of about 400 MB, about 5 more minutes).
 **Texture pack (optional):** put the pack's files in a folder named `textures` inside `bin`. The game
 picks it up by itself; the first run with it is slower while the textures are prepared.
 
+## Installing (Linux, 64-bit)
+
+You need the same disc image, plus a C compiler and SDL2 from your distribution:
+
+* Debian / Ubuntu / Mint: `sudo apt install build-essential pkg-config libsdl2-dev curl`
+* Fedora: `sudo dnf install gcc make pkgconf-pkg-config SDL2-devel curl`
+* Arch: `sudo pacman -S base-devel sdl2 curl`
+
+Then download and unzip this repository as above, and in a terminal in its folder run:
+
+```
+./setup.sh /path/to/your/TraumaTeam.rvz
+```
+
+(an extracted disc folder works too; add `--disc-jp /path/to/japanese-disc` for the Japanese voices).
+Play with `Trauma Team Resuscitated.sh`, or from your applications menu. The log is `bin/ttpc.log`.
+Linux is new: please report anything that behaves differently from Windows.
+
 ## Playing
 
 | | Keyboard and mouse | Controller |
