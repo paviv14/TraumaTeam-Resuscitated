@@ -432,7 +432,7 @@ static TexEntry *tex_decode(const Tex *t, u32 img0, u32 tlutreg) {
 // ---------------------------------------------------------------- per-draw pipeline state
 // Everything the pixel loop (or the GPU) needs, decoded from BP registers once per draw call.
 static Setup S;
-u64 g_chapter_ns, g_nunchuk_ns;   // when the chapter select's episode grid was last drawn (platform.c)
+u64 g_chapter_ns, g_nunchuk_ns, g_motion_hint_ns;   // when the chapter select's episode grid was last drawn (platform.c)
 
 // Trauma Team stores its 2D art as CI4/CI8 images with TWO IA8 palettes: the same texels are bound to
 // two texture maps, palette A giving red (intensity) + green (alpha), palette B blue + alpha, and the
@@ -554,6 +554,10 @@ static void setup_draw(void) {
         extern u64 g_chapter_ns; u64 host_now_ns(void);
         for (int m = 0; m < 8; m++) { TexEntry *e = S.tex[m].e; if (!e || !e->partner || e->w != 312 || e->h != 256) continue;
             if (texpack_pair_key(e->hash, e->partner) == 0x1F1C39467219A210ull || texpack_pair_key(e->partner, e->hash) == 0x1F1C39467219A210ull) { g_chapter_ns = host_now_ns(); break; } }
+    }
+    {   // the Wii Remote motion hint (remo/wii_remote_8idou: CPR, strikes) is on screen: clicks can stand for the swing (wiimote.c)
+        extern u64 g_motion_hint_ns; u64 host_now_ns(void);
+        for (int m = 0; m < 8; m++) { TexEntry *e = S.tex[m].e; if (e && e->hash == 0x942A2AF4D8E8D41Eull) { g_motion_hint_ns = host_now_ns(); break; } }
     }
     {   // the "controlled with the Nunchuk Style" notice at start (gl.c adds a line about the PC's controls)
         extern u64 g_nunchuk_ns; u64 host_now_ns(void); const u64 K = 0xA16CEF33C25FAA1Eull;

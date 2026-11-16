@@ -318,6 +318,10 @@ void f_8025F830(CPU *c) {
         }
     }
     float acc_z; push_motion((h & PUSH_FLAG) ? 1 : (h & PULL_FLAG) ? -1 : 0, h, &acc_z);
+    if (g_cfg.swing_a == 2 && !g_nrep && !g_nscript) {   // "click in time": while the moving-Remote hint shows, A / left click swings
+        extern u64 g_motion_hint_ns; u64 host_now_ns(void);
+        if (g_motion_hint_ns && host_now_ns() - g_motion_hint_ns < 300000000ull && (h & BTN_A)) h |= SWING_FLAG;
+    }
     float acc_y = swing_motion((h & SWING_FLAG) != 0);
     int roll_dir = (h & ROLL_L_FLAG) ? -1 : (h & ROLL_R_FLAG) ? 1 : 0;
     if (!g_nrep && !g_nscript) {   // motion assists (options menu, Controls)
@@ -326,7 +330,7 @@ void f_8025F830(CPU *c) {
         static int saw_t;
         if (g_cfg.saw_auto && ortho && (h & BTN_A) && !roll_dir) { roll_dir = (saw_t / 9) % 2 ? -1 : 1; saw_t++; } else saw_t = 0;   // back and forth, ~3 strokes a second
         if (g_cfg.bandage_auto && op && (h & BTN_A) && !roll_dir && !(g_cfg.saw_auto && ortho)) roll_dir = 1;          // round and round
-        if (g_cfg.swing_a && (g_swing_t >= 0 || (h & SWING_FLAG))) h |= BTN_A;                                                              // the strike holds A
+        if (g_cfg.swing_a == 1 && (g_swing_t >= 0 || (h & SWING_FLAG))) h |= BTN_A;                                                              // the strike holds A
     }
     float roll = roll_motion(roll_dir, h, circle_motion(g_px, g_py, g_point_valid, h));
     h &= ~(PUSH_FLAG | PULL_FLAG | SWING_FLAG | ROLL_L_FLAG | ROLL_R_FLAG);
