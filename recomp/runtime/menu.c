@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-Settings g_cfg = { .scale = 2, .fullscreen = 0, .stretch = 0, .sharp = 0, .vsync = 0, .textures = 1, .volume = 100, .pointer_speed = 3, .wide_fill = 1, .tex_limit = 1, .tex_compress = 1, .tex_vram_mb = 3072, .endo_speed = 2 };
+Settings g_cfg = { .scale = 2, .fullscreen = 0, .stretch = 0, .sharp = 0, .vsync = 0, .textures = 1, .volume = 100, .pointer_speed = 3, .wide_fill = 1, .tex_limit = 1, .tex_compress = 1, .tex_vram_mb = 3072, .endo_speed = 2, .swing_a = 2 };
 static const char *CFG_PATH = "settings.ini";
 
 static struct { const char *key; int *v; int lo, hi; } KEYS[] = {
