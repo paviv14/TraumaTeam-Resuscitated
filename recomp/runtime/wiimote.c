@@ -207,17 +207,26 @@ static void push_motion(int dir, u32 hold, float *acc_z) {
 // then the hard stop: a spike of several g, then settle. One press = one swing; held, it repeats.
 static int g_swing_t = -1;
 static float swing_motion(int held) {
-    // A hard downward chop: wind up, then stop dead. The game's swing detector (f_801729E0 / f_80172D60) sums the
-    // jerk with a 0.9 decay and grades the peak: (peak - 1.9) / 7 -> strength 0..5. The old swing peaked at 2.3
-    // (strength 0, and its -3.6 was past the Remote's +-3.4 range, so the game threw it away); the chest strike wants
-    // a real thump. This one peaks at ~5 (strength 5) and stays inside the range a real Remote can report.
-    static const float Y[] = { 0.0f, 1.2f, 2.4f, 3.2f, -3.3f, -3.3f, -2.6f, -1.8f, -1.3f, -1.1f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f };
-    static int was;
+    // The game's swing detector (f_801729E0 / f_80172D60) sums the jerk with a 0.9 decay and grades the peak:
+    // (peak - 1.9) / 7 -> strength 0..5. Chest compressions want a gentle push (the soft swing, strength 0, peak
+    // 2.3: its -3.6 is past a real Remote's range, so the game evens it out); a hard one stalls them. The chest strike ("Hold A and swing", the A icon beside the moving Remote)
+    // wants a real thump: the hard chop winds up and stops dead, peak ~5 (strength 5), inside the +-3.4 g a real
+    // Remote can report.
+    static const float SOFT[] = { -0.6f, -0.2f, -0.1f, -3.6f, -3.0f, -1.8f, -1.2f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f };
+    static const float HARD[] = { 0.0f, 1.2f, 2.4f, 3.2f, -3.3f, -3.3f, -2.6f, -1.8f, -1.3f, -1.1f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f };
+    enum { N = sizeof SOFT / sizeof SOFT[0] };
+    static int was; static const float *Y = SOFT;
     if (g_swing_t < 0 && held && !was) g_swing_t = 0;
     was = held;
     if (g_swing_t < 0) return -1.f;
+    if (g_swing_t == 0) {   // a new swing: hard for the strike prompt, soft otherwise
+        extern u64 g_strike_hint_ns; u64 host_now_ns(void);
+        int hard = g_strike_hint_ns && host_now_ns() - g_strike_hint_ns < 500000000ull;
+        if ((hard ? HARD : SOFT) != Y) fprintf(stderr, "[input] swing: %s\n", hard ? "hard (strike)" : "soft");
+        Y = hard ? HARD : SOFT;
+    }
     float y = Y[g_swing_t++];
-    if (g_swing_t >= (int)(sizeof Y / sizeof Y[0])) { g_swing_t = held ? 0 : -1; }
+    if (g_swing_t >= N) { g_swing_t = held ? 0 : -1; }
     return y;
 }
 
