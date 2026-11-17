@@ -2,12 +2,11 @@
 # Trauma Team Resuscitated - Setup for Linux
 # Builds the game for this PC from YOUR OWN copy of Trauma Team (USA), then (optionally) makes the button-prompt
 # pictures from it. Nothing of the game is downloaded: only free tools (Python via uv, DolphinTool if you give a
-# disc image, and if you choose, the LaMa picture-repair model). Everything downloaded stays in tools-cache/.
+# disc image). Everything downloaded stays in tools-cache/.
 #
 #   ./setup.sh                          looks for an extracted disc in ./disc, ../disc or the one used last time
 #   ./setup.sh /path/to/TraumaTeam.rvz  a disc image (.iso .rvz .wbfs .wia .gcz) or an extracted disc folder
 #   options: --disc-jp <image or folder>   Japanese voices from HOSPITAL. 6-nin no Ishi (Japan)
-#            --tutorials yes|no            keyboard / controller pictures in the tutorials (asks if not given)
 #
 # Needs: gcc, make, pkg-config and the SDL2 development files, e.g.
 #   Debian / Ubuntu / Mint:  sudo apt install build-essential pkg-config libsdl2-dev curl
@@ -29,7 +28,7 @@ DISC=""; DISC_JP=""; TUT=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --disc-jp) DISC_JP="$2"; shift 2 ;;
-        --tutorials) TUT="$2"; shift 2 ;;
+        --tutorials) shift 2 ;;   # no longer used
         -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
         *) DISC="$1"; shift ;;
     esac
@@ -128,18 +127,8 @@ fi
 
 # ---------------------------------------------------------------- 5. button prompts
 step "5/6 Making the button prompts from your disc"
-echo "   The tutorial pictures show a Wii Remote. Setup can change them to show your keyboard or controller"
-echo "   buttons instead (downloads about 400 MB once - a picture-repair AI model - and takes about 5 minutes)."
-if [ -z "$TUT" ]; then
-    if [ -t 0 ]; then read -r -p "   Show keyboard / controller button prompts in the tutorial pictures (experimental)? [Y/n] " TUT || TUT=y; else TUT=n; fi
-fi
+echo "   The help bubbles and the buttons in the tutorial pictures will show your own keys or controller buttons."
 WITH=(--with pillow --with numpy --with scipy --with opencv-python-headless); EXTRA=()
-case "${TUT:-y}" in [nN]*) ;; *)
-    WITH+=(--with torch)
-    M="$ROOT/tools/prompts/big-lama.pt"
-    [ -f "$M" ] || { echo "   downloading big-lama.pt"; curl -fL -o "$M" https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt; }
-    export LAMA_MODEL="$M"; EXTRA=(--tutorials) ;;
-esac
 (cd "$ROOT" && "$UV" run --no-project --python 3.12 "${WITH[@]}" python tools/prompts/setup_prompts.py "$DATA" "$BIN/prompts" "$CACHE/prompts-work" "${EXTRA[@]}") \
     || echo "   The button prompts could not be made; the game still works with the original Wii pictures."
 

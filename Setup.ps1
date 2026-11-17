@@ -1,7 +1,7 @@
 # Trauma Team Resuscitated - Setup
 # Builds the game for this PC from YOUR OWN copy of Trauma Team (USA, extracted with Dolphin), then makes the
 # button-prompt pictures from it. Nothing of the game is downloaded: only free tools (Python via uv, the
-# w64devkit C compiler, SDL2) and, if you choose, the LaMa picture-repair model.
+# w64devkit C compiler, SDL2).
 # Run Setup.bat (it starts this script). Everything it downloads stays in the "tools-cache" folder here.
 
 param([string]$Disc = '', [string]$Tutorials = '', [string]$DiscJp = '', [switch]$NoPause)   # the setup window passes these
@@ -177,17 +177,9 @@ if ($DiscJp) {
 
 # ---------------------------------------------------------------- 4. button prompts
 Step "5/6 Making the button prompts from your disc"
-Write-Host "   The tutorial pictures show a Wii Remote. Setup can change them to show your keyboard or controller"
-Write-Host "   buttons instead (downloads about 400 MB once - a picture-repair AI model - and takes about 5 minutes)."
-$tut = if ($Tutorials) { $Tutorials -match '^[yY1t]' } else { (Read-Host "   Show keyboard / controller button prompts in the tutorial pictures (experimental)? [Y/n]") -notmatch '^[nN]' }
+Write-Host "   The help bubbles and the buttons in the tutorial pictures will show your own keys or controller buttons."
 $with = @('--with', 'pillow', '--with', 'numpy', '--with', 'scipy', '--with', 'opencv-python-headless')
 $args2 = @()
-if ($tut) {
-    $with += @('--with', 'torch')
-    $m = Join-Path $Root 'tools\prompts\big-lama.pt'
-    if (-not (Test-Path $m)) { Get-File 'https://github.com/Sanster/models/releases/download/add_big_lama/big-lama.pt' $m }
-    $env:LAMA_MODEL = $m; $args2 = @('--tutorials')
-}
 Push-Location $Root
 & $Uv run --no-project --python 3.12 @with python tools\prompts\setup_prompts.py $Data (Join-Path $Bin 'prompts') (Join-Path $Cache 'prompts-work') @args2
 $ok = $LASTEXITCODE -eq 0

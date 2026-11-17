@@ -30,9 +30,8 @@ Then:
    This takes 10 to 30 minutes, once.
 3. Play with the **Trauma Team Resuscitated** shortcut it makes (or `bin\Resuscitated.exe`).
 
-Optional in Setup: *Show keyboard and controller button prompts in the tutorial pictures
-(Experimental)* redraws the tutorial pictures with your buttons instead of the Wii Remote (one more
-download of about 400 MB, about 5 more minutes).
+The help bubbles and the buttons drawn in the tutorial pictures show your own keys or controller
+buttons; the tutorial pictures themselves stay as the game drew them.
 
 **Texture pack (optional):** put the pack's files in a folder named `textures` inside `bin`. The game
 picks it up by itself; the first run with it is slower while the textures are prepared.

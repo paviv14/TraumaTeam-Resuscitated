@@ -49,14 +49,11 @@ $discOk = Label '' 44 232 572 20 (New-Object Drawing.Font('Segoe UI', 9)) $dim
 
 # 2. options
 Label '2.  Options' 24 262 400 22 $uiB | Out-Null
-$tut = New-Object Windows.Forms.CheckBox; $tut.Location = '44,288'; $tut.Size = '572,44'; $tut.Checked = $true
-$tut.Font = $ui; $tut.ForeColor = $fg; $tut.Text = "Show keyboard and controller button prompts in the tutorial pictures (Experimental)`n(instead of the Wii Remote - downloads about 400 MB once, adds about 5 minutes)"
-$form.Controls.Add($tut)
-Label 'Japanese voices (optional): your Japanese disc, HOSPITAL. 6-nin no Ishi - image or extracted folder' 44 340 580 20 (New-Object Drawing.Font('Segoe UI', 8.5)) $dim | Out-Null
-$jp = New-Object Windows.Forms.TextBox; $jp.Location = '44,364'; $jp.Size = '330,26'; $jp.Font = $ui
+Label 'Japanese voices (optional): your Japanese disc, HOSPITAL. 6-nin no Ishi - image or extracted folder' 44 292 580 20 (New-Object Drawing.Font('Segoe UI', 8.5)) $dim | Out-Null
+$jp = New-Object Windows.Forms.TextBox; $jp.Location = '44,316'; $jp.Size = '330,26'; $jp.Font = $ui
 $jp.BackColor = $panel; $jp.ForeColor = $fg; $jp.BorderStyle = 'FixedSingle'; $form.Controls.Add($jp)
-$jpBrowse = Button 'Disc image...' 384 360 120
-$jpFolder = Button 'Folder...' 512 360 104
+$jpBrowse = Button 'Disc image...' 384 312 120
+$jpFolder = Button 'Folder...' 512 312 104
 
 # progress
 $status = Label 'Ready.' 24 424 592 22 $uiB
@@ -120,10 +117,10 @@ $jpFolder.Add_Click({
 $proc = $null; $timer = New-Object Windows.Forms.Timer; $timer.Interval = 400; $seen = 0
 $install.Add_Click({
     if (-not (Check-Disc)) { return }
-    $install.Enabled = $false; $browse.Enabled = $false; $folder.Enabled = $false; $tut.Enabled = $false; $jp.ReadOnly = $true; $jpBrowse.Enabled = $false; $jpFolder.Enabled = $false; $disc.ReadOnly = $true
+    $install.Enabled = $false; $browse.Enabled = $false; $folder.Enabled = $false; $jp.ReadOnly = $true; $jpBrowse.Enabled = $false; $jpFolder.Enabled = $false; $disc.ReadOnly = $true
     $status.Text = 'Starting...'; $box.Text = ''; Set-Content $Log ''
     $a = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$(Join-Path $Root 'Setup.ps1')`"", '-NoPause',
-           '-Disc', "`"$($disc.Text.Trim())`"", '-Tutorials', $(if ($tut.Checked) { 'yes' } else { 'no' }))
+           '-Disc', "`"$($disc.Text.Trim())`"")
     if ($jp.Text.Trim()) { $a += @('-DiscJp', "`"$($jp.Text.Trim())`"") }
     $script:proc = Start-Process powershell -ArgumentList $a -WindowStyle Hidden -PassThru -RedirectStandardOutput $Log -RedirectStandardError $ErrLog
     $timer.Start() })
@@ -143,7 +140,7 @@ $timer.Add_Tick({
         } else {
             $status.Text = 'Setup stopped - see the messages below (also in tools-cache\setup.log).'; $status.ForeColor = $red
             foreach ($l in (Read-Shared $ErrLog | Select-Object -Last 15)) { if ($l.Trim()) { $box.AppendText($l.TrimEnd() + "`r`n") } }
-            $install.Text = 'Try again'; $install.Enabled = $true; $browse.Enabled = $true; $folder.Enabled = $true; $tut.Enabled = $true; $jp.ReadOnly = $false; $jpBrowse.Enabled = $true; $jpFolder.Enabled = $true; $disc.ReadOnly = $false
+            $install.Text = 'Try again'; $install.Enabled = $true; $browse.Enabled = $true; $folder.Enabled = $true; $jp.ReadOnly = $false; $jpBrowse.Enabled = $true; $jpFolder.Enabled = $true; $disc.ReadOnly = $false
         }
     } })
 $play.Add_Click({ Start-Process (Join-Path $Root 'bin\Resuscitated.exe') -WorkingDirectory (Join-Path $Root 'bin'); $form.Close() })

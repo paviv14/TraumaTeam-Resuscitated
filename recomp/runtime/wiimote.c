@@ -206,7 +206,8 @@ static void push_motion(int dir, u32 hold, float *acc_z) {
 // accelerometers (in g, KPAD reads the opposite of the motion) see a short drop toward free fall,
 // then the hard stop: a spike of several g, then settle. One press = one swing; held, it repeats.
 static int g_swing_t = -1;
-static int g_swing_hard;   // the swing under way is the strike's hard chop
+static int g_swing_hard;
+static int g_op_mode_em(void) { extern char g_op_mode[3]; return g_op_mode[0] == 'e' && g_op_mode[1] == 'm'; }   // the swing under way is the strike's hard chop
 static float swing_motion(int held) {
     // The game's swing detector (f_801729E0 / f_80172D60) sums the jerk with a 0.9 decay and grades the peak:
     // (peak - 1.9) / 7 -> strength 0..5. Chest compressions want a gentle push (the soft swing, strength 0, peak
@@ -214,9 +215,9 @@ static float swing_motion(int held) {
     // wants a real thump: the hard chop winds up and stops dead, peak ~5 (strength 5), inside the +-3.4 g a real
     // Remote can report.
     static const float SOFT[] = { -0.6f, -0.2f, -0.1f, -3.6f, -3.0f, -1.8f, -1.2f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f };
-    static const float HARD[] = { 0.0f, 1.2f, 2.4f, 3.2f, -3.3f, -3.3f, -2.6f, -1.8f, -1.3f, -1.1f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f };
-    enum { N = sizeof SOFT / sizeof SOFT[0] };
-    static int was; static const float *Y = SOFT;
+    // (the hard one waits 8 reads first, like a player who holds A, sees the hands go up, then swings)
+    static const float HARD[] = { -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, 0.0f, 1.2f, 2.4f, 3.2f, -3.3f, -3.3f, -2.6f, -1.8f, -1.3f, -1.1f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f, -1.0f };
+    static int was, N = sizeof SOFT / sizeof SOFT[0]; static const float *Y = SOFT;
     if (g_swing_t < 0 && held && !was) g_swing_t = 0;
     was = held;
     if (g_swing_t < 0) return -1.f;
@@ -224,7 +225,7 @@ static float swing_motion(int held) {
         extern u64 g_strike_hint_ns; u64 host_now_ns(void);
         int hard = g_strike_hint_ns && host_now_ns() - g_strike_hint_ns < 500000000ull;
         if ((hard ? HARD : SOFT) != Y) fprintf(stderr, "[input] swing: %s\n", hard ? "hard (strike)" : "soft");
-        Y = hard ? HARD : SOFT; g_swing_hard = hard;
+        Y = hard ? HARD : SOFT; g_swing_hard = hard; N = hard ? (int)(sizeof HARD / sizeof HARD[0]) : (int)(sizeof SOFT / sizeof SOFT[0]);
     }
     float y = Y[g_swing_t++];
     if (g_swing_t >= N) { g_swing_t = held ? 0 : -1; }
@@ -406,6 +407,13 @@ void f_8025F830(CPU *c) {
         }
     }
     if (err) W32(err, 0);
+    {   // swing log: the game's swing detector (state code, strength) and the chest-strike handler's flags
+        static u32 ls, lg, lf, lc; u32 st = R32(0x80485F90u), gr = R32(0x80485FA0u), sp = R32(0x80584408u);
+        u32 fl = (sp >= 0x80000000u && sp < 0x81800000u) ? R32(sp + 460u) : 0, cnt = (sp >= 0x80000000u && sp < 0x81800000u) ? R32(sp + 476u) : 0;
+        if (g_op_mode_em() && (st != ls || (st == 3 && gr != lg) || fl != lf || cnt != lc))
+            fprintf(stderr, "[swing] read %llu: state %u strength %d | strike flags %X count %u | hold %04X t %d\n", (unsigned long long)g_reads, st, (int)gr, fl, cnt, g_hold & 0xFFFF, g_swing_t);
+        ls = st; lg = gr; lf = fl; lc = cnt;
+    }
     c->r[3] = 1;
 }
 

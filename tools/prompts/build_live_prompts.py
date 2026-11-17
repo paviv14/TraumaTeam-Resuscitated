@@ -1,4 +1,4 @@
-"""Live-prompt pictures: <out>/base/tt_<id>_<name>.(png|jpg) with blank button slots, and <out>/slots.txt
+"""Live-prompt pictures (the tutorial pictures stay the game's own; only the buttons drawn in them change): <out>/base/tt_<id>_<name>.(png|jpg) with blank button slots, and <out>/slots.txt
 (<id> x0 y0 x1 y1 <action>, coordinates 0..1). The runtime draws each slot from the player's bindings.
 
 Sources: the 15 help / speech-bubble prompts (make_prompts.PLATES), the in-text icon sheet (tutorial/button.tpx),
@@ -121,7 +121,7 @@ HAND = {"50D92CA933200A4D": [(45, 31, 65, 50, "C")]}   # endoscopy tool palette:
 n = 0
 for f in sorted(glob.glob(os.path.join(TUT, "*", "*", "tt_*.png"))):
     fn = os.path.basename(f); h = fn[3:19]
-    src = os.path.join(ERASED, fn[:-4] + ".jpg")
+    src = os.path.join(UP, "tutorial", os.path.relpath(f, TUT))   # the game's own picture (upscaled): only its button plates change
     if not os.path.exists(src): continue
     a = np.array(Image.open(f).convert("RGB")).astype(int); Hh, Ww = a.shape[:2]
     b = Image.open(src).convert("RGB"); S = b.width / Ww; d = ImageDraw.Draw(b)
@@ -185,7 +185,7 @@ for f in sorted(glob.glob(os.path.join(TUT, "*", "*", "tt_*.png"))):
     for g in group(list(small), 6):
         x0 = min(p[0] for p in g) - 1; y0 = min(p[1] for p in g) - 1; x1 = max(p[0] + p[2] for p in g) + 1; y1 = max(p[1] + p[3] for p in g) + 1
         fill(x0, y0, x1, y1, 0.15); slot(h, Ww, Hh, x0, y0, x1, y1, act_of([p[4] for p in g]))
-    if not big and h not in M.FIX:   # Remotes / Nunchuks: their bubble's button, or a new bubble where each stood
+    if not big and h not in M.FIX:   # Remotes / Nunchuks with a button in the speech bubble above them: that button
         acts = {sl.split()[5] for sl in slots[before:]}
         for m, top, cx, kind in M.find_devices(a):
             if Ww > 380 and abs(cx - Ww / 2) < 16: continue   # the ">" between the two halves of a before/after picture
@@ -197,13 +197,7 @@ for f in sorted(glob.glob(os.path.join(TUT, "*", "*", "tt_*.png"))):
                 kinds = sorted({p[4] for p in pls}, key=lambda k: "AZB".find(k) if k in "AZB" else 9) or (["Z"] if kind == "nunchuk" or "[8]" in tx else ["A"])
                 if set(kinds) == {"A", "B"} and "[8] and [4]" in tx: kinds = ["Z", "B"]
                 fill(x0, y0, x1, y1, 0.15); slot(h, Ww, Hh, x0, y0, x1, y1, act_of(kinds)); continue
-            act = ("AB" if "[3] and [4]" in tx else "Z" if "[8]" in tx or kind == "nunchuk" else "A") if cb else device_act(kind, tx)   # cb here: an OFF bubble, which stays
-            if act in acts and not cb: continue
-            acts.add(act)
-            w = 52 if act in ("AB", "ZB", "paddles", "twist", "twistn", "circle", "pointA") else 28; hh = 24
-            x0 = max(6, min(Ww - 6 - w, cx - w / 2)); y0 = min(Hh - 8 - hh, top + 4)
-            fill(x0 - 5, y0 - 4, x0 + w + 5, y0 + hh + 4, 0.45)
-            slot(h, Ww, Hh, x0, y0, x0 + w, y0 + hh, act)
+            # no button there (a motion, an OFF bubble): the picture stays as the game drew it
     for x0, y0, x1, y1, act in HAND.get(h, []):   # buttons the detectors miss
         fill(x0, y0, x1, y1, 0.5); slot(h, Ww, Hh, x0, y0, x1, y1, act)
     if len(slots) == before: continue          # nothing to show: the game's own picture stays
