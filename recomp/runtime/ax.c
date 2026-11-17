@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #define NS 96                          // samples per AX frame (3 ms at 32 kHz)
 
@@ -49,6 +50,11 @@ static u32 rd32(u32 a) { return (u32)rd16(a) << 16 | rd16(a + 2); }
 static s16 clamp16(s32 v) { return v > 32767 ? 32767 : v < -32768 ? -32768 : (s16)v; }
 
 typedef struct { u16 w[PB_WORDS]; u32 addr; } PB;
+
+#include "sinc.h"
+typedef struct { u32 addr, cur; int ratio_seen; float h[SINC_TAPS]; } VoiceHist;
+#define NHIST 1024
+static VoiceHist g_hist[NHIST];   // per voice (by PB address): its last 16 input samples
 static u32 pb32(const PB *p, int o) { return (u32)p->w[o] << 16 | p->w[o + 1]; }
 static void pbset32(PB *p, int o, u32 v) { p->w[o] = v >> 16; p->w[o + 1] = (u16)v; }
 
@@ -96,23 +102,35 @@ static s16 fetch(PB *p, int *ended) {
 static void process_voice(PB *p) {
     s32 in[NS];
     int ended = 0;
-    // resampling: ratio is 16.16 input samples per output sample; linear interpolation between the
-    // last fetched sample and the next (last_samples[3] holds the previous one across frames)
+    // resampling: ratio is 16.16 input samples per output sample. A 16-tap band-limited filter (sinc.h)
+    // over the voice's recent input; that history lives here, by PB address (the PB only holds 4 of
+    // them), and starts over when the game has moved the voice (its position isn't where we left it).
     u32 ratio = pb32(p, PB_RATIO), frac = p->w[PB_FRAC];
-    s16 prev = (s16)p->w[PB_LAST + 2], curs = (s16)p->w[PB_LAST + 3];
     if (!ratio) ratio = 0x10000;
+    VoiceHist *vh = &g_hist[(p->addr >> 5) & (NHIST - 1)];
+    if (vh->addr != p->addr || vh->cur != pb32(p, PB_CUR_ADDR) || vh->ratio_seen == 0) {
+        memset(vh, 0, sizeof *vh); vh->addr = p->addr;
+        vh->h[SINC_TAPS / 2 - 1] = (s16)p->w[PB_LAST + 2]; vh->h[SINC_TAPS / 2] = (s16)p->w[PB_LAST + 3];
+        // the linear scheme's "next" sample (LAST+3) was already fetched: keep the inputs ahead of the
+        // point filled by fetching the rest now
+        for (int k = SINC_TAPS / 2 + 1; k < SINC_TAPS; k++) vh->h[k] = ended ? 0 : fetch(p, &ended);
+    }
+    vh->ratio_seen = 1;
+    const SincTable *tab = sinc_table(ratio / 65536.0);
     for (int i = 0; i < NS; i++) {
-        if (ended) { in[i] = 0; continue; }
-        in[i] = prev + (((s32)(curs - prev) * (s32)frac) >> 16);
+        float v = sinc_apply(tab, vh->h, frac / 65536.0);
+        in[i] = (s32)lrintf(v > 32767.f ? 32767.f : v < -32768.f ? -32768.f : v);
         frac += ratio;
         while (frac >= 0x10000) {
             frac -= 0x10000;
-            prev = curs;
-            curs = ended ? 0 : fetch(p, &ended);
+            memmove(vh->h, vh->h + 1, sizeof(float) * (SINC_TAPS - 1));
+            vh->h[SINC_TAPS - 1] = ended ? 0 : fetch(p, &ended);
         }
     }
     p->w[PB_FRAC] = (u16)frac;
-    p->w[PB_LAST + 2] = (u16)prev; p->w[PB_LAST + 3] = (u16)curs;
+    p->w[PB_LAST + 2] = (u16)(s16)vh->h[SINC_TAPS / 2 - 1]; p->w[PB_LAST + 3] = (u16)(s16)vh->h[SINC_TAPS / 2];
+    vh->cur = pb32(p, PB_CUR_ADDR);
+    if (ended) vh->addr = 0;
     if (ended) p->w[PB_RUNNING] = 0;
 
     // low-pass filter: y = a0 * x + b0 * y[-1]  (a0, b0 in .15)

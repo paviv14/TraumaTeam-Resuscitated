@@ -66,6 +66,7 @@ static int g_tw, g_th;
 
 static SDL_AudioDeviceID g_audio; static int g_audio_rate, g_audio_paused, g_audio_playing;
 static u32 g_au_underruns, g_au_drops; static u64 g_au_level, g_au_samples;
+#include "sinc.h"
 static void sdl_audio_push(const s16 *lr, int frames, int rate) {
     static int failed;
     if (failed || getenv("TTPC_MUTE")) return;
@@ -88,23 +89,28 @@ static void sdl_audio_push(const s16 *lr, int frames, int rate) {
     if (queued > 250 * ms) { g_au_drops++; return; }   // far over (e.g. after a hitch): drop
     double err = ((double)queued - target) / target;    // >0: too much queued
     if (err > 1) err = 1; if (err < -1) err = -1;
-    double step = 1.0 + 0.01 * err;                     // input frames consumed per output frame (±1% at most)
-    static s16 out[2 * 8192]; static double pos; static s16 last[2];
+    static double serr; serr += 0.02 * (err - serr);    // smoothed: a steady rate, not one that jumps with each SDL buffer
+    double step = 1.0 + 0.01 * serr;                    // input frames consumed per output frame (±1% at most)
+    // band-limited interpolation (sinc.h) over the previous buffer's last frames + this buffer, so the
+    // tiny rate change adds no grit to the high notes
+    static s16 out[2 * 8192]; static float cat[2][SINC_TAPS - 1 + 8192]; static double pos = SINC_TAPS / 2 - 1;
+    int keep = SINC_TAPS - 1, len = keep + (frames > 8192 ? 8192 : frames);
+    for (int c = 0; c < 2; c++) for (int j = keep; j < len; j++) cat[c][j] = lr[2 * (j - keep) + c];
+    const SincTable *tab = sinc_table(step);
     int no = 0;
-    // linear interpolation between the previous buffer's last frame (index -1) and this buffer
     while (no < 8192) {
-        double p = pos; int i = (int)p - 1;   // pos is relative to "last" at index 0
-        if (i + 1 >= frames) break;
-        double f = p - (int)p;
+        int k = (int)pos; if (k + SINC_TAPS / 2 >= len) break;
+        double f = pos - k;
         for (int c = 0; c < 2; c++) {
-            double s0 = i < 0 ? last[c] : lr[2 * i + c], s1 = lr[2 * (i + 1) + c];
-            int v = (int)(s0 + (s1 - s0) * f);
+            float x = sinc_apply(tab, &cat[c][k - (SINC_TAPS / 2 - 1)], f);
+            int v = (int)lrintf(x > 32767.f ? 32767.f : x < -32768.f ? -32768.f : x);
             if (g_cfg.volume < 100) v = v * g_cfg.volume / 100;
             out[2 * no + c] = (s16)v;
         }
         no++; pos += step;
     }
-    pos -= frames; last[0] = lr[2 * (frames - 1)]; last[1] = lr[2 * (frames - 1) + 1];
+    pos -= len - keep;
+    for (int c = 0; c < 2; c++) memmove(cat[c], cat[c] + len - keep, sizeof(float) * (size_t)keep);
     g_au_level += queued / ms; g_au_samples++;
     SDL_QueueAudio(g_audio, out, (u32)no * 4);
     if (!g_audio_playing && queued + (u32)no * 4 >= target && !g_audio_paused) { SDL_PauseAudioDevice(g_audio, 0); g_audio_playing = 1; }
