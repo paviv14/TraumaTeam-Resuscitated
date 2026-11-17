@@ -411,7 +411,7 @@ void f_8025F830(CPU *c) {
     }
     if (err) W32(err, 0);
     {   // swing log: the game's swing detector (state code, strength) and the chest-strike handler's flags
-        static u32 ls, lg, lf, lc; u32 st = R32(0x80485F90u), gr = R32(0x80485FA0u), sp = R32(0x80584408u);
+        static u32 ls, lg, lf, lc; u32 st = R32(0x80486090u), gr = R32(0x804860A0u), sp = R32(0x80584408u);
         u32 fl = (sp >= 0x80000000u && sp < 0x81800000u) ? R32(sp + 460u) : 0, cnt = (sp >= 0x80000000u && sp < 0x81800000u) ? R32(sp + 476u) : 0;
         if (g_op_mode_em() && (st != ls || (st == 3 && gr != lg) || fl != lf || cnt != lc))
             fprintf(stderr, "[swing] read %llu: state %u strength %d | strike flags %X count %u | hold %04X t %d\n", (unsigned long long)g_reads, st, (int)gr, fl, cnt, g_hold & 0xFFFF, g_swing_t);
@@ -433,10 +433,10 @@ static int strike_armed(void) {
 void f_8000BC50(CPU *c) {   // swing detector state for a channel
     u32 ch = c->r[3];
     if (ch == 0 && g_strike_hit && g_reads - g_strike_hit <= 3) { c->r[3] = 3; return; }
-    c->r[3] = R32(0x80485F90u + (ch & 3) * 4u);
+    c->r[3] = R32(0x80486090u + (ch & 3) * 4u);
 }
 void f_8000BC70(CPU *c) {   // ...and the strength of the swing it just finished
     u32 ch = c->r[3];
     if (ch == 0 && g_strike_hit && g_reads - g_strike_hit <= 3) { g_strike_hit = 0; c->r[3] = 5; fprintf(stderr, "[input] chest strike: hard swing reported\n"); return; }
-    c->r[3] = R32(0x80485FA0u + (ch & 3) * 4u);
+    c->r[3] = R32(0x804860A0u + (ch & 3) * 4u);
 }
