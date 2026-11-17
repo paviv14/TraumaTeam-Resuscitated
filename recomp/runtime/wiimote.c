@@ -207,7 +207,9 @@ static void push_motion(int dir, u32 hold, float *acc_z) {
 // then the hard stop: a spike of several g, then settle. One press = one swing; held, it repeats.
 static int g_swing_t = -1;
 static int g_swing_hard;
-static int g_op_mode_em(void) { extern char g_op_mode[3]; return g_op_mode[0] == 'e' && g_op_mode[1] == 'm'; }   // the swing under way is the strike's hard chop
+static int g_op_mode_em(void) { extern char g_op_mode[3]; return g_op_mode[0] == 'e' && g_op_mode[1] == 'm'; }
+static u64 g_strike_hit;   // the chest strike's impact: read number (0: none pending)
+static int strike_armed(void);
 static float swing_motion(int held) {
     // The game's swing detector (f_801729E0 / f_80172D60) sums the jerk with a 0.9 decay and grades the peak:
     // (peak - 1.9) / 7 -> strength 0..5. Chest compressions want a gentle push (the soft swing, strength 0, peak
@@ -227,6 +229,7 @@ static float swing_motion(int held) {
         if ((hard ? HARD : SOFT) != Y) fprintf(stderr, "[input] swing: %s\n", hard ? "hard (strike)" : "soft");
         Y = hard ? HARD : SOFT; g_swing_hard = hard; N = hard ? (int)(sizeof HARD / sizeof HARD[0]) : (int)(sizeof SOFT / sizeof SOFT[0]);
     }
+    if (g_swing_hard && g_swing_t == 12 && strike_armed()) g_strike_hit = g_reads ? g_reads : 1;   // the chop lands
     float y = Y[g_swing_t++];
     if (g_swing_t >= N) { g_swing_t = held ? 0 : -1; }
     return y;
@@ -417,3 +420,23 @@ void f_8025F830(CPU *c) {
     c->r[3] = 1;
 }
 
+
+// ---------------------------------------------------------------- the chest strike (Maria, "Hold A and swing down")
+// The strike handler (f_80053440) raises Maria's hands while A is held, then waits for the game's swing detector
+// to report a finished swing (f_8000BC50 == 3) strong enough (f_8000BC70 > 2). With the keyboard / mouse that
+// detector does not report our swing reliably, so once the hands are up, a swing (a click while the strike prompt
+// shows, or the swing key) that reaches its impact is reported directly: state 3, strength 5.
+static int strike_armed(void) {
+    u32 sp = R32(0x80584408u);
+    return g_op_mode_em() && sp >= 0x80000000u && sp < 0x81800000u && (R32(sp + 460u) & 2u);
+}
+void f_8000BC50(CPU *c) {   // swing detector state for a channel
+    u32 ch = c->r[3];
+    if (ch == 0 && g_strike_hit && g_reads - g_strike_hit <= 3) { c->r[3] = 3; return; }
+    c->r[3] = R32(0x80485F90u + (ch & 3) * 4u);
+}
+void f_8000BC70(CPU *c) {   // ...and the strength of the swing it just finished
+    u32 ch = c->r[3];
+    if (ch == 0 && g_strike_hit && g_reads - g_strike_hit <= 3) { g_strike_hit = 0; c->r[3] = 5; fprintf(stderr, "[input] chest strike: hard swing reported\n"); return; }
+    c->r[3] = R32(0x80485FA0u + (ch & 3) * 4u);
+}
