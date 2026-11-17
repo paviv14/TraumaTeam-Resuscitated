@@ -156,6 +156,8 @@ int platform_init(void) {
                 GetStr gs = (GetStr)SDL_GL_GetProcAddress("glGetString");
                 if (gs) fprintf(stderr, "[platform] display %d (%s): OpenGL %s | %s | %s\n", disp, SDL_GetDisplayName(disp),
                                 (const char *)gs(0x1F02), (const char *)gs(0x1F00), (const char *)gs(0x1F01));   // version, vendor, renderer
+                SDL_DisplayMode dm;
+                if (SDL_GetCurrentDisplayMode(disp, &dm) == 0) fprintf(stderr, "[platform] display mode %dx%d @ %d Hz\n", dm.w, dm.h, dm.refresh_rate);
             }
             if (g_win && g_glctx && SDL_GL_GetCurrentContext() == g_glctx) {
                 SDL_GL_SetSwapInterval(0);   // the game paces itself to the 60 Hz retrace

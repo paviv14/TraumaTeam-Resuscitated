@@ -206,6 +206,7 @@ static void push_motion(int dir, u32 hold, float *acc_z) {
 // accelerometers (in g, KPAD reads the opposite of the motion) see a short drop toward free fall,
 // then the hard stop: a spike of several g, then settle. One press = one swing; held, it repeats.
 static int g_swing_t = -1;
+static int g_swing_hard;   // the swing under way is the strike's hard chop
 static float swing_motion(int held) {
     // The game's swing detector (f_801729E0 / f_80172D60) sums the jerk with a 0.9 decay and grades the peak:
     // (peak - 1.9) / 7 -> strength 0..5. Chest compressions want a gentle push (the soft swing, strength 0, peak
@@ -223,7 +224,7 @@ static float swing_motion(int held) {
         extern u64 g_strike_hint_ns; u64 host_now_ns(void);
         int hard = g_strike_hint_ns && host_now_ns() - g_strike_hint_ns < 500000000ull;
         if ((hard ? HARD : SOFT) != Y) fprintf(stderr, "[input] swing: %s\n", hard ? "hard (strike)" : "soft");
-        Y = hard ? HARD : SOFT;
+        Y = hard ? HARD : SOFT; g_swing_hard = hard;
     }
     float y = Y[g_swing_t++];
     if (g_swing_t >= N) { g_swing_t = held ? 0 : -1; }
@@ -346,7 +347,10 @@ void f_8025F830(CPU *c) {
         static int saw_t;
         if (g_cfg.saw_auto && ortho && (h & BTN_A) && !roll_dir) { roll_dir = (saw_t / 9) % 2 ? -1 : 1; saw_t++; } else saw_t = 0;   // back and forth, ~3 strokes a second
         if (g_cfg.bandage_auto && op && (h & BTN_A) && !roll_dir && !(g_cfg.saw_auto && ortho)) roll_dir = 1;          // round and round
-        if (g_cfg.swing_a == 1 && (g_swing_t >= 0 || (h & SWING_FLAG))) h |= BTN_A;                                                              // the strike holds A
+        if (g_cfg.swing_a == 1 && (g_swing_t >= 0 || (h & SWING_FLAG))) h |= BTN_A;
+        // The strike counts only if A is still held when the game grades the swing (~14 reads in, f_80053440):
+        // a click is shorter than that, so A stays held to the end of the hard chop.
+        if (g_swing_hard && g_swing_t >= 0) h |= BTN_A;                                                              // the strike holds A
     }
     float roll = roll_motion(roll_dir, h, circle_motion(g_px, g_py, g_point_valid, h));
     h &= ~(PUSH_FLAG | PULL_FLAG | SWING_FLAG | ROLL_L_FLAG | ROLL_R_FLAG);
