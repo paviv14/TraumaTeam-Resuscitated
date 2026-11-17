@@ -1185,7 +1185,7 @@ static void perf_title(void) {
     platform_set_title(b);
     static int log = -1; if (log < 0) log = getenv("TTPC_PERFLOG") != NULL;
     if (log) { double fr = frames ? frames : 1;
-        char aus[96]; platform_audio_stats(aus, sizeof aus);
+        char aus[160]; platform_audio_stats(aus, sizeof aus);
         char tps[96]; gpu_texpack_stats(tps, sizeof tps);
         fprintf(stderr, "[perf] frame %llu: %s, %.0f draws/frame, worst frame %.1f ms | %.0f prims %.0f verts | read %.1f setup %.1f xform %.1f asm %.1f gl %.1f ms | gpu %.1f ms, swap wait %.1f ms, %.0f efb copies (%.0f resized) | shaders: %.0f%% specialised, %llu built | %.1f screens of pixels | %s | %s\n", (unsigned long long)g_copies, b, g_perf_draws / fr, worst / 1e6,
                 g_pt_calls / fr, g_pt_verts / fr, g_pt_read / 1e6 / fr, g_pt_setup / 1e6 / fr, g_pt_xform / 1e6 / fr, g_pt_asm / 1e6 / fr, g_pt_gl / 1e6 / fr,

@@ -116,7 +116,9 @@ static void sdl_audio_push(const s16 *lr, int frames, int rate) {
     if (!g_audio_playing && queued + (u32)no * 4 >= target && !g_audio_paused) { SDL_PauseAudioDevice(g_audio, 0); g_audio_playing = 1; }
 }
 void platform_audio_stats(char *buf, int n) {   // for the perf log
-    snprintf(buf, (size_t)n, "audio %.0f ms queued, %u underruns, %u drops", g_au_samples ? (double)g_au_level / g_au_samples : 0.0, g_au_underruns, g_au_drops);
+    extern unsigned g_hist_restarts; static unsigned last_restarts;
+    snprintf(buf, (size_t)n, "audio %.0f ms queued, %u underruns, %u drops, %u voice starts", g_au_samples ? (double)g_au_level / g_au_samples : 0.0, g_au_underruns, g_au_drops, g_hist_restarts - last_restarts);
+    last_restarts = g_hist_restarts;
     g_au_level = g_au_samples = 0;
 }
 

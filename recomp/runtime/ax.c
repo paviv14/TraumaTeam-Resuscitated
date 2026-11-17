@@ -54,7 +54,8 @@ typedef struct { u16 w[PB_WORDS]; u32 addr; } PB;
 #include "sinc.h"
 typedef struct { u32 addr, cur; int ratio_seen; float h[SINC_TAPS]; } VoiceHist;
 #define NHIST 1024
-static VoiceHist g_hist[NHIST];   // per voice (by PB address): its last 16 input samples
+static VoiceHist g_hist[NHIST];
+unsigned g_hist_restarts;   // for the perf log   // per voice (by PB address): its last 16 input samples
 static u32 pb32(const PB *p, int o) { return (u32)p->w[o] << 16 | p->w[o + 1]; }
 static void pbset32(PB *p, int o, u32 v) { p->w[o] = v >> 16; p->w[o + 1] = (u16)v; }
 
@@ -109,6 +110,11 @@ static void process_voice(PB *p) {
     if (!ratio) ratio = 0x10000;
     VoiceHist *vh = &g_hist[(p->addr >> 5) & (NHIST - 1)];
     if (vh->addr != p->addr || vh->cur != pb32(p, PB_CUR_ADDR) || vh->ratio_seen == 0) {
+        {   static int lines; g_hist_restarts++;
+            if (vh->addr == p->addr && lines < 150) { lines++;   // the same voice, moved by the game: worth seeing
+                fprintf(stderr, "[ax] voice %08X%s restarted: left at %08X, now %08X (loop %08X end %08X, ratio %08X, last %04X %04X %04X %04X)\n", p->addr,
+                        p->w[PB_IS_STREAM] ? " stream" : "", vh->cur, pb32(p, PB_CUR_ADDR), pb32(p, PB_LOOP_ADDR), pb32(p, PB_END_ADDR), ratio,
+                        p->w[PB_LAST], p->w[PB_LAST + 1], p->w[PB_LAST + 2], p->w[PB_LAST + 3]); } }
         memset(vh, 0, sizeof *vh); vh->addr = p->addr;
         vh->h[SINC_TAPS / 2 - 1] = (s16)p->w[PB_LAST + 2]; vh->h[SINC_TAPS / 2] = (s16)p->w[PB_LAST + 3];
         // the linear scheme's "next" sample (LAST+3) was already fetched: keep the inputs ahead of the
