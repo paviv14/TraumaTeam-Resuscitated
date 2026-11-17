@@ -326,10 +326,11 @@ static RTex *g_rt; static int g_nrt;
 static u32 g_frame_no; static long long g_rt_bytes, g_up_left;
 u64 g_pf_tp_uploads, g_pf_tp_upbytes, g_tex_up_ns;
 #define UP_PER_FRAME (6ll << 20)
-static int g_pend[32], g_npend;
+static int g_pend[32], g_npend, g_band_off, g_band_checked;
 static int upload_some(RTex *r) {   // next bands of a pending image, within this frame's allowance; 1 when complete
     TPImage *im = r->pend; if (!im) return 1;
     u64 t0 = host_now_ns();
+    if (!g_band_checked) while (glGetError_() != 0) {}
     glBindTexture_(GL_TEXTURE_2D, r->tex);
     GLenum cf = im->compressed == 2 ? 0x83F1 /* DXT1 */ : 0x83F3 /* DXT5 */;
     while (r->lvl < im->nlevels && g_up_left > 0) {
@@ -347,6 +348,19 @@ static int upload_some(RTex *r) {   // next bands of a pending image, within thi
             g_up_left -= n * rowb; r->row += n;
         }
         if (r->row >= h) { r->lvl++; r->row = 0; }
+    }
+    if (!g_band_checked) {   // a driver that refuses bands: upload whole levels from now on (and redo this one)
+        g_band_checked = 1;
+        if (glGetError_() != 0) {
+            g_band_off = 1; fprintf(stderr, "[texpack] this driver refuses partial texture uploads: uploading whole images\n");
+            int w = im->w, h = im->h;
+            for (int l = 0; l < im->nlevels; l++) {
+                if (im->compressed) glCompressedTexImage2D_(GL_TEXTURE_2D, l, cf, w, h, 0, (GLsizei)im->size[l], im->data[l]);
+                else glTexImage2D_(GL_TEXTURE_2D, l, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, im->data[l]);
+                w = w > 1 ? w / 2 : 1; h = h > 1 ? h / 2 : 1;
+            }
+            r->lvl = im->nlevels;
+        }
     }
     g_tex_up_ns += host_now_ns() - t0;
     if (r->lvl < im->nlevels) return 0;
@@ -367,14 +381,21 @@ static GLuint repl_texture(int id, int var) {
     if (!im) return 0;
     u64 t0 = host_now_ns();
     glGenTextures_(1, &r->tex); glBindTexture_(GL_TEXTURE_2D, r->tex);
-    int w = im->w, h = im->h;
-    for (int l = 0; l < im->nlevels; l++) {   // storage for every level; the pixels follow in bands
-        glTexImage2D_(GL_TEXTURE_2D, l, im->compressed ? (im->compressed == 2 ? 0x83F1 : 0x83F3) : GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    int w = im->w, h = im->h, whole = (long long)im->bytes <= (1ll << 20) || g_band_off;
+    GLenum cf = im->compressed == 2 ? 0x83F1 /* DXT1 */ : 0x83F3 /* DXT5 */;
+    // Small images (button prompts, most of the pack) go up whole, as before. Big ones get storage for every
+    // level first (allocated the same way the pixels arrive: compressed storage for compressed images; some
+    // AMD drivers reject compressed bands into storage made by glTexImage2D) and their pixels follow in bands.
+    for (int l = 0; l < im->nlevels; l++) {
+        const void *px = whole ? im->data[l] : NULL;
+        if (im->compressed) glCompressedTexImage2D_(GL_TEXTURE_2D, l, cf, w, h, 0, (GLsizei)im->size[l], px);
+        else glTexImage2D_(GL_TEXTURE_2D, l, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
         w = w > 1 ? w / 2 : 1; h = h > 1 ? h / 2 : 1;
     }
     glTexParameteri_(GL_TEXTURE_2D, 0x813D /* GL_TEXTURE_MAX_LEVEL */, im->nlevels - 1);
     g_tex_up_ns += host_now_ns() - t0;
     r->bytes = (u32)im->bytes; r->last = g_frame_no; g_rt_bytes += (long long)im->bytes;
+    if (whole) { g_up_left -= (long long)im->bytes; g_pf_tp_uploads++; g_pf_tp_upbytes += im->bytes; texpack_free_image(im); return r->tex; }
     r->pend = im; r->lvl = 0; r->row = 0;
     if (upload_some(r)) return r->tex;
     g_pend[g_npend++] = i;
