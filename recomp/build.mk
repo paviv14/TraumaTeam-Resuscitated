@@ -41,7 +41,7 @@ RTFLAGS += -DTTPC_SDL $(SDL_CFLAGS)
 LIBS += $(SDL_LIBS)
 endif
 
-CFLAGS ?= -O1 -g0 -fno-strict-aliasing -fwrapv -w -Iruntime
+CFLAGS ?= -O2 -g0 -fno-strict-aliasing -fwrapv -w -Iruntime
 RTCFLAGS := -O2 -g -Wall -Wno-unused -Wno-misleading-indentation -fno-strict-aliasing -fwrapv -Iruntime $(RTFLAGS) $(EXTRA)
 RUNTIME := port runtime hle ios threads dsp ax gx disc video gl texpack platform wiimote menu vr forensics motion wiimote_hid speaker tuttext lang
 GEN := $(wildcard ../generated/*.c)
