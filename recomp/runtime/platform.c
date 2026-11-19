@@ -84,9 +84,19 @@ static void sdl_audio_push(const s16 *lr, int frames, int rate) {
     // sound by the PC's clock and the sound card plays it by its own, so the queue would slowly drain
     // or overfill (a click each time it hits a limit). Instead the sound is resampled by up to ±1%
     // (inaudible) to hold the queue at its target. Playback (re)starts once the cushion is there.
-    u32 ms = (u32)rate * 4 / 1000, queued = SDL_GetQueuedAudioSize(g_audio), target = 60 * ms;
-    if (g_audio_playing && queued == 0) { SDL_PauseAudioDevice(g_audio, 1); g_audio_playing = 0; g_au_underruns++; }
-    if (queued > 250 * ms) { g_au_drops++; return; }   // far over (e.g. after a hitch): drop
+    // The cushion grows when it runs dry (some PCs stall now and then: V-Sync over a virtual or
+    // streamed display, a slow frame) and shrinks back after a quiet minute.
+    static u32 cushion = 60, quiet_since, last_push;
+    u32 now = SDL_GetTicks(), gap = now - last_push; last_push = now;
+    u32 ms = (u32)rate * 4 / 1000, queued = SDL_GetQueuedAudioSize(g_audio);
+    if (g_audio_playing && queued == 0) {
+        SDL_PauseAudioDevice(g_audio, 1); g_audio_playing = 0; g_au_underruns++;
+        // a short stall a bigger cushion would have covered (not a load screen)
+        if (cushion < 150 && gap < 250) { cushion += 30; fprintf(stderr, "[audio] ran dry: cushion now %u ms\n", cushion); }
+        quiet_since = now;
+    } else if (cushion > 60 && now - quiet_since > 60000) { cushion -= 10; quiet_since = now; }
+    u32 target = cushion * ms;
+    if (queued > (cushion + 190) * ms) { g_au_drops++; return; }   // far over (e.g. after a hitch): drop
     double err = ((double)queued - target) / target;    // >0: too much queued
     if (err > 1) err = 1; if (err < -1) err = -1;
     static double serr; serr += 0.02 * (err - serr);    // smoothed: a steady rate, not one that jumps with each SDL buffer
